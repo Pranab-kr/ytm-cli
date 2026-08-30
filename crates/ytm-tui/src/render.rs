@@ -3,10 +3,11 @@
 //! tiny terminal is how a TUI panics and loses the user's session.
 
 use crate::{
-    app::{AppState, Pane},
+    app::{AppState, Modal, Pane},
+    keymap::KeyMap,
     theme::Theme,
     util::text::truncate_to_width,
-    widgets::{nowplaying, playlists, queue, search, sidebar, tracklist},
+    widgets::{help, nowplaying, playlists, queue, search, sidebar, toast, tracklist},
 };
 use ratatui::{
     Frame,
@@ -20,7 +21,7 @@ use ratatui::{
 const SIDEBAR_WIDTH: u16 = 22;
 const NOWPLAYING_HEIGHT: u16 = 3;
 
-pub fn render(f: &mut Frame, s: &AppState, t: &Theme) {
+pub fn render(f: &mut Frame, s: &AppState, t: &Theme, km: &KeyMap) {
     let area = f.area();
     if area.width == 0 || area.height == 0 {
         return;
@@ -43,9 +44,14 @@ pub fn render(f: &mut Frame, s: &AppState, t: &Theme) {
     sidebar::draw(f, cols[0], s, t);
     draw_rule(f, cols[1], t);
     draw_main(f, cols[2], s, t);
-
-    // Modals and toasts overlay everything, so they go last (Tasks 27, 29).
     nowplaying::draw(f, rows[1], s, t);
+
+    // Overlays go last, over everything they describe.
+    // The prompt and confirm modals arrive in Task 29.
+    if let Some(Modal::Help) = &s.modal {
+        help::draw(f, area, km, t);
+    }
+    toast::draw(f, area, s, t);
 }
 
 /// A single dim vertical rule between sidebar and main. No heavy boxes.
@@ -84,6 +90,8 @@ fn draw_main(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
         ))),
         rows[0],
     );
+    // Top-right of the heading row: tied to the pane whose data is loading.
+    toast::draw_spinner(f, rows[0], s, t);
 
     match s.pane {
         // An open playlist shows its tracks; the list of playlists otherwise.

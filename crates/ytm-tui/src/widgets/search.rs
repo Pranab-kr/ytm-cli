@@ -93,7 +93,8 @@ mod tests {
     fn text_of(s: &AppState) -> String {
         let mut t = Terminal::new(TestBackend::new(80, 20)).unwrap();
         let theme = Theme::default();
-        t.draw(|f| crate::render::render(f, s, &theme)).unwrap();
+        t.draw(|f| crate::render::render(f, s, &theme, &crate::keymap::KeyMap::default()))
+            .unwrap();
         t.backend()
             .buffer()
             .content()
@@ -160,7 +161,8 @@ mod tests {
         };
         let mut t = Terminal::new(TestBackend::new(40, 12)).unwrap();
         let theme = Theme::default();
-        t.draw(|f| crate::render::render(f, &s, &theme)).unwrap();
+        t.draw(|f| crate::render::render(f, &s, &theme, &crate::keymap::KeyMap::default()))
+            .unwrap();
         // Row 1 of the main pane is the query row; it must stay one row.
         assert!(text_of(&s).contains("Search:"));
     }

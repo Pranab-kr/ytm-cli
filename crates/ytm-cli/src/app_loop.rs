@@ -208,7 +208,7 @@ pub async fn run(
     let mut debounce = SearchDebounce::default();
 
     // Paint immediately, then load — NFR-1 depends on not awaiting first.
-    terminal.draw(|f| ytm_tui::render::render(f, &state, &theme))?;
+    terminal.draw(|f| ytm_tui::render::render(f, &state, &theme, &keymap))?;
     state.loading = true;
     spawn_task(Task::LoadPlaylists, source.clone(), app_tx.clone());
 
@@ -255,7 +255,7 @@ pub async fn run(
             }
         }
 
-        terminal.draw(|f| ytm_tui::render::render(f, &state, &theme))?;
+        terminal.draw(|f| ytm_tui::render::render(f, &state, &theme, &keymap))?;
 
         if state.should_quit {
             send(&player, PlayerCommand::Shutdown);
