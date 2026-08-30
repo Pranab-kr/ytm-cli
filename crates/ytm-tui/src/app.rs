@@ -177,11 +177,19 @@ impl AppState {
     }
 
     fn apply_input(&mut self, a: InputAction) {
-        // A modal owns the keyboard while it is open.
-        if self.modal.is_some() {
-            match a {
-                InputAction::Cancel => self.modal = None,
-                InputAction::Quit => self.should_quit = true,
+        // A modal owns the keyboard while it is open. Note `Quit` is absent:
+        // inside a prompt the keymap resolves `q` to `Char('q')`, and a confirm
+        // must be answered or cancelled rather than quit out of.
+        if let Some(modal) = self.modal.as_mut() {
+            match (modal, a) {
+                (_, InputAction::Cancel) => self.modal = None,
+                (Modal::Prompt { value, .. }, InputAction::Char(c)) => value.push(c),
+                // pop() removes a whole char — byte slicing would panic on
+                // multibyte input.
+                (Modal::Prompt { value, .. }, InputAction::Backspace) => {
+                    value.pop();
+                }
+                // Submission is the loop's job: it owns the API calls.
                 _ => {}
             }
             return;

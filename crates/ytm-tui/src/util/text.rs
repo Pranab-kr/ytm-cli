@@ -44,6 +44,26 @@ pub fn pad_to_width(s: &str, width: usize) -> String {
     out
 }
 
+/// Keep the **end** of a string within `width` columns. `truncate_to_width`
+/// keeps the start, which would hide the characters just typed.
+pub fn tail_to_width(s: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    if width == 0 {
+        return String::new();
+    }
+    let mut used = 0usize;
+    let mut take_from = s.len();
+    for (i, c) in s.char_indices().rev() {
+        let cw = c.width().unwrap_or(0);
+        if used + cw > width {
+            break;
+        }
+        used += cw;
+        take_from = i;
+    }
+    s[take_from..].to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

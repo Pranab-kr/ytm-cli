@@ -3,7 +3,7 @@
 use crate::{
     app::{AppState, Focus},
     theme::Theme,
-    util::text::truncate_to_width,
+    util::text::{tail_to_width, truncate_to_width},
 };
 use ratatui::{
     Frame,
@@ -48,26 +48,6 @@ pub fn draw_input(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     }
 
     f.render_widget(Paragraph::new(Line::from(spans)), area);
-}
-
-/// Keep the **end** of a string within `width` columns. `truncate_to_width`
-/// keeps the start, which would hide the characters just typed.
-fn tail_to_width(s: &str, width: usize) -> String {
-    use unicode_width::UnicodeWidthChar;
-    if width == 0 {
-        return String::new();
-    }
-    let mut used = 0usize;
-    let mut take_from = s.len();
-    for (i, c) in s.char_indices().rev() {
-        let cw = c.width().unwrap_or(0);
-        if used + cw > width {
-            break;
-        }
-        used += cw;
-        take_from = i;
-    }
-    s[take_from..].to_owned()
 }
 
 /// Shown when a query returned nothing, to distinguish it from "not searched

@@ -7,7 +7,7 @@ use crate::{
     keymap::KeyMap,
     theme::Theme,
     util::text::truncate_to_width,
-    widgets::{help, nowplaying, playlists, queue, search, sidebar, toast, tracklist},
+    widgets::{help, modal, nowplaying, playlists, queue, search, sidebar, toast, tracklist},
 };
 use ratatui::{
     Frame,
@@ -47,9 +47,11 @@ pub fn render(f: &mut Frame, s: &AppState, t: &Theme, km: &KeyMap) {
     nowplaying::draw(f, rows[1], s, t);
 
     // Overlays go last, over everything they describe.
-    // The prompt and confirm modals arrive in Task 29.
+    // The login modal belongs to the auth pane (Task 33).
     if let Some(Modal::Help) = &s.modal {
         help::draw(f, area, km, t);
+    } else {
+        modal::draw(f, area, s, t);
     }
     toast::draw(f, area, s, t);
 }
