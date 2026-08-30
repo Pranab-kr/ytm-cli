@@ -2,6 +2,7 @@
 pub mod app;
 pub mod event;
 pub mod keymap;
+pub mod mutation;
 pub mod render;
 pub mod search_state;
 pub mod theme;

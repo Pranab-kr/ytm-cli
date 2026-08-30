@@ -1,6 +1,7 @@
 //! The single source of truth. Owned by the event loop — no locks, no sharing.
 
 use crate::event::{AppEvent, InputAction};
+use crate::mutation::{Mutation, MutationLog};
 use std::collections::HashSet;
 use ytm_core::*;
 use ytm_player::player::{PlaybackState, PlayerEvent, RepeatMode};
@@ -105,6 +106,8 @@ pub struct AppState {
     pub queue: Vec<Track>,
     pub queue_current: Option<usize>,
 
+    /// Edits applied locally that the server has not confirmed yet (FR-C6).
+    pub pending: MutationLog,
     pub loading: bool,
     pub toasts: Vec<Toast>,
     pub modal: Option<Modal>,
@@ -151,11 +154,14 @@ impl AppState {
                 }
             }
 
-            AppEvent::MutationOk { message, .. } => {
+            AppEvent::MutationOk { token, message } => {
+                // The real id for a create arrives via PlaylistsLoaded on the
+                // next refresh; nothing here needs it.
+                self.commit(token, None);
                 self.push_toast(ToastKind::Success, &message, self.elapsed_ms);
             }
-            AppEvent::MutationFailed { message, .. } => {
-                // Rollback itself is wired in Task 28.
+            AppEvent::MutationFailed { token, message } => {
+                self.rollback(token);
                 self.push_toast(ToastKind::Error, &message, self.elapsed_ms);
             }
 
@@ -290,6 +296,75 @@ impl AppState {
     pub fn expire_toasts(&mut self, now_ms: u64) {
         self.toasts
             .retain(|t| now_ms.saturating_sub(t.born_ms) < TOAST_TTL_MS);
+    }
+
+    /// Apply the edit to local state right now and return its token.
+    ///
+    /// The point of FR-C6 is that the list changes under the user's hands
+    /// instead of after a round trip, so this never waits for the network.
+    pub fn begin_mutation(&mut self, m: Mutation) -> u64 {
+        let token = self.pending.next_token();
+        match &m {
+            Mutation::CreatePlaylist { temp } => self.playlists.push(temp.clone()),
+            Mutation::RenamePlaylist { id, next, .. } => {
+                if let Some(p) = self.playlists.iter_mut().find(|p| &p.id == id) {
+                    p.title = next.clone();
+                }
+            }
+            Mutation::DeletePlaylist { id, .. } => self.playlists.retain(|p| &p.id != id),
+            // Nothing local to show: the tracks were added to a playlist that
+            // is not necessarily the one on screen.
+            Mutation::AddTracks { .. } => {}
+            Mutation::RemoveTracks { removed, .. } => {
+                let drop: Vec<_> = removed.iter().map(|(_, t)| t.video_id.clone()).collect();
+                self.tracks.retain(|t| !drop.contains(&t.video_id));
+            }
+        }
+        self.pending.insert(token, m);
+        token
+    }
+
+    /// The server accepted it. For a create, swap the temp id for the real one.
+    pub fn commit(&mut self, token: u64, real_id: Option<PlaylistId>) {
+        if let Some(Mutation::CreatePlaylist { temp }) = self.pending.take(token)
+            && let Some(real) = real_id
+            && let Some(p) = self.playlists.iter_mut().find(|p| p.id == temp.id)
+        {
+            p.id = real;
+        }
+    }
+
+    /// The server rejected it. Undo exactly this edit.
+    ///
+    /// Keyed by token, not "the last change": with two edits in flight the
+    /// responses can arrive in either order, and reverting the newest would
+    /// discard an edit that actually succeeded.
+    pub fn rollback(&mut self, token: u64) {
+        let Some(m) = self.pending.take(token) else {
+            return;
+        };
+        match m {
+            Mutation::CreatePlaylist { temp } => self.playlists.retain(|p| p.id != temp.id),
+            Mutation::RenamePlaylist { id, previous, .. } => {
+                if let Some(p) = self.playlists.iter_mut().find(|p| p.id == id) {
+                    p.title = previous;
+                }
+            }
+            Mutation::DeletePlaylist {
+                index, snapshot, ..
+            } => {
+                let at = index.min(self.playlists.len());
+                self.playlists.insert(at, snapshot);
+            }
+            Mutation::AddTracks { .. } => {}
+            Mutation::RemoveTracks { removed, .. } => {
+                // Ascending order so each insert lands at its original index.
+                for (idx, track) in removed {
+                    let at = idx.min(self.tracks.len());
+                    self.tracks.insert(at, track);
+                }
+            }
+        }
     }
 
     pub fn selected_track(&self) -> Option<&Track> {
