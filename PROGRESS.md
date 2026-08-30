@@ -3,27 +3,40 @@
 **Read this first. Update it before you stop.** It is the handoff between agents.
 
 Last updated: 2026-08-30 by the implementation agent
-Current phase: **Phase 3 — done except Task 9's live gate**
-Next action: **Task 13** — queue logic. Tasks 1-12 are committed and green.
+Current phase: **Phase 4 — done. Tasks 1-16 committed and green.**
+Next action: **Task 17** — unicode-safe text helpers (start of Phase 5, the TUI).
 Blocked on the owner: Gate 1 (see "Manual steps") needs OAuth credentials.
+Tasks 17-18 are pure helpers with no API dependency and are safe to do first,
+but do not build browse/library UI on an unproven API — see the note below.
 
 ---
 
 ## Where things stand
 
-Tasks 1-12 are implemented, committed, and pass `./scripts/check.sh`. That is
-Phases 0-3 apart from Task 9's live-API gate, which needs the owner's Google
-account.
+Tasks 1-16 are implemented, committed, and pass `./scripts/check.sh`. Phases 0,
+1, 3, and 4 are complete. Phase 2's code is complete but its live gate is not
+run.
 
-**Gate 2 (real audio) is GREEN** — the owner confirmed hearing music on
-2026-08-30 via `cargo run -p ytm-player --example play_spike`. mpv advanced the
-clock to 9s of a 213s track and emitted `PlaybackRestart`.
+**Gate 2 (real audio) is GREEN.** The owner confirmed hearing music twice on
+2026-08-30: once through the raw `MpvHandle`, and again through the full player
+actor. The actor run also proved the queue path — it played track 1, reported 31
+progress events at ~4Hz, honoured `Next`, and moved to track 2.
 
 **Gate 1 (live API) is still untested** — no OAuth client exists yet. The code
 is written and the two examples are ready to run; see "Manual steps".
 
-The next agent starts at Task 13. Do not start Phase 5 (TUI) until Gate 1 is
-green — that is the rule in CLAUDE.md and it still applies.
+**On starting Phase 5 with Gate 1 red.** CLAUDE.md says do not write TUI code
+before both gates are green, and that rule stands for anything that renders
+account data. Tasks 17 (unicode truncation) and 18 (theme) are pure functions
+with no `MusicSource` involvement, so they cannot be invalidated by an auth
+failure. Everything from Task 19 (`AppState`) onward assumes the shapes
+`YtMusicSource` returns, so a Gate 1 failure that forces the cookie fallback —
+or reveals a different response shape — would mean reworking it. Prefer getting
+Gate 1 green first.
+
+All ignored tests pass on this machine (`cargo test --workspace -- --ignored`):
+keyring round-trip against the live Secret Service, live yt-dlp resolution, and
+mpv audio-only init.
 
 ---
 
@@ -49,7 +62,7 @@ guessing, and re-verify against the vendored source if a call does not compile.
 | 1 — Core models | 3–5 | ✅ done | Models, `MusicSource` trait, `MockSource` |
 | 2 — Auth ⚠️ | 6–9 | 🟡 code done, gate untested | OAuth login, keyring, live library fetch |
 | 3 — Audio ⚠️ | 10–12 | ✅ done, gate GREEN | yt-dlp resolver, mpv plays a real track |
-| 4 — Player | 13–16 | ⬜ not started | Actor thread, queue, transport |
+| 4 — Player | 13–16 | ✅ done | Actor thread, queue, transport |
 | 5 — TUI shell | 17–21 | ⬜ not started | Event loop, sidebar, now-playing bar |
 | 6 — Browse | 22–25 | ⬜ not started | Lists, search with debounce |
 | 7 — Queue UI | 26–27 | ⬜ not started | Queue view, toasts, help |
@@ -128,10 +141,12 @@ it here as a known limitation rather than fighting it.
 Fill in during Task 38. Mark a requirement done only after pressing the keys
 in the running app — not because the code looks right.
 
-**Auth:** A1 ⬜ A2 ⬜ A3 ⬜ A4 ⬜ A5 ⬜ A6 ⬜
+**Auth:** A1 ⬜ A2 ⬜ A3 ⬜ A4 ⬜ A5 ⬜ A6 ⬜  (all pending Gate 1)
 **Browse:** B1 ⬜ B2 ⬜ B3 ⬜ B4 ⬜ B5 ⬜
 **Search:** S1 ⬜ S2 ⬜ S3 ⬜
 **Playback:** P1 ⬜ P2 ⬜ P3 ⬜ P4 ⬜ P5 ⬜ P6 ⬜ P7 ⬜
+  (code + actor spike done for all seven; P1/P7 observed working in the spike.
+   Mark them only after pressing keys in the running app, per the rule above.)
 **Queue:** Q1 ⬜ Q2 ⬜ Q3 ⬜
 **CRUD:** C1 ⬜ C2 ⬜ C3 ⬜ C4 ⬜ C5 ⬜ C6 ⬜
 **UX:** U1 ⬜ U2 ⬜ U3 ⬜ U4 ⬜ U5 ⬜ U6 ⬜ U7 ⬜
@@ -268,3 +283,45 @@ gate-clean. Do not chain the gate with `&&`.
 Left undone and why: Task 9 steps 1 and 7 need the owner's Google account. The
 `login_spike` and `dump_playlists` examples are written, compile, and are ready
 to run — see "Manual steps" for exact commands.
+
+### 2026-08-30 — implementation agent (Tasks 13-16, Phase 4)
+
+**Phase 4 complete.** Queue logic, the player actor, and `MockPlayer`. Four more
+commits, gate green on each.
+
+- **Task 13** — `Queue`: 15 tests, all passing, including the index-tracking
+  cases around `remove` and `move_item` that the plan flagged as most likely to
+  break. Verified `rand` 0.9's API (`rand::rng()`, `rand::seq::SliceRandom`) in
+  the vendored source before using it. One fix to the plan's code: its `remove`
+  kept the saved unshuffled order in sync via a `position()` predicate that
+  scanned for a track missing from `items` — wrong when a track appears twice.
+  Now it removes by the id actually removed.
+- **Task 14** — the actor. Restructured the plan's ten-argument helper functions
+  into an `Actor` struct so the borrow checker and the reader both cope. Verified
+  end-to-end: 31 progress events at ~4Hz, `Next` honoured, second track started,
+  owner heard audio.
+- **Task 15** — `MockPlayer`, 3 tests. Gated behind `mock` like `MockSource`.
+- **Task 16** — this entry, plus `cargo test --workspace -- --ignored` green.
+
+**One real plan bug, worth reading before touching the actor.** The plan detects
+the FR-P6 stale-URL 403 via `Event::LogMessage`. That branch could never fire:
+mpv only emits log messages after `mpv_request_log_messages`, and **libmpv2 6.0.0
+exposes no wrapper for it** — `src/mpv.rs:359` mentions it as "(unimplemented)".
+So the 403 arrives as `EndFile` with the ERROR reason instead, and that is where
+the retry now lives. If a future libmpv2 adds the wrapper, `LogMessage` becomes
+the more precise signal and `is_stale_url_error` is already written for it.
+
+**Second verified-source trap in the same area.** `EndFileReason` is **not** a
+Rust enum — libmpv2 re-exports it as `libmpv2_sys::mpv_end_file_reason`, a
+`c_uint` alias with integer constants (EOF=0, STOP=2, QUIT=3, ERROR=4,
+REDIRECT=5). `map_end_reason` therefore matches by value against the `libmpv2-sys`
+constants, and has its own test so a constant changing upstream fails loudly.
+Unknown values map to `Error`, never `Eof`: guessing "clean finish" would silently
+skip a track. This added `libmpv2-sys = "4.0.1"` to `ytm-player` — a transitive
+dep of libmpv2 already, now direct, and the only way to name those constants.
+
+Note for Task 26 (queue UI): `PlayerCommand::PlayNow` currently inserts after the
+current track and steps onto it, so the queue grows rather than being replaced.
+That matches "replacing whatever is playing" for audio purposes but leaves
+history in the queue. If the queue view should show something else, that is a UI
+decision, not an actor bug.
