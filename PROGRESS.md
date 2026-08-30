@@ -105,6 +105,19 @@ Settled with the owner on 2026-08-30. Reopening these wastes a turn.
 
 - **Auth:** OAuth device-code is primary, browser-cookie is a first-class
   fallback. Both behind `MusicSource`.
+- **OAuth client:** owned by `pranabm406@gmail.com`; the authorizing/library
+  account is `ashtami009@gmail.com`, added as a test user. Owner and test user
+  differing is fine — test-user membership is what grants access in Testing mode.
+  Scope granted: `https://www.googleapis.com/auth/youtube` (write access; the
+  read-only scope cannot satisfy FR-C1..C6).
+- **7-day token expiry is expected, not a bug.** While the consent screen is in
+  "Testing" with user type "External", Google expires refresh tokens after 7
+  days, so `login_spike` must be re-run about weekly. FR-A2 holds for 7 days at a
+  stretch, not indefinitely. `SourceError::TokenRefreshFailed` and
+  `OAuthError::TimedOut` are the errors to expect when it lapses — treat them as
+  "re-authorize", not as a code defect. Clicking "Publish app" would lift the cap
+  but likely triggers Google verification for the sensitive scope; the owner
+  decided that is not worth it for a personal tool.
 - **Playback:** mpv via `libmpv2` only. No rodio/symphonia fallback — Opus
   decode in Symphonia is the known weak spot and mpv is already installed.
 - **Scope:** full app, all 9 phases. Not an MVP.
