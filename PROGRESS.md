@@ -3,36 +3,39 @@
 **Read this first. Update it before you stop.** It is the handoff between agents.
 
 Last updated: 2026-08-30 by the implementation agent
-Current phase: **Phase 4 — done. Tasks 1-16 committed and green.**
-Next action: **Task 17** — unicode-safe text helpers (start of Phase 5, the TUI).
-Blocked on the owner: Gate 1 (see "Manual steps") needs OAuth credentials.
-Tasks 17-18 are pure helpers with no API dependency and are safe to do first,
-but do not build browse/library UI on an unproven API — see the note below.
+Current phase: **Phase 5 in progress. Tasks 1-19 committed and green.**
+Next action: **Task 20** — keymap.
+Blocked on the owner: nothing. **Both gates are GREEN.**
+
+Cookie auth is the live auth path. The cookie file expires (see "Cookie
+expiry" below) — when the library reads empty, re-export it before assuming a
+code bug.
 
 ---
 
 ## Where things stand
 
-Tasks 1-16 are implemented, committed, and pass `./scripts/check.sh`. Phases 0,
-1, 3, and 4 are complete. Phase 2's code is complete but its live gate is not
-run.
+Tasks 1-19 are implemented, committed, and pass `./scripts/check.sh`. Phases 0-4
+are complete. Phase 5 has started.
 
 **Gate 2 (real audio) is GREEN.** The owner confirmed hearing music twice on
 2026-08-30: once through the raw `MpvHandle`, and again through the full player
 actor. The actor run also proved the queue path — it played track 1, reported 31
 progress events at ~4Hz, honoured `Next`, and moved to track 2.
 
-**Gate 1 (live API) is still untested** — no OAuth client exists yet. The code
-is written and the two examples are ready to run; see "Manual steps".
+**Gate 1 (live API) is GREEN** as of 2026-08-30, via browser-cookie auth. The
+owner exported cookies and `dump_playlists` printed 10 real playlist titles with
+track counts (Eng_songs 87, Funk 90, bengali 61, AFTER EFFECTS TRANSITIONS 400).
+Verified twice by two different runs. That exercises the full path: cookie auth
+-> InnerTube -> `ytmapi-rs` -> `mapping::playlist_from_library` -> our `Playlist`.
+The OAuth path stays broken for external reasons (Open question 3) and is left in
+place unchanged.
 
-**On starting Phase 5 with Gate 1 red.** CLAUDE.md says do not write TUI code
-before both gates are green, and that rule stands for anything that renders
-account data. Tasks 17 (unicode truncation) and 18 (theme) are pure functions
-with no `MusicSource` involvement, so they cannot be invalidated by an auth
-failure. Everything from Task 19 (`AppState`) onward assumes the shapes
-`YtMusicSource` returns, so a Gate 1 failure that forces the cookie fallback —
-or reveals a different response shape — would mean reworking it. Prefer getting
-Gate 1 green first.
+**Phase 5 is now cleared to proceed.** The CLAUDE.md rule (no TUI code before
+both gates are green) is satisfied: Gate 1 green via cookie auth, Gate 2 green
+via real audio. Tasks 17-18 were done while Gate 1 was red because they are pure
+functions; Task 19 onward was deliberately held until the gate passed, and is now
+unblocked.
 
 All ignored tests pass on this machine (`cargo test --workspace -- --ignored`):
 keyring round-trip against the live Secret Service, live yt-dlp resolution, and
@@ -60,10 +63,10 @@ guessing, and re-verify against the vendored source if a call does not compile.
 |---|---|---|---|
 | 0 — Workspace | 1–2 | ✅ done | Cargo workspace builds, gate script, logging, terminal guard |
 | 1 — Core models | 3–5 | ✅ done | Models, `MusicSource` trait, `MockSource` |
-| 2 — Auth ⚠️ | 6–9 | 🟡 code done, gate untested | OAuth login, keyring, live library fetch |
+| 2 — Auth ⚠️ | 6–9 | ✅ done, gate GREEN (cookie) | OAuth login, keyring, live library fetch |
 | 3 — Audio ⚠️ | 10–12 | ✅ done, gate GREEN | yt-dlp resolver, mpv plays a real track |
 | 4 — Player | 13–16 | ✅ done | Actor thread, queue, transport |
-| 5 — TUI shell | 17–21 | ⬜ not started | Event loop, sidebar, now-playing bar |
+| 5 — TUI shell | 17–21 | 🟡 in progress (17-19 done) | Event loop, sidebar, now-playing bar |
 | 6 — Browse | 22–25 | ⬜ not started | Lists, search with debounce |
 | 7 — Queue UI | 26–27 | ⬜ not started | Queue view, toasts, help |
 | 8 — CRUD | 28–32 | ⬜ not started | Playlist create/rename/delete, add/remove tracks |
@@ -85,16 +88,16 @@ print to the terminal. Proves `ytmapi-rs` + auth works.
 **Gate 2 — Task 12, Step 6.** Audio comes out of the speakers via
 yt-dlp → mpv. Proves the playback path works.
 
-Do not write TUI code before both are green. If either fails, the failure is
-external (Google changed something, yt-dlp needs updating, OAuth client
-rejected) — record the exact error here and try the documented fallback
-before building anything on top.
+Both are green as of 2026-08-30, so TUI work is cleared. The rule still applies
+to any *future* regression: if a gate goes red, the cause is usually external
+(Google changed something, yt-dlp needs updating, cookies expired) — record the
+exact error here and try the documented fallback before building on top.
 
 ### Gate results
 
 | Gate | Status | Notes |
 |---|---|---|
-| 1 — live API | ⛔ **FAILED — external cause** | OAuth login itself succeeds (token stored, keyring round-trip OK, correct scope). But **InnerTube rejects the OAuth token**: `POST music.youtube.com/youtubei/v1/browse` returns `400 INVALID_ARGUMENT`. The same token succeeds on the official Data API v3, which returned the owner's 5 real playlists — so the token is valid and the failure is Google-side, not ours. Full diagnosis below. |
+| 1 — live API | ✅ **GREEN 2026-08-30 (cookie auth)** | `dump_playlists` printed 10 real playlist titles + track counts via `auth: browser cookie`. Proves cookie auth -> InnerTube -> `ytmapi-rs` -> `mapping` -> `Playlist`. The **OAuth** path remains broken for external reasons: InnerTube returns `400 INVALID_ARGUMENT` for a token that the official Data API v3 accepts. Diagnosis kept in Open question 3 for the day Google restores it. |
 | 2 — real audio | ✅ GREEN 2026-08-30 | Owner confirmed audible music. yt-dlp resolved a stream, mpv played it, clock advanced 0→9s of 213s. PipeWire sink at 39%. |
 
 ---
@@ -154,7 +157,8 @@ it here as a known limitation rather than fighting it.
 Fill in during Task 38. Mark a requirement done only after pressing the keys
 in the running app — not because the code looks right.
 
-**Auth:** A1 ⬜ A2 ⬜ A3 ⬜ A4 ⬜ A5 ⬜ A6 ⬜  (all pending Gate 1)
+**Auth:** A1 ⬜ A2 ⬜ A3 ⬜ A4 ⬜ A5 ⬜ A6 ⬜
+  (A5 cookie-auth path proven working by Gate 1; still mark only from the app.)
 **Browse:** B1 ⬜ B2 ⬜ B3 ⬜ B4 ⬜ B5 ⬜
 **Search:** S1 ⬜ S2 ⬜ S3 ⬜
 **Playback:** P1 ⬜ P2 ⬜ P3 ⬜ P4 ⬜ P5 ⬜ P6 ⬜ P7 ⬜
@@ -176,12 +180,54 @@ one should stop, note it here, and ask.
 |---|---|---|
 | 8.5 | Create a Google Cloud OAuth client ("TVs and Limited Input devices"), add the `.../auth/youtube` scope under Data Access, add the music account as a test user, put id/secret in `~/.config/ytm-cli/config.toml`, run `cargo run -p ytm-core --example login_spike` | ✅ done 2026-08-30 — login works |
 | 9.1 | Capture a real fixture: `… cargo run -p ytm-core --example dump_playlists -- --raw > /tmp/raw.json`, scrub account ids/emails/personal browseIds, replace `crates/ytm-core/tests/fixtures/library_playlists.json` (currently **SYNTHETIC**) | ⬜ |
-| 9.7 | Gate 1: `cargo run -p ytm-core --example dump_playlists` prints real playlist titles | ⛔ **FAILS with 400** — needs the owner's auth decision, see Open question 3 |
-| 9.7b | If choosing the cookie path: save the **raw `Cookie:` header value** from a logged-in `music.youtube.com` request into a file (NOT Netscape cookies.txt — `BrowserToken::from_str` uses the contents verbatim as the header and requires `SAPISID=` in it), then set `auth.kind = "cookie"` and `auth.cookie_file` in config.toml | ⬜ **BLOCKING Gate 1** |
+| 9.7 | Gate 1: `cargo run -p ytm-core --example dump_playlists` prints real playlist titles | ✅ **done 2026-08-30** — 10 real titles via cookie auth |
+| 9.7b | Cookie auth: save the **raw `Cookie:` header value** from a logged-in `music.youtube.com` request into a file (NOT Netscape cookies.txt — `BrowserToken::from_str` uses the contents verbatim as the header and requires `SAPISID=` in it), then set `auth.kind = "cookie"` and `auth.cookie_file` in config.toml | ✅ done 2026-08-30 — **repeat whenever cookies expire**, see "Cookie expiry" |
 | 12.6 | Confirm audio is audible | ✅ done 2026-08-30 |
 | 30.5 / 31.5 / 32.5 | Verify playlist edits appear in the YouTube Music web UI | ⬜ |
 | 34.5 | Check album art in a graphics-capable terminal | ⬜ |
 | 35.5 | Check media keys and `playerctl metadata` | ⬜ |
+
+---
+
+## Cookie expiry — read this before debugging an empty library
+
+Cookie auth is the live path, and the cookie file **expires**. Observed on
+2026-08-30: a freshly exported file worked at 23:05 and was dead by 23:15.
+
+**The failure mode is misleading.** An expired cookie does not raise an auth
+error. InnerTube returns **HTTP 200** with a signed-out page, so
+`ytmapi-rs` parses it faithfully and the library reads as **0 playlists** —
+indistinguishable from an empty account unless you look at the raw response.
+`dump_playlists` prints "auth may have succeeded with an empty library" for
+exactly this case.
+
+**One-command check** — does Google still recognise the session:
+
+```bash
+curl -s "https://music.youtube.com/" \
+  -H "Cookie: $(tr -d '\n' < ~/.config/ytm-cli/cookies.txt)" \
+  -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36" \
+  | grep -o '"LOGGED_IN":[a-z]*' | head -1
+```
+
+`"LOGGED_IN":true` = session good, look elsewhere for the bug.
+`"LOGGED_IN":false` = **re-export the cookie**, the code is fine.
+
+Ruled out on 2026-08-30 as *not* the cause of expiry, so don't re-test these:
+a bad paste (no `Cookie:` prefix, no devtools `...` truncation, no quotes or
+newlines, all 30 pairs present at plausible lengths); our request construction
+(a correctly computed `SAPISIDHASH` got the same signed-out shell, and the plain
+GET above involves no hashing at all); and a stale `__Secure-*SIDTS` / `SIDCC`
+poisoning a good session (retested with those dropped, and with core identity
+cookies only — all `LOGGED_IN=false`).
+
+Re-export tip: export from a browser session you then leave logged in. Closing
+the window or signing out elsewhere can invalidate the copied cookies.
+
+**Task 22 note (event loop):** the empty-vs-expired ambiguity deserves surfacing
+in the UI rather than looking like an empty library. There is no auth error to
+catch, so the signal has to be "library call succeeded but returned zero rows"
+-> hint the user to re-export. FR-A6 territory; decide when Task 22 lands.
 
 ---
 
@@ -207,7 +253,12 @@ Options for the owner:
 
 Not blocking until **Task 32**. Decide before then.
 
-**3. Gate 1 fails: InnerTube rejects OAuth tokens. The owner must pick an auth path.**
+**3. RESOLVED 2026-08-30 — cookie auth chosen (option A) and working. InnerTube rejects OAuth tokens.**
+
+The owner exported cookies, Gate 1 went green, and `auth.kind = "cookie"` is the
+live configuration. The evidence below is kept because the OAuth code is still in
+the tree and correct — if Google restores device-flow tokens on InnerTube, it
+should start working with no changes. Do not "fix" it in the meantime.
 
 Diagnosed 2026-08-30 by isolating each layer with raw `curl`, one variable at a
 time. Established facts, not guesses:
@@ -417,3 +468,42 @@ the exercise.
 Do not "fix" the OAuth code. It is correct. The next step is the owner's auth
 decision, and if that is the cookie path, `YtMusicSource::from_cookie_file`
 already exists and needs only a `cookies.txt`.
+
+### 2026-08-30 — implementation agent (Gate 1 green, Task 19)
+
+**Gate 1 passed.** The owner exported browser cookies and `dump_playlists`
+printed 10 real playlist titles with track counts. Both gates are now green, so
+the CLAUDE.md hold on TUI work is lifted and Phase 5 is properly underway.
+
+**Cookies expire fast, and the failure looks like an empty library.** The
+owner's first export worked at 23:05 and was dead by 23:15. The symptom is `0
+playlists` with no error, because InnerTube answers HTTP 200 with a signed-out
+page ("Sign in to listen to your liked tracks") and `ytmapi-rs` parses that
+faithfully. I confirmed it with a plain `GET music.youtube.com` returning
+`"LOGGED_IN":false`, which depends on nothing we build. Ruled out a bad paste,
+our own request construction (correct `SAPISIDHASH` got the same shell), and
+stale `SIDTS`/`SIDCC` cookies. Wrote it up under "Cookie expiry" with a
+one-command check — read that before debugging an empty library again. A second
+export was still live at the end of the session.
+
+Left a note there for **Task 22**: there is no auth error to catch, so if the UI
+should distinguish "expired" from "empty", the signal has to be a successful
+library call returning zero rows.
+
+**Task 19 done** — `AppState`, `AppEvent`, `InputAction`, and the pure reducers.
+9 tests, gate green, committed. Three deviations from the plan's text, all in the
+tests rather than the implementation:
+
+- The plan's `selection_moves_and_clamps_at_both_ends` set `s.tracks` while the
+  pane was the default `Playlists` with `open_playlist: None`. In that state
+  `list_len()` counts `playlists`, so it was 0 and `select_next()` could never
+  move — the test could not pass as written. `list_len`'s mapping is what Tasks
+  23-24 build on, so I set `pane = Pane::Songs` instead and left a comment.
+- Four tests used `AppState::default()` followed by field assignment, which
+  clippy rejects under `-D warnings` (`field_reassign_with_default`). Rewritten
+  as struct initializers with `..Default::default()`; assertions unchanged.
+- `event.rs` needed `cargo fmt` — the plan's compact struct-variant style is not
+  what rustfmt produces. Worth knowing for Tasks 20+, which paste similar code.
+
+Reminder that bit again: run `./scripts/check.sh` as its own command, never
+chained with `&&` before a commit, or a fmt-only failure gets masked.
