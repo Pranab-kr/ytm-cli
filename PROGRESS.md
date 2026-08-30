@@ -3,12 +3,12 @@
 **Read this first. Update it before you stop.** It is the handoff between agents.
 
 Last updated: 2026-08-31 by the implementation agent
-Current phase: **Phase 6 in progress. Tasks 1-22 committed and green.**
-Next action: **Task 23** — track list widget.
+Current phase: **Phase 6 in progress. Tasks 1-23 committed and green.**
+Next action: **Task 24** — playlist, album, and artist lists.
 
-**The app runs.** `cargo run -p ytm-cli` renders the TUI, loads the owner's real
-10 playlists through the loop, and exits cleanly on `q`. The main pane still
-shows only its heading — the list widgets are Tasks 23-26.
+**The app runs and shows real music.** `cargo run -p ytm-cli` loads the owner's
+10 playlists, and Enter on one loads and renders its 83 real tracks with titles,
+artists, and durations. The *playlist* list itself is still unrendered — Task 24.
 Blocked on the owner: nothing. **Both gates are GREEN.**
 
 Cookie auth is the live auth path. The cookie file expires (see "Cookie
@@ -77,7 +77,7 @@ guessing, and re-verify against the vendored source if a call does not compile.
 | 3 — Audio ⚠️ | 10–12 | ✅ done, gate GREEN | yt-dlp resolver, mpv plays a real track |
 | 4 — Player | 13–16 | ✅ done | Actor thread, queue, transport |
 | 5 — TUI shell | 17–21 | ✅ done | Keymap, theme, text helpers, sidebar, now-playing bar |
-| 6 — Browse | 22–25 | 🟡 in progress (22 done) | Event loop, lists, search with debounce |
+| 6 — Browse | 22–25 | 🟡 in progress (22-23 done) | Event loop, lists, search with debounce |
 | 7 — Queue UI | 26–27 | ⬜ not started | Queue view, toasts, help |
 | 8 — CRUD | 28–32 | ⬜ not started | Playlist create/rename/delete, add/remove tracks |
 | 9 — Polish | 33–38 | ⬜ not started | Cache, album art, MPRIS, CLI, README |
@@ -624,3 +624,50 @@ temporary and is out of the tree (`grep "STEP-7 temporary"` is clean).
   currently paints just the pane heading. `dispatch_input`'s `A::Confirm` arm
   already opens a playlist (`Task::OpenPlaylist`) and plays a track, so Task 23
   should find Enter working the moment rows are on screen.
+
+### 2026-08-31 — implementation agent (Task 23, tracks on screen)
+
+**Task 23 done.** `crates/ytm-tui/src/widgets/tracklist.rs` plus the `draw_main`
+seam in `render.rs`. 7 tests. Gate green, committed.
+
+**Verified against the real library, not just `TestBackend`.** Pressing Enter on
+a playlist logged `event="playlist_tracks" rows=83 ms=1060` and the rows rendered
+with titles, artists, and durations. Two things worth seeing in that output,
+because they are the whole point of the column rules:
+
+```
+Dernière danse                    Indila               3:34
+Love Potions (6arelyhuman Remix) (feat. princess pa…  BJ Lips    3:09
+```
+
+Accented and Greek characters survive intact, and the over-long title truncates
+with `…` at a column boundary rather than mid-character. That is
+`pad_to_width`/`truncate_to_width` doing their job — a `str::len()` version would
+have shredded the grid here.
+
+**`draw_main` now splits its area.** One row for the heading, the rest for the
+list. Track-shaped panes (`Songs`, `Search`, `Queue`, and `Playlists` *once a
+playlist is open*) route to `tracklist::draw`; everything else falls through to
+the heading alone rather than drawing a list of the wrong shape. Task 24 fills in
+the `_ => {}` arm for playlists/albums/artists.
+
+**Two plan deviations, both small.**
+- Dropped the plan's trailing `let _ = truncate_to_width;` and simply did not
+  import what this widget does not use. The line existed to silence an unused
+  import; not importing it is the same fix without the noise.
+- Extracted the plan's inline `7`/`2`/`6` into `DURATION_WIDTH`, `MARK_WIDTH`,
+  and `TITLE_SHARE`. The plan also subtracted an extra `+ 2` of gap that its own
+  column math never spent, which left two columns unused at the right edge; the
+  spans now account for exactly the width they occupy.
+
+**Process note for whoever edits `render.rs` next.** I broke it briefly by
+running two scripted edits where the first one's assertion failed (rustfmt had
+already reformatted the text I was matching) while the second still applied,
+stripping an import the first was meant to replace. It compiled again within a
+minute, but the lesson is cheap: after `cargo fmt`, re-read the file before
+pattern-matching against remembered text, and do not chain edits that depend on
+each other in one script.
+
+Next: **Task 24** — playlist, album, and artist lists. The playlist pane
+currently shows only its heading, so the app cannot yet be navigated without
+already knowing Enter loads the first playlist.
