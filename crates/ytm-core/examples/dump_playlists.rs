@@ -4,14 +4,16 @@
 //!
 //! `println!` is allowed here — examples are exempt from the no-stdout rule.
 //!
+//! Credentials come from `~/.config/ytm-cli/config.toml` (see common::load).
 //! Run after `login_spike` has stored a token:
 //!
-//!   YTM_CLIENT_ID=... YTM_CLIENT_SECRET=... \
-//!     cargo run -p ytm-core --example dump_playlists            # gate: titles
-//!   ... cargo run -p ytm-core --example dump_playlists -- --raw > /tmp/raw.json
+//!   cargo run -p ytm-core --example dump_playlists            # gate: titles
+//!   cargo run -p ytm-core --example dump_playlists -- --raw > /tmp/raw.json
 //!
 //! SCRUB /tmp/raw.json before committing it as a fixture: remove account ids,
 //! emails, and any browseId tied to the owner's channel.
+
+mod common;
 
 use ytm_core::MusicSource;
 use ytm_core::auth::{KeyringStore, TokenStore};
@@ -22,8 +24,10 @@ use ytm_core::ytmusic::YtMusicSource;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let raw_mode = std::env::args().any(|a| a == "--raw");
 
-    let client_id = std::env::var("YTM_CLIENT_ID").map_err(|_| "set YTM_CLIENT_ID")?;
-    let client_secret = std::env::var("YTM_CLIENT_SECRET").map_err(|_| "set YTM_CLIENT_SECRET")?;
+    let common::Creds {
+        client_id,
+        client_secret,
+    } = common::load()?;
 
     let stored = KeyringStore::default_store()
         .load()?

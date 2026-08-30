@@ -4,21 +4,26 @@
 //! `println!` is allowed here — examples are exempt from the no-stdout rule
 //! because no TUI frame is on screen.
 //!
-//! Needs an OAuth client of type "TV and Limited Input" from Google Cloud
-//! Console. Pass the credentials via the environment so they never touch git:
+//! Needs an OAuth client of type "TVs and Limited Input devices" from Google
+//! Cloud Console, and the `https://www.googleapis.com/auth/youtube` scope added
+//! under "Data Access".
 //!
-//!   YTM_CLIENT_ID=... YTM_CLIENT_SECRET=... \
-//!     cargo run -p ytm-core --example login_spike
+//! Credentials come from `~/.config/ytm-cli/config.toml` (see common::load), so
+//! the secret stays in one file outside the repo:
+//!
+//!   cargo run -p ytm-core --example login_spike
+
+mod common;
 
 use ytm_core::auth::{KeyringStore, TokenStore};
 use ytm_core::oauth::{begin_device_login, complete_device_login};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client_id = std::env::var("YTM_CLIENT_ID")
-        .map_err(|_| "set YTM_CLIENT_ID (see the module docs at the top of this file)")?;
-    let client_secret = std::env::var("YTM_CLIENT_SECRET")
-        .map_err(|_| "set YTM_CLIENT_SECRET (see the module docs at the top of this file)")?;
+    let common::Creds {
+        client_id,
+        client_secret,
+    } = common::load()?;
 
     let client = ytmapi_rs::Client::new()?;
     let (info, code) = begin_device_login(&client, &client_id).await?;

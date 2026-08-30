@@ -22,3 +22,5 @@ directories.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+# Examples only: read OAuth credentials from config.toml instead of argv/env.
+toml.workspace = true
