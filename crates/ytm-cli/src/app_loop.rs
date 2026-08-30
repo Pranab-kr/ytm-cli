@@ -275,6 +275,114 @@ pub fn confirm_action(state: &mut AppState) -> Option<(u64, MutationTask)> {
     }
 }
 
+/// Marked tracks if any, otherwise the selected one (FR-C4).
+pub fn targets_for_add(state: &AppState) -> Vec<ytm_core::VideoId> {
+    if !state.marked.is_empty() {
+        return state.marked.iter().cloned().collect();
+    }
+    state
+        .selected_track()
+        .map(|t| vec![t.video_id.clone()])
+        .unwrap_or_default()
+}
+
+/// Open the target-playlist picker for the marked or selected tracks.
+///
+/// Only editable playlists are offered: YouTube rejects an add to a system
+/// playlist, so listing them would be offering an action that cannot work.
+pub fn open_add_to_playlist(state: &mut AppState) {
+    let targets = targets_for_add(state);
+    if targets.is_empty() {
+        state.push_toast(ToastKind::Error, "nothing selected", state.elapsed_ms);
+        return;
+    }
+    let choices: Vec<(ytm_core::PlaylistId, String)> = state
+        .playlists
+        .iter()
+        .filter(|p| !p.is_system)
+        .map(|p| (p.id.clone(), p.title.clone()))
+        .collect();
+    if choices.is_empty() {
+        state.push_toast(
+            ToastKind::Error,
+            "no editable playlist to add to — create one with N",
+            state.elapsed_ms,
+        );
+        return;
+    }
+    state.modal = Some(Modal::PickPlaylist {
+        targets,
+        choices,
+        selected: 0,
+    });
+}
+
+/// The user picked a playlist. Hand back the add to run.
+///
+/// There is no optimistic row to show: the tracks go into a playlist that is
+/// not necessarily the one on screen, so `Mutation::AddTracks` records the edit
+/// for the toast and nothing else changes locally.
+pub fn submit_pick(state: &mut AppState) -> Option<(u64, MutationTask)> {
+    let Some(Modal::PickPlaylist {
+        targets,
+        choices,
+        selected,
+    }) = state.modal.take()
+    else {
+        return None;
+    };
+    let (id, _) = choices.get(selected)?.clone();
+    let token = state.begin_mutation(Mutation::AddTracks {
+        playlist: id.clone(),
+        count: targets.len(),
+    });
+    // The marks were the input to this action; leaving them set would make the
+    // next `A` silently repeat it.
+    state.marked.clear();
+    Some((
+        token,
+        MutationTask::AddTracks {
+            id,
+            videos: targets,
+        },
+    ))
+}
+
+/// Confirm before removing (FR-C5). Refuses when the entries are unidentifiable.
+///
+/// That refusal is the common case today, not an edge one: `ytmapi-rs` 0.3.3
+/// does not parse `setVideoId` out of playlist reads at all (PROGRESS.md open
+/// question 1), so tracks read from a playlist carry `None` and cannot be
+/// removed. Saying so is better than sending a request that cannot work.
+pub fn open_remove_confirm(state: &mut AppState) {
+    let Some(playlist) = state.open_playlist.clone() else {
+        state.push_toast(ToastKind::Error, "open a playlist first", state.elapsed_ms);
+        return;
+    };
+
+    let targets = targets_for_add(state);
+    let entries: Vec<ytm_core::SetVideoId> = state
+        .tracks
+        .iter()
+        .filter(|t| targets.contains(&t.video_id))
+        .filter_map(|t| t.set_video_id.clone())
+        .collect();
+
+    if entries.is_empty() {
+        state.push_toast(
+            ToastKind::Error,
+            "these tracks cannot be removed — try refreshing the playlist",
+            state.elapsed_ms,
+        );
+        return;
+    }
+
+    state.modal = Some(Modal::Confirm {
+        text: format!("Remove {} track(s) from this playlist?", entries.len()),
+        action: ConfirmAction::RemoveTracks { playlist, entries },
+    });
+}
+
 /// Translate one input action into player commands, state changes, and
 /// background work. Pure with respect to I/O — that is what makes it testable.
 pub fn dispatch_input(
@@ -291,6 +399,10 @@ pub fn dispatch_input(
     if state.modal.is_some() {
         if action == A::Confirm && matches!(state.modal, Some(Modal::Prompt { .. })) {
             let (token, task) = submit_prompt(state)?;
+            return Some(Task::Mutate { token, task });
+        }
+        if action == A::Confirm && matches!(state.modal, Some(Modal::PickPlaylist { .. })) {
+            let (token, task) = submit_pick(state)?;
             return Some(Task::Mutate { token, task });
         }
         if matches!(state.modal, Some(Modal::Confirm { .. })) {
@@ -404,6 +516,9 @@ pub fn dispatch_input(
             state.selected = 0;
         }
         A::ClearQueue => {}
+        A::AddToPlaylist => open_add_to_playlist(state),
+        A::RemoveFromPlaylist => open_remove_confirm(state),
+        A::ToggleMark => state.toggle_mark(),
         A::CreatePlaylist => open_create_prompt(state),
         A::DeletePlaylist => open_delete_confirm(state),
         A::RenamePlaylist => {
@@ -1260,6 +1375,274 @@ mod tests {
         };
         dispatch_input(InputAction::DeletePlaylist, &mut s, &src, &*player);
         assert!(matches!(s.modal, Some(Modal::Confirm { .. })));
+    }
+
+    fn playlist_track(v: &str, sv: &str, title: &str) -> ytm_core::Track {
+        ytm_core::Track {
+            set_video_id: Some(ytm_core::SetVideoId::from(sv)),
+            ..ytm_core::Track::stub(v, title)
+        }
+    }
+
+    fn open_playlist_with(tracks: Vec<ytm_core::Track>) -> AppState {
+        AppState {
+            pane: Pane::Playlists,
+            open_playlist: Some("p1".into()),
+            tracks,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn with_no_marks_the_target_is_the_selected_track() {
+        let s = AppState {
+            pane: Pane::Songs,
+            tracks: vec![
+                ytm_core::Track::stub("v1", "A"),
+                ytm_core::Track::stub("v2", "B"),
+            ],
+            selected: 1,
+            ..Default::default()
+        };
+        assert_eq!(targets_for_add(&s), vec![ytm_core::VideoId::from("v2")]);
+    }
+
+    #[test]
+    fn marked_tracks_take_precedence_over_the_selection() {
+        // FR-C4: multi-select.
+        let mut s = AppState {
+            pane: Pane::Songs,
+            tracks: vec![
+                ytm_core::Track::stub("v1", "A"),
+                ytm_core::Track::stub("v2", "B"),
+                ytm_core::Track::stub("v3", "C"),
+            ],
+            selected: 0,
+            ..Default::default()
+        };
+        s.marked.insert(ytm_core::VideoId::from("v2"));
+        s.marked.insert(ytm_core::VideoId::from("v3"));
+        let mut got = targets_for_add(&s);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![ytm_core::VideoId::from("v2"), ytm_core::VideoId::from("v3")]
+        );
+    }
+
+    #[test]
+    fn an_empty_list_yields_no_targets() {
+        let s = AppState::default();
+        assert!(targets_for_add(&s).is_empty());
+    }
+
+    #[test]
+    fn toggle_mark_adds_then_removes() {
+        let mut s = AppState {
+            pane: Pane::Songs,
+            tracks: vec![ytm_core::Track::stub("v1", "A")],
+            ..Default::default()
+        };
+        s.toggle_mark();
+        assert!(s.marked.contains(&ytm_core::VideoId::from("v1")));
+        s.toggle_mark();
+        assert!(s.marked.is_empty());
+    }
+
+    #[test]
+    fn removing_requires_an_open_playlist() {
+        let mut s = AppState {
+            pane: Pane::Songs, // library songs, not a playlist
+            tracks: vec![playlist_track("v1", "sv1", "A")],
+            ..Default::default()
+        };
+        open_remove_confirm(&mut s);
+        assert!(s.modal.is_none(), "there is no playlist to remove from");
+        assert_eq!(s.toasts.len(), 1);
+    }
+
+    #[test]
+    fn removing_a_track_without_a_set_video_id_is_refused() {
+        // Without SetVideoId the API cannot identify the entry.
+        let mut s = open_playlist_with(vec![ytm_core::Track::stub("v1", "A")]);
+        open_remove_confirm(&mut s);
+        assert!(s.modal.is_none());
+        assert_eq!(s.toasts.len(), 1, "explain rather than fail silently");
+    }
+
+    #[test]
+    fn removing_opens_a_confirmation_naming_the_count() {
+        let mut s = open_playlist_with(vec![
+            playlist_track("v1", "sv1", "A"),
+            playlist_track("v2", "sv2", "B"),
+        ]);
+        s.marked.insert(ytm_core::VideoId::from("v1"));
+        s.marked.insert(ytm_core::VideoId::from("v2"));
+        open_remove_confirm(&mut s);
+        match &s.modal {
+            Some(Modal::Confirm { text, .. }) => {
+                assert!(text.contains('2'), "got: {text}")
+            }
+            other => panic!("expected a confirm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn confirming_a_removal_drops_the_rows_and_can_be_undone() {
+        let mut s = open_playlist_with(vec![
+            playlist_track("v1", "sv1", "A"),
+            playlist_track("v2", "sv2", "B"),
+            playlist_track("v3", "sv3", "C"),
+        ]);
+        s.selected = 1;
+        open_remove_confirm(&mut s);
+        let (token, task) = confirm_action(&mut s).expect("confirm yields work");
+        assert!(matches!(task, MutationTask::RemoveTracks { .. }));
+        assert_eq!(s.tracks.len(), 2);
+        s.rollback(token);
+        let titles: Vec<_> = s.tracks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["A", "B", "C"], "restored in order");
+    }
+
+    #[test]
+    fn adding_with_no_editable_playlist_says_so_instead_of_opening_an_empty_picker() {
+        let mut s = AppState {
+            pane: Pane::Songs,
+            tracks: vec![ytm_core::Track::stub("v1", "A")],
+            playlists: vec![ytm_core::Playlist {
+                is_system: true,
+                ..ytm_core::Playlist::stub("LM", "Your Likes")
+            }],
+            ..Default::default()
+        };
+        open_add_to_playlist(&mut s);
+        assert!(s.modal.is_none());
+        assert_eq!(s.toasts.len(), 1);
+    }
+
+    #[test]
+    fn the_picker_lists_only_editable_playlists() {
+        let mut s = AppState {
+            pane: Pane::Songs,
+            tracks: vec![ytm_core::Track::stub("v1", "A")],
+            playlists: vec![
+                ytm_core::Playlist {
+                    is_system: true,
+                    ..ytm_core::Playlist::stub("LM", "Your Likes")
+                },
+                ytm_core::Playlist::stub("p1", "Focus"),
+            ],
+            ..Default::default()
+        };
+        open_add_to_playlist(&mut s);
+        match &s.modal {
+            Some(Modal::PickPlaylist {
+                choices, targets, ..
+            }) => {
+                assert_eq!(choices.len(), 1, "a system playlist cannot be added to");
+                assert_eq!(choices[0].1, "Focus");
+                assert_eq!(targets.len(), 1);
+            }
+            other => panic!("expected a picker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn picking_a_playlist_spawns_the_add_and_clears_the_marks() {
+        let (src, player) = deps();
+        let mut s = AppState {
+            pane: Pane::Songs,
+            tracks: vec![
+                ytm_core::Track::stub("v1", "A"),
+                ytm_core::Track::stub("v2", "B"),
+            ],
+            playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
+            ..Default::default()
+        };
+        s.marked.insert(ytm_core::VideoId::from("v1"));
+        s.marked.insert(ytm_core::VideoId::from("v2"));
+        open_add_to_playlist(&mut s);
+        let task = dispatch_input(InputAction::Confirm, &mut s, &src, &*player);
+        match task {
+            Some(Task::Mutate {
+                task: MutationTask::AddTracks { id, videos },
+                ..
+            }) => {
+                assert_eq!(id, ytm_core::PlaylistId::from("p1"));
+                assert_eq!(videos.len(), 2);
+            }
+            other => panic!("expected an AddTracks mutation, got {other:?}"),
+        }
+        assert!(s.modal.is_none());
+        assert!(s.marked.is_empty(), "marks are consumed by the action");
+    }
+
+    #[test]
+    fn the_picker_moves_through_its_choices() {
+        let mut s = AppState {
+            pane: Pane::Songs,
+            tracks: vec![ytm_core::Track::stub("v1", "A")],
+            playlists: vec![
+                ytm_core::Playlist::stub("p1", "One"),
+                ytm_core::Playlist::stub("p2", "Two"),
+            ],
+            ..Default::default()
+        };
+        open_add_to_playlist(&mut s);
+        s.apply(AppEvent::Input(InputAction::Down));
+        match &s.modal {
+            Some(Modal::PickPlaylist { selected, .. }) => assert_eq!(*selected, 1),
+            other => panic!("expected a picker, got {other:?}"),
+        }
+        // And it must not run off the end.
+        s.apply(AppEvent::Input(InputAction::Down));
+        match &s.modal {
+            Some(Modal::PickPlaylist { selected, .. }) => assert_eq!(*selected, 1),
+            other => panic!("expected a picker, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn adding_tracks_calls_the_source_with_every_video_id() {
+        let src = Arc::new(
+            MockSource::new().with_playlists(vec![ytm_core::Playlist::stub("p1", "Target")]),
+        );
+        let _ = run_mutation(
+            1,
+            MutationTask::AddTracks {
+                id: "p1".into(),
+                videos: vec![ytm_core::VideoId::from("v1"), ytm_core::VideoId::from("v2")],
+            },
+            src.clone(),
+        )
+        .await;
+        assert!(
+            src.calls().iter().any(|c| c == "add_tracks(p1,2)"),
+            "got {:?}",
+            src.calls()
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_tracks_sends_every_set_video_id() {
+        let src = Arc::new(MockSource::new());
+        let _ = run_mutation(
+            1,
+            MutationTask::RemoveTracks {
+                id: "p1".into(),
+                entries: vec![
+                    ytm_core::SetVideoId::from("sv1"),
+                    ytm_core::SetVideoId::from("sv2"),
+                ],
+            },
+            src.clone(),
+        )
+        .await;
+        assert!(
+            src.calls().iter().any(|c| c == "remove_tracks(p1,2)"),
+            "got {:?}",
+            src.calls()
+        );
     }
 
     #[test]

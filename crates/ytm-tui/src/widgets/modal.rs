@@ -32,6 +32,23 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
             format!("{title}\n{value}"),
             "[enter] save   [esc] cancel",
         ),
+        Modal::PickPlaylist {
+            targets,
+            choices,
+            selected,
+        } => {
+            // Rows are built here rather than by a list widget: the picker is a
+            // handful of names, and reusing the playlist list would drag its
+            // track counts and read-only markers in with it.
+            let mut body = format!("Add {} track(s) to which playlist?", targets.len());
+            for (i, (_, title)) in choices.iter().enumerate() {
+                let marker = if i == *selected { "> " } else { "  " };
+                body.push('\n');
+                body.push_str(marker);
+                body.push_str(title);
+            }
+            (" Add to playlist ", body, "[enter] add   [esc] cancel")
+        }
         // Help draws itself; Login belongs to the auth pane.
         Modal::Help | Modal::Login { .. } => return,
     };

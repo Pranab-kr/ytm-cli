@@ -63,6 +63,16 @@ pub enum Modal {
         action: PromptAction,
     },
     Help,
+    /// Which playlist to add the pending tracks to (FR-C4).
+    ///
+    /// `choices` is carried in the modal rather than read from `playlists` at
+    /// draw time so the row the user picks cannot change under them if a
+    /// refresh lands mid-decision.
+    PickPlaylist {
+        targets: Vec<VideoId>,
+        choices: Vec<(PlaylistId, String)>,
+        selected: usize,
+    },
     Login {
         user_code: String,
         url: String,
@@ -186,6 +196,15 @@ impl AppState {
             match (modal, a) {
                 (_, InputAction::Cancel) => self.modal = None,
                 (Modal::Prompt { value, .. }, InputAction::Char(c)) => value.push(c),
+                (
+                    Modal::PickPlaylist {
+                        selected, choices, ..
+                    },
+                    InputAction::Down,
+                ) => *selected = (*selected + 1).min(choices.len().saturating_sub(1)),
+                (Modal::PickPlaylist { selected, .. }, InputAction::Up) => {
+                    *selected = selected.saturating_sub(1)
+                }
                 // pop() removes a whole char — byte slicing would panic on
                 // multibyte input.
                 (Modal::Prompt { value, .. }, InputAction::Backspace) => {
@@ -374,6 +393,16 @@ impl AppState {
                     self.tracks.insert(at, track);
                 }
             }
+        }
+    }
+
+    /// Mark or unmark the selected track for a bulk action (FR-C4).
+    pub fn toggle_mark(&mut self) {
+        let Some(id) = self.selected_track().map(|t| t.video_id.clone()) else {
+            return;
+        };
+        if !self.marked.remove(&id) {
+            self.marked.insert(id);
         }
     }
 
