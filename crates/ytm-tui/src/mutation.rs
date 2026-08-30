@@ -76,9 +76,10 @@ impl MutationLog {
 
 /// Entries the API still has to confirm; used for the removal SetVideoIds.
 ///
-/// Tracks without one are skipped rather than faked. Playlist reads in
-/// `ytmapi-rs` 0.3.3 do not carry `setVideoId` at all (PROGRESS.md open
-/// question 1), so `None` is the common case, not an edge case.
+/// Tracks without one are skipped rather than faked. `ytm-core`'s
+/// `playlist_raw` supplies the ids for playlist reads, so `None` now means a
+/// track that genuinely has no removable entry — a search result, a library
+/// song, or a row whose id could not be extracted.
 pub fn set_video_ids(removed: &[(usize, Track)]) -> Vec<SetVideoId> {
     removed
         .iter()
@@ -314,8 +315,8 @@ mod tests {
 
     #[test]
     fn set_video_ids_skips_entries_the_api_cannot_remove() {
-        // Open question 1: playlist reads have no setVideoId, so this is
-        // routinely None and the caller must not send a bogus id.
+        // A track with no removable entry (a search result, or a row whose id
+        // could not be extracted) must be skipped, not sent as a bogus id.
         let with = Track {
             set_video_id: Some(ytm_core::SetVideoId::from("s1")),
             ..Track::stub("v1", "A")

@@ -350,10 +350,10 @@ pub fn submit_pick(state: &mut AppState) -> Option<(u64, MutationTask)> {
 
 /// Confirm before removing (FR-C5). Refuses when the entries are unidentifiable.
 ///
-/// That refusal is the common case today, not an edge one: `ytmapi-rs` 0.3.3
-/// does not parse `setVideoId` out of playlist reads at all (PROGRESS.md open
-/// question 1), so tracks read from a playlist carry `None` and cannot be
-/// removed. Saying so is better than sending a request that cannot work.
+/// Playlist reads do carry `set_video_id` now — `playlist_raw` extracts it from
+/// the wire JSON, which `ytmapi-rs` 0.3.3 drops (PROGRESS.md open question 1,
+/// resolved via option A). The refusal is the fallback for when extraction finds
+/// nothing: better to say so than to send a request that cannot work.
 pub fn open_remove_confirm(state: &mut AppState) {
     let Some(playlist) = state.open_playlist.clone() else {
         state.push_toast(ToastKind::Error, "open a playlist first", state.elapsed_ms);

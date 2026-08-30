@@ -105,16 +105,43 @@ macro_rules! impl_music_source {
 
             fn playlist_tracks(&self, id: PlaylistId) -> BoxFut<'_, Vec<Track>> {
                 Box::pin(async move {
-                    let raw = self
+                    // One request, parsed twice: upstream's typed parse for the
+                    // track data, and our own pass for `setVideoId`, which
+                    // `ytmapi-rs` 0.3.3 discards but removal requires (FR-C5).
+                    // `ProcessedResult`'s fields are public and `parse_into`
+                    // runs on JSON we already hold, so this costs no extra
+                    // round trip. Verified against the crate source.
+                    let query = ytmapi_rs::query::GetPlaylistTracksQuery::new(
+                        ytmapi_rs::common::PlaylistID::from_raw(id.as_str()),
+                    );
+                    // Turbofished: `impl Borrow<Q>` cannot infer Q from a reference.
+                    let json = self
                         .api
-                        .get_playlist_tracks(ytmapi_rs::common::PlaylistID::from_raw(id.as_str()))
+                        .raw_json_query::<ytmapi_rs::query::GetPlaylistTracksQuery>(&query)
                         .await
                         .map_err(classify)?;
+
+                    let value: ytmapi_rs::json::Json = serde_json::from_str(&json)
+                        .map_err(|e| SourceError::Parse(e.to_string()))?;
+                    let items: Vec<ytmapi_rs::parse::PlaylistItem> =
+                        ytmapi_rs::parse::ProcessedResult {
+                            query: &query,
+                            source: json.clone(),
+                            json: value,
+                        }
+                        .parse_into()
+                        .map_err(classify)?;
+
                     // Episodes (podcasts) are out of scope and map to None.
-                    Ok(raw
+                    let tracks: Vec<Track> = items
                         .iter()
                         .filter_map(mapping::track_from_playlist_item)
-                        .collect())
+                        .collect();
+                    // Paired by videoId, not position: upstream returned 83
+                    // tracks for an 85-row shelf, so it drops rows internally
+                    // and nothing positional can line up. Measured live.
+                    let rows = crate::playlist_raw::entry_ids_from_raw(&json);
+                    Ok(crate::playlist_raw::attach_entry_ids(tracks, &rows))
                 })
             }
 

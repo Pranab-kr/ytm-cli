@@ -7,6 +7,12 @@
 //!
 //! In a subdirectory so Cargo does not treat it as its own example target.
 
+// Compiled separately into every example, and no single one uses all of it —
+// `dump_playlist_tracks` is cookie-only, so the OAuth fields read as dead there.
+// Allowing it beats making each example pretend to use credentials it does not
+// need.
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 
 pub struct Creds {
