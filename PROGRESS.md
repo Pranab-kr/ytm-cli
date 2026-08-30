@@ -2,9 +2,13 @@
 
 **Read this first. Update it before you stop.** It is the handoff between agents.
 
-Last updated: 2026-08-30 by the implementation agent
-Current phase: **Phase 5 complete. Tasks 1-21 committed and green.**
-Next action: **Task 22** — the event loop. Start of Phase 6.
+Last updated: 2026-08-31 by the implementation agent
+Current phase: **Phase 6 in progress. Tasks 1-22 committed and green.**
+Next action: **Task 23** — track list widget.
+
+**The app runs.** `cargo run -p ytm-cli` renders the TUI, loads the owner's real
+10 playlists through the loop, and exits cleanly on `q`. The main pane still
+shows only its heading — the list widgets are Tasks 23-26.
 Blocked on the owner: nothing. **Both gates are GREEN.**
 
 Cookie auth is the live auth path. The cookie file expires (see "Cookie
@@ -15,12 +19,14 @@ code bug.
 
 ## Where things stand
 
-Tasks 1-21 are implemented, committed, and pass `./scripts/check.sh`. Phases 0-5
-are complete. Phase 6 has not started.
+Tasks 1-22 are implemented, committed, and pass `./scripts/check.sh`. Phases 0-5
+are complete. Phase 6 has started.
 
-The TUI now renders: `render()` draws the sidebar, a dim vertical rule, a main
-pane heading, and the now-playing bar, and the keymap turns key presses into
-`InputAction`s. Nothing wires it to a terminal yet — that is Task 22.
+The whole vertical slice is now connected: config -> cookie auth -> `MusicSource`
+-> `tokio::spawn` -> `AppEvent` -> `AppState` -> `render` -> a real terminal, plus
+the player actor on its own thread. Verified by running it, not by inspection
+(see the Task 22 log entry). What is missing is only the list widgets that fill
+the main pane.
 
 **Gate 2 (real audio) is GREEN.** The owner confirmed hearing music twice on
 2026-08-30: once through the raw `MpvHandle`, and again through the full player
@@ -71,7 +77,7 @@ guessing, and re-verify against the vendored source if a call does not compile.
 | 3 — Audio ⚠️ | 10–12 | ✅ done, gate GREEN | yt-dlp resolver, mpv plays a real track |
 | 4 — Player | 13–16 | ✅ done | Actor thread, queue, transport |
 | 5 — TUI shell | 17–21 | ✅ done | Keymap, theme, text helpers, sidebar, now-playing bar |
-| 6 — Browse | 22–25 | ⬜ not started | Event loop, lists, search with debounce |
+| 6 — Browse | 22–25 | 🟡 in progress (22 done) | Event loop, lists, search with debounce |
 | 7 — Queue UI | 26–27 | ⬜ not started | Queue view, toasts, help |
 | 8 — CRUD | 28–32 | ⬜ not started | Playlist create/rename/delete, add/remove tracks |
 | 9 — Polish | 33–38 | ⬜ not started | Cache, album art, MPRIS, CLI, README |
@@ -553,3 +559,68 @@ Two notes carried forward for **Task 22**, both already recorded above: surface
 the expired-cookie-vs-empty-library ambiguity (a successful library call
 returning zero rows is the only signal), and every widget must keep guarding on
 a zero-sized `Rect` — the 8x4 test is the regression net for that.
+
+### 2026-08-31 — implementation agent (Task 22, the app runs)
+
+**Task 22 done.** `crates/ytm-cli/src/app_loop.rs` plus a real `main.rs`. 11
+tests. Gate green, committed.
+
+**The app runs, verified by running it — not by inspection.** `q` exits cleanly
+with the terminal restored, and the log shows
+`background task finished event="playlists" rows=10 ms=282`: the owner's real 10
+playlists, fetched through cookie auth, off the UI thread, delivered as an
+`AppEvent`. The sidebar, the `│` rule, "Nothing playing", and `70%` all render.
+The main pane shows only its heading until Tasks 23-26.
+
+**How to run it headless, since this is not obvious and cost me two attempts.**
+The app needs a TTY *with a window size*. Piping stdin into `script` leaves the
+pty at 0x0, `f.area()` is empty, every widget hits its zero-size guard, and you
+get a blank alternate screen and a clean exit — looking exactly like a broken
+render. Set the size explicitly:
+
+```bash
+( sleep 14; printf 'q' ) | YTM_LOG=debug timeout 30 \
+  script -q -c "stty rows 40 cols 120; ./target/debug/ytm-cli" /dev/null
+```
+
+Then read `~/.cache/ytm-cli/logs/ytm-cli.log.<date>` — note the **date suffix**,
+so `logs/*.log` matches nothing.
+
+**Step 7 (terminal survives a panic) passed, and needed a fix the plan does not
+mention.** `TerminalGuard::Drop` alone is not enough: the panic hook prints
+*before* unwinding runs `Drop`, so the report would land in the alternate screen
+and vanish with it. `main` now installs a hook that restores the terminal and
+then chains to the previous one. Verified by byte offsets in the captured pty
+output — leave-altscreen at 1564, "panicked" at 1599 — so the message provably
+printed after the restore. `restore_terminal()` is idempotent and runs twice
+(hook, then `Drop`); that is harmless and intentional. The probe key was
+temporary and is out of the tree (`grep "STEP-7 temporary"` is clean).
+
+**Additions beyond the plan's code, each with a reason.**
+- `empty_library_hint` — the FR-A6 item PROGRESS.md left for this task. An
+  expired cookie is *not* an auth error, so the only signal is a successful
+  library call returning zero rows; it raises an Info toast naming both
+  possibilities. Cookie-auth only: telling an OAuth user to re-export cookies
+  they do not have is noise. 3 tests, including that OAuth is excluded.
+- `spawn_task` logs each task's name, row count, and elapsed ms. Nothing about a
+  background fetch is visible on screen, so without this there is no way to tell
+  a working fetch from a broken one until Task 23 lands. This is what proved the
+  gate above.
+- `dispatch_input` returns early when a modal is open, so transport keys cannot
+  fire behind a confirmation dialog. `AppState` already guards navigation this
+  way; the plan's dispatch matched transport *before* consulting the modal.
+- `state.loading = true` is set in `start()` at the point a `Task` is returned,
+  per the plan's Step 5 note, so the spinner covers the whole round trip.
+- Volume/mute/shuffle update `AppState` locally as well as sending the command,
+  so the bar moves on the next frame instead of waiting for the actor's echo.
+- `send()` logs a dropped command instead of unwrapping. An `unwrap` here would
+  panic inside the loop and take the terminal down over a dead actor thread.
+
+**Two notes for Task 23 onward.**
+- `Task::Search` is `#[allow(dead_code)]` until Task 25 constructs it.
+  `spawn_task` already handles it, so Task 25 only has to emit it. Remove the
+  attribute then.
+- `render::draw_main` is the single seam the list widgets plug into — it
+  currently paints just the pane heading. `dispatch_input`'s `A::Confirm` arm
+  already opens a playlist (`Task::OpenPlaylist`) and plays a track, so Task 23
+  should find Enter working the moment rows are on screen.
