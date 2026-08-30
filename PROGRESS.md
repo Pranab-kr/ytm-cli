@@ -3,12 +3,14 @@
 **Read this first. Update it before you stop.** It is the handoff between agents.
 
 Last updated: 2026-08-31 by the implementation agent
-Current phase: **Phase 6 complete. Tasks 1-25 committed and green.**
-Next action: **Task 26** — queue view. Start of Phase 7.
+Current phase: **Phase 7 complete. Tasks 1-27 committed and green.**
+Next action: **Task 28** — optimistic mutation tracking. Start of Phase 8.
 
-**Every browse pane works against the live account.** 10 real playlists with
-track counts, Enter opens one and renders its tracks, and `/` searches YouTube
-Music with one request per typing pause. 146 tests pass.
+**Every browse pane works against the live account, and the queue is editable.**
+10 real playlists with track counts, Enter opens one and renders its tracks, `/`
+searches YouTube Music with one request per typing pause, and `u` shows the
+queue with the playing entry marked — reorder, remove, and clear all verified
+against real audio. `?` lists every binding. 174 tests pass.
 Blocked on the owner: nothing. **Both gates are GREEN.**
 
 Cookie auth is the live auth path. The cookie file expires (see "Cookie
@@ -19,14 +21,14 @@ code bug.
 
 ## Where things stand
 
-Tasks 1-22 are implemented, committed, and pass `./scripts/check.sh`. Phases 0-5
-are complete. Phase 6 has started.
+Tasks 1-27 are implemented, committed, and pass `./scripts/check.sh`. Phases 0-7
+are complete. Phase 8 (playlist CRUD) has not started.
 
 The whole vertical slice is now connected: config -> cookie auth -> `MusicSource`
 -> `tokio::spawn` -> `AppEvent` -> `AppState` -> `render` -> a real terminal, plus
 the player actor on its own thread. Verified by running it, not by inspection
-(see the Task 22 log entry). What is missing is only the list widgets that fill
-the main pane.
+(see the Task 22 log entry). Every pane now renders, and queue edits go through
+the actor rather than mutating the view.
 
 **Gate 2 (real audio) is GREEN.** The owner confirmed hearing music twice on
 2026-08-30: once through the raw `MpvHandle`, and again through the full player
@@ -78,7 +80,7 @@ guessing, and re-verify against the vendored source if a call does not compile.
 | 4 — Player | 13–16 | ✅ done | Actor thread, queue, transport |
 | 5 — TUI shell | 17–21 | ✅ done | Keymap, theme, text helpers, sidebar, now-playing bar |
 | 6 — Browse | 22–25 | ✅ done | Event loop, lists, search with debounce |
-| 7 — Queue UI | 26–27 | ⬜ not started | Queue view, toasts, help |
+| 7 — Queue UI | 26–27 | ✅ done | Queue view, toasts, spinner, help overlay |
 | 8 — CRUD | 28–32 | ⬜ not started | Playlist create/rename/delete, add/remove tracks |
 | 9 — Polish | 33–38 | ⬜ not started | Cache, album art, MPRIS, CLI, README |
 
@@ -777,3 +779,75 @@ Next: **Task 26** — queue view, start of Phase 7. Note from Task 14 still stan
 `PlayerCommand::PlayNow` inserts after the current track rather than replacing the
 queue, so the queue grows and keeps history. If the queue view should show
 something else, that is a UI decision to make in Task 26, not an actor bug.
+
+### 2026-08-31 — implementation agent (Tasks 26-27, Phase 7 complete)
+
+**Tasks 26 and 27 done. Phase 7 complete.** `widgets/queue.rs` (the queue view),
+queue-edit dispatch, `widgets/toast.rs` (toasts + spinner), `widgets/help.rs`
+(the `?` overlay). 174 tests pass, gate green, two commits.
+
+**Verified against the live account with real audio**, not by inspection. Drove
+the app through a pty: opened a playlist, enqueued three tracks with `a`, `u`
+showed them with `▶` on the playing one, `J`/`K` reordered, `x` removed the
+current entry and playback moved to the next track, `C` emptied the queue and the
+bar read "Nothing playing". The owner confirmed hearing the music. `?` renders all
+31 bindings in two columns with nothing truncated.
+
+**The pty driver is worth rebuilding rather than rediscovering.** Two traps cost
+time:
+- **A pty has no window size unless you set one.** Without
+  `ioctl(TIOCSWINSZ)` the terminal reports 0x0, every `Rect` guard bails, and the
+  app emits ~2.8KB of pure escape codes and no frame. It looks like a broken
+  render; it is a broken harness.
+- **`x` on the current entry makes the actor block on a yt-dlp resolve** (~5s)
+  for the new current track. My first run sent `C` 1.5s later, so clear was still
+  queued when the driver quit — and the screen showed the queue unchanged. Not a
+  bug. Allow ~8s after any key that changes what is playing.
+  (Also still true from Task 25: press Esc before `q`.)
+
+**Task 26 plan deviations.**
+- The plan left the reorder keys as "`ToggleMark` + movement, or a dedicated
+  pair". Chose dedicated `J`/`K` (plus `C` for clear): overloading `v`+`j` would
+  make marking mean two things, and marking is needed unchanged for bulk add in
+  Task 31.
+- `queue.rs` does not reuse `tracklist::draw`. Same columns, but the left column
+  means the play position here and the multi-select bullet there, and the empty
+  state differs ("Queue is empty"). Sharing it would have meant threading a mode
+  flag through for two divergent behaviours.
+- Added `an_entry_that_is_not_current_gets_no_marker`. Without it, printing `▶`
+  unconditionally would satisfy the plan's marker test while telling the user
+  nothing.
+- Added an out-of-range guard test for `J`/`K` at both ends. `Queue::move_item`
+  is index-based, so a move off the end would reach the actor as a bad index.
+
+**Task 27 plan deviations, and one that matters for Task 29.**
+- **`render` now takes `&KeyMap`.** The help overlay must list the *live*
+  bindings — a user who rebinds `quit` must not be told to press `q` — and
+  keymap is config, exactly like the `&Theme` already threaded through. It is not
+  on `AppState`: state is what changes per event, and this does not. Every call
+  site updated; test helpers pass `KeyMap::default()`.
+- **The overlay is sized to its content, not to the plan's 60%x70%.** With all
+  31 bindings, a fixed 60%x70% box on 80x24 forces three columns of 11 label
+  columns, which truncates "play / pause" to "play / pa…". A truncated binding
+  might as well not exist, so `layout()` picks the fewest columns that fit the
+  height and the widest that fit the width, clamped to 90% of the frame. Two
+  tests pin this: every action name appears in full, and the rebound key sits on
+  the same row as its action.
+- Toasts keep the **newest** three, not the oldest. The last thing that happened
+  is what the user is trying to understand. Two tests: three of six visible, and
+  the newest survives while the oldest is dropped.
+- The spinner draws from `elapsed_ms` rather than a stored `ThrobberState`, so
+  rendering stays a pure function of `AppState` and the frame is reproducible in
+  a test. `to_symbol_span` + a computed `calc_step`, not `render_stateful_widget`.
+- Action labels in `help.rs` are hand-written, not derived from `Debug`. The
+  overlay should read as help text, not as Rust. `Confirm`/`Cancel`/`NextPane`
+  and the text-entry actions return `None` — they are not keys a user presses on
+  purpose.
+
+Next: **Task 28** — optimistic mutation tracking, start of Phase 8. Note that
+`AppEvent::MutationOk`/`MutationFailed` already exist and currently only push a
+toast; `app.rs` carries the comment `// Rollback itself is wired in Task 28`.
+`ConfirmAction` and `PromptAction` also already exist unused, for Task 29's
+modals — `render` has an `if let Some(Modal::Help)` where the other arms go.
+**Open question 1 (`set_video_id` missing from `ytmapi-rs` playlist reads) must
+be decided before Task 32** — FR-C5 cannot work as specified without it.
