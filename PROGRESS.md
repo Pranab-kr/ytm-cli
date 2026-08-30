@@ -3,12 +3,12 @@
 **Read this first. Update it before you stop.** It is the handoff between agents.
 
 Last updated: 2026-08-31 by the implementation agent
-Current phase: **Phase 6 in progress. Tasks 1-24 committed and green.**
-Next action: **Task 25** — search with debounce. Last task in Phase 6.
+Current phase: **Phase 6 complete. Tasks 1-25 committed and green.**
+Next action: **Task 26** — queue view. Start of Phase 7.
 
-**The app is now browsable.** `cargo run -p ytm-cli` lists the owner's 10 real
-playlists with track counts, and Enter on one renders its tracks. Every pane
-except Search draws real rows. Search is Task 25.
+**Every browse pane works against the live account.** 10 real playlists with
+track counts, Enter opens one and renders its tracks, and `/` searches YouTube
+Music with one request per typing pause. 146 tests pass.
 Blocked on the owner: nothing. **Both gates are GREEN.**
 
 Cookie auth is the live auth path. The cookie file expires (see "Cookie
@@ -77,7 +77,7 @@ guessing, and re-verify against the vendored source if a call does not compile.
 | 3 — Audio ⚠️ | 10–12 | ✅ done, gate GREEN | yt-dlp resolver, mpv plays a real track |
 | 4 — Player | 13–16 | ✅ done | Actor thread, queue, transport |
 | 5 — TUI shell | 17–21 | ✅ done | Keymap, theme, text helpers, sidebar, now-playing bar |
-| 6 — Browse | 22–25 | 🟡 in progress (22-24 done) | Event loop, lists, search with debounce |
+| 6 — Browse | 22–25 | ✅ done | Event loop, lists, search with debounce |
 | 7 — Queue UI | 26–27 | ⬜ not started | Queue view, toasts, help |
 | 8 — CRUD | 28–32 | ⬜ not started | Playlist create/rename/delete, add/remove tracks |
 | 9 — Polish | 33–38 | ⬜ not started | Cache, album art, MPRIS, CLI, README |
@@ -718,3 +718,62 @@ Next: **Task 25** — search with debounce, the last task in Phase 6. Note that
 `Task::Search` in `app_loop.rs` is `#[allow(dead_code)]` and `spawn_task` already
 handles it; Task 25 emits it and removes the attribute. `Pane::Search` already
 routes to `tracklist::draw`, so results will render as soon as they arrive.
+
+### 2026-08-31 — implementation agent (Task 25, Phase 6 complete)
+
+**Task 25 done. Phase 6 complete.** `search_state.rs` (the debounce),
+`widgets/search.rs` (the query row), search editing in `AppState::apply_input`,
+and the tick wiring in `app_loop.rs`. 21 new tests; 146 pass workspace-wide.
+Gate green, committed.
+
+**FR-S2 verified live.** Typing `boards` one key at a time, 50ms apart, produced
+**one** request — `event="search" rows=20 ms=623` — and real matches rendered
+(`Lords of the Boards`, `You Retreat In Time And Space / Boards of Canada`). Six
+keystrokes, one API call.
+
+**A false alarm worth recording, because the next agent will see it too.** My
+first run logged *two* searches and then hung until the timeout. Both had the
+same cause: the `q` I sent to quit went into the search field, because a focused
+text field is supposed to swallow letters. So `"boardsq"` fired as a second query
+(0 rows) and the app never quit. That is correct behaviour, not a debounce bug —
+**press Esc before `q` when driving the app through a pty.**
+
+**Wiring, and why it is split the way it is.**
+- `note_search_input` is called from the *keystroke* arm and only reads
+  `state.search_query` — it never takes the character. The reducer owns the
+  buffer, so the debounce cannot drift out of sync with what is on screen. It
+  ignores keystrokes outside `Pane::Search`, since nothing else edits the query.
+- `search_tick` is called from the *tick* arm and returns `Option<Task>`, so the
+  loop's only new responsibility is `spawn_task`. Both helpers are pure enough to
+  test without a terminal, which is how the three loop tests work.
+- `AppEvent::SearchResults` already drops results whose query no longer matches
+  (Task 19), so an out-of-order response cannot overwrite newer results. That
+  check is load-bearing now rather than theoretical.
+
+**Esc/Enter leave the search field without clearing anything.** Both set
+`focus = Focus::Main` and keep the query and results — the user's next move after
+searching is to navigate what they found. Tested.
+
+**Four plan deviations.**
+- `assert!(DEFAULT_DEBOUNCE_MS >= 280)` fails clippy under `-D warnings`
+  (`assertions_on_constants`). Now `const { assert!(…) }`, which is stronger:
+  lowering the constant fails to *compile* rather than failing a test run.
+- Added `tail_to_width` for the query row. `truncate_to_width` keeps the *start*
+  of a string, which would hide the characters just typed; the input keeps the
+  end. Covered by a 40-column test with a 120-column CJK query.
+- The search pane distinguishes "searched, found nothing" (`No matches`) from
+  "not searched yet" (`type to search`). `tracklist`'s generic empty state would
+  have shown the same text for both.
+- Added `retyping_a_previous_query_fires_again`: `should_fire` compares against
+  the last query fired, not a history, so deleting back to `bo` and retyping
+  `boards` searches again. Without that test the "don't fire twice" rule could
+  have been implemented as a permanent block.
+
+**One `AppState` behaviour worth knowing:** `Backspace` uses `String::pop`, which
+removes a whole `char`. Truncating by one byte would split a multi-byte codepoint
+and panic — there is a test with `日本` for exactly this.
+
+Next: **Task 26** — queue view, start of Phase 7. Note from Task 14 still stands:
+`PlayerCommand::PlayNow` inserts after the current track rather than replacing the
+queue, so the queue grows and keeps history. If the queue view should show
+something else, that is a UI decision to make in Task 26, not an actor bug.
