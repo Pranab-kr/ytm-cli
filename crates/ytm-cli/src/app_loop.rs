@@ -7,9 +7,10 @@ use tokio::sync::mpsc;
 use ytm_core::MusicSource;
 use ytm_player::player::{Player, PlayerCommand};
 use ytm_tui::{
-    app::{AppState, Pane, ToastKind},
+    app::{AppState, Modal, Pane, PromptAction, ToastKind},
     event::{AppEvent, InputAction},
     keymap::KeyMap,
+    mutation::Mutation,
     search_state::SearchDebounce,
     theme::Theme,
 };
@@ -28,6 +29,184 @@ pub enum Task {
     LoadArtists,
     OpenPlaylist(ytm_core::PlaylistId),
     Search(String),
+    /// A server-side edit, carrying the token of the optimistic change it
+    /// settles. Same spawn path as a read so the loop keeps one.
+    Mutate {
+        token: u64,
+        task: MutationTask,
+    },
+}
+
+/// Background work that changes server state.
+///
+/// Separate from `Task` because these carry a mutation token: the response has
+/// to name the optimistic edit it settles, or a late failure would revert
+/// whichever edit happened to be newest (FR-C6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+// Delete is wired in Task 31, AddTracks/RemoveTracks in Tasks 31-32. Declared
+// now because `run_mutation` handles all five, and a partial enum would mean
+// touching its match again for every task.
+#[allow(dead_code)]
+pub enum MutationTask {
+    Create {
+        title: String,
+        description: Option<String>,
+        privacy: ytm_core::Privacy,
+    },
+    Rename {
+        id: ytm_core::PlaylistId,
+        title: String,
+    },
+    Delete {
+        id: ytm_core::PlaylistId,
+    },
+    AddTracks {
+        id: ytm_core::PlaylistId,
+        videos: Vec<ytm_core::VideoId>,
+    },
+    RemoveTracks {
+        id: ytm_core::PlaylistId,
+        entries: Vec<ytm_core::SetVideoId>,
+    },
+}
+
+/// Perform one mutation and report the outcome, tagged with its token.
+pub async fn run_mutation(
+    token: u64,
+    task: MutationTask,
+    source: Arc<dyn MusicSource>,
+) -> AppEvent {
+    let (result, ok_msg): (
+        Result<Option<ytm_core::PlaylistId>, ytm_core::SourceError>,
+        &str,
+    ) = match task {
+        MutationTask::Create {
+            title,
+            description,
+            privacy,
+        } => (
+            source
+                .create_playlist(title, description, privacy)
+                .await
+                .map(Some),
+            "playlist created",
+        ),
+        MutationTask::Rename { id, title } => (
+            source
+                .edit_playlist(id, Some(title), None, None)
+                .await
+                .map(|_| None),
+            "playlist renamed",
+        ),
+        MutationTask::Delete { id } => (
+            source.delete_playlist(id).await.map(|_| None),
+            "playlist deleted",
+        ),
+        MutationTask::AddTracks { id, videos } => (
+            source.add_tracks(id, videos).await.map(|_| None),
+            "added to playlist",
+        ),
+        MutationTask::RemoveTracks { id, entries } => (
+            source.remove_tracks(id, entries).await.map(|_| None),
+            "removed from playlist",
+        ),
+    };
+
+    match result {
+        Ok(real_id) => AppEvent::MutationOk {
+            token,
+            real_id,
+            message: ok_msg.to_owned(),
+        },
+        Err(e) => AppEvent::MutationFailed {
+            token,
+            message: e.to_string(),
+        },
+    }
+}
+
+/// A temp id for an optimistic row, replaced by the server's on commit. Prefixed
+/// so a leaked one is obvious in a log rather than looking like a real id.
+fn temp_playlist_id(token: u64) -> ytm_core::PlaylistId {
+    ytm_core::PlaylistId::from(format!("ytm-cli-temp-{token}").as_str())
+}
+
+/// Apply an open prompt and return the edit plus the API call it needs.
+///
+/// Validation happens here rather than in the modal: an empty name is refused
+/// before any optimistic row appears, so there is nothing to roll back.
+pub fn submit_prompt(state: &mut AppState) -> Option<(u64, MutationTask)> {
+    let Some(Modal::Prompt { value, action, .. }) = state.modal.clone() else {
+        return None;
+    };
+    let title = value.trim().to_owned();
+    if title.is_empty() {
+        state.push_toast(ToastKind::Error, "a name is required", state.elapsed_ms);
+        return None;
+    }
+    state.modal = None;
+
+    match action {
+        PromptAction::CreatePlaylist => {
+            // The id is a placeholder until MutationOk brings the real one.
+            // Peek rather than take, so the id names the token that settles it.
+            let temp = ytm_core::Playlist {
+                title: title.clone(),
+                ..ytm_core::Playlist::stub(
+                    temp_playlist_id(state.pending.peek_token()).as_str(),
+                    &title,
+                )
+            };
+            let token = state.begin_mutation(Mutation::CreatePlaylist { temp });
+            Some((
+                token,
+                MutationTask::Create {
+                    title,
+                    description: None,
+                    privacy: ytm_core::Privacy::Private,
+                },
+            ))
+        }
+        PromptAction::RenamePlaylist(id) => {
+            let previous = state.playlists.iter().find(|p| p.id == id)?.title.clone();
+            let token = state.begin_mutation(Mutation::RenamePlaylist {
+                id: id.clone(),
+                previous,
+                next: title.clone(),
+            });
+            Some((token, MutationTask::Rename { id, title }))
+        }
+    }
+}
+
+/// Open the create prompt. Always allowed — it depends on no selection.
+pub fn open_create_prompt(state: &mut AppState) {
+    state.modal = Some(Modal::Prompt {
+        title: "New playlist name".to_owned(),
+        value: String::new(),
+        action: PromptAction::CreatePlaylist,
+    });
+}
+
+/// Open the rename prompt for the selected playlist, pre-filled with its title.
+///
+/// Refuses a system playlist before any API call: FR-C2 does not apply to them,
+/// and YouTube would reject the edit anyway — better to say so immediately than
+/// to show an optimistic rename that snaps back a second later.
+pub fn open_rename_prompt(state: &mut AppState) -> Option<ytm_core::PlaylistId> {
+    let p = state.selected_playlist()?;
+    if p.is_system {
+        let msg = format!("\"{}\" cannot be renamed", p.title);
+        state.push_toast(ToastKind::Error, &msg, state.elapsed_ms);
+        return None;
+    }
+    let (id, title) = (p.id.clone(), p.title.clone());
+    state.modal = Some(Modal::Prompt {
+        title: "Rename playlist".to_owned(),
+        value: title,
+        action: PromptAction::RenamePlaylist(id.clone()),
+    });
+    Some(id)
 }
 
 /// Translate one input action into player commands, state changes, and
@@ -40,8 +219,14 @@ pub fn dispatch_input(
 ) -> Option<Task> {
     use InputAction as A;
 
-    // A modal owns the keyboard, transport included; let the state handle it.
+    // A modal owns the keyboard, transport included. Enter on a prompt is the
+    // one action the reducer cannot finish, because submitting means an API
+    // call — everything else is a state transition.
     if state.modal.is_some() {
+        if action == A::Confirm && matches!(state.modal, Some(Modal::Prompt { .. })) {
+            let (token, task) = submit_prompt(state)?;
+            return Some(Task::Mutate { token, task });
+        }
         state.apply(AppEvent::Input(action));
         return None;
     }
@@ -138,6 +323,10 @@ pub fn dispatch_input(
             state.selected = 0;
         }
         A::ClearQueue => {}
+        A::CreatePlaylist => open_create_prompt(state),
+        A::RenamePlaylist => {
+            open_rename_prompt(state);
+        }
         A::Refresh => {
             let task = match state.pane {
                 Pane::Songs => Task::LoadSongs,
@@ -296,6 +485,9 @@ fn spawn_task(task: Task, source: Arc<dyn MusicSource>, tx: mpsc::UnboundedSende
                 Ok(tracks) => AppEvent::SearchResults { query: q, tracks },
                 Err(e) => AppEvent::Error(e.to_string()),
             },
+            // Failures come back as MutationFailed, not Error: the token has to
+            // survive so `rollback` reverts the right edit.
+            Task::Mutate { token, task } => run_mutation(token, task, source.clone()).await,
         };
         match &ev {
             AppEvent::Error(m) => tracing::warn!(error = %m, "background task failed"),
@@ -687,6 +879,172 @@ mod tests {
         let mut s = queue_of_three();
         dispatch_input(InputAction::ClearQueue, &mut s, &src, &*player);
         assert_eq!(s.selected, 0);
+    }
+
+    #[tokio::test]
+    async fn creating_a_playlist_calls_the_source_and_commits() {
+        let src = Arc::new(MockSource::new());
+        let mut s = AppState {
+            modal: Some(ytm_tui::app::Modal::Prompt {
+                title: "Name".into(),
+                value: "Road Trip".into(),
+                action: ytm_tui::app::PromptAction::CreatePlaylist,
+            }),
+            ..Default::default()
+        };
+
+        let (token, task) = submit_prompt(&mut s).expect("a prompt submission yields a mutation");
+        assert_eq!(
+            s.playlists.len(),
+            1,
+            "FR-C6: optimistic row appears at once"
+        );
+        assert!(s.modal.is_none(), "the modal closes on submit");
+
+        let ev = run_mutation(token, task, src.clone()).await;
+        assert!(
+            src.calls().iter().any(|c| c.starts_with("create_playlist")),
+            "got {:?}",
+            src.calls()
+        );
+        match ev {
+            AppEvent::MutationOk {
+                token: t, real_id, ..
+            } => {
+                assert_eq!(t, token);
+                assert!(real_id.is_some(), "commit needs the real id to swap in");
+            }
+            other => panic!("expected MutationOk, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_create_yields_mutation_failed_with_the_same_token() {
+        let src = Arc::new(MockSource::new());
+        src.fail_next(ytm_core::SourceError::RateLimited);
+        let ev = run_mutation(
+            7,
+            MutationTask::Create {
+                title: "X".into(),
+                description: None,
+                privacy: ytm_core::Privacy::Private,
+            },
+            src,
+        )
+        .await;
+        match ev {
+            AppEvent::MutationFailed { token, message } => {
+                assert_eq!(token, 7);
+                assert!(message.contains("too many requests"), "got: {message}");
+            }
+            other => panic!("expected MutationFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn renaming_sends_the_new_title() {
+        let src =
+            Arc::new(MockSource::new().with_playlists(vec![ytm_core::Playlist::stub("p1", "Old")]));
+        let _ = run_mutation(
+            1,
+            MutationTask::Rename {
+                id: "p1".into(),
+                title: "New".into(),
+            },
+            src.clone(),
+        )
+        .await;
+        assert!(src.calls().iter().any(|c| c.starts_with("edit_playlist")));
+        assert_eq!(src.library_playlists().await.unwrap()[0].title, "New");
+    }
+
+    #[test]
+    fn renaming_a_system_playlist_is_refused_before_any_api_call() {
+        let mut s = AppState {
+            playlists: vec![ytm_core::Playlist {
+                is_system: true,
+                ..ytm_core::Playlist::stub("LM", "Your Likes")
+            }],
+            selected: 0,
+            ..Default::default()
+        };
+        assert!(open_rename_prompt(&mut s).is_none(), "must refuse");
+        assert_eq!(s.toasts.len(), 1, "and say why");
+        assert!(
+            s.modal.is_none(),
+            "no prompt for a playlist that cannot change"
+        );
+    }
+
+    #[test]
+    fn renaming_an_editable_playlist_prefills_its_current_title() {
+        // An empty field would make rename feel like create.
+        let mut s = AppState {
+            playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
+            selected: 0,
+            ..Default::default()
+        };
+        assert!(open_rename_prompt(&mut s).is_some());
+        match &s.modal {
+            Some(ytm_tui::app::Modal::Prompt { value, .. }) => assert_eq!(value, "Focus"),
+            other => panic!("expected a prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn submitting_an_empty_name_is_refused() {
+        let mut s = AppState {
+            modal: Some(ytm_tui::app::Modal::Prompt {
+                title: "Name".into(),
+                value: "   ".into(),
+                action: ytm_tui::app::PromptAction::CreatePlaylist,
+            }),
+            ..Default::default()
+        };
+        assert!(submit_prompt(&mut s).is_none());
+        assert!(
+            s.playlists.is_empty(),
+            "no optimistic row for an invalid name"
+        );
+        assert_eq!(s.toasts.len(), 1, "and say why");
+    }
+
+    #[test]
+    fn a_rejected_rename_puts_the_old_title_back() {
+        // The whole point of the mutation log: the row reverts, not the list.
+        let mut s = AppState {
+            playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
+            selected: 0,
+            modal: Some(ytm_tui::app::Modal::Prompt {
+                title: "Rename".into(),
+                value: "Deep Focus".into(),
+                action: ytm_tui::app::PromptAction::RenamePlaylist("p1".into()),
+            }),
+            ..Default::default()
+        };
+        let (token, _) = submit_prompt(&mut s).expect("rename must start");
+        assert_eq!(s.playlists[0].title, "Deep Focus");
+        s.apply(AppEvent::MutationFailed {
+            token,
+            message: "rejected".into(),
+        });
+        assert_eq!(s.playlists[0].title, "Focus");
+    }
+
+    #[test]
+    fn n_opens_a_create_prompt_and_r_a_rename_prompt() {
+        let (src, player) = deps();
+        let mut s = AppState {
+            playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
+            selected: 0,
+            ..Default::default()
+        };
+        dispatch_input(InputAction::CreatePlaylist, &mut s, &src, &*player);
+        assert!(matches!(s.modal, Some(ytm_tui::app::Modal::Prompt { .. })));
+        s.modal = None;
+        dispatch_input(InputAction::RenamePlaylist, &mut s, &src, &*player);
+        assert!(matches!(s.modal, Some(ytm_tui::app::Modal::Prompt { .. })));
+        assert!(player.commands().is_empty(), "neither touches the player");
     }
 
     #[test]

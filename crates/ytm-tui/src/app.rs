@@ -154,10 +154,12 @@ impl AppState {
                 }
             }
 
-            AppEvent::MutationOk { token, message } => {
-                // The real id for a create arrives via PlaylistsLoaded on the
-                // next refresh; nothing here needs it.
-                self.commit(token, None);
+            AppEvent::MutationOk {
+                token,
+                real_id,
+                message,
+            } => {
+                self.commit(token, real_id);
                 self.push_toast(ToastKind::Success, &message, self.elapsed_ms);
             }
             AppEvent::MutationFailed { token, message } => {

@@ -71,8 +71,10 @@ pub enum AppEvent {
     },
 
     /// A mutation succeeded server-side; `token` matches the optimistic edit.
+    /// `real_id` is the server's id for a create, which replaces the temp one.
     MutationOk {
         token: u64,
+        real_id: Option<PlaylistId>,
         message: String,
     },
     /// A mutation failed; roll back the edit tagged with `token`.

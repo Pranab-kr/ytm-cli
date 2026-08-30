@@ -48,6 +48,13 @@ impl MutationLog {
         self.next
     }
 
+    /// The token `next_token` will return, without consuming it. A create needs
+    /// its token to build the temp id *before* the edit is applied; consuming
+    /// one here would make the id and the mutation disagree.
+    pub fn peek_token(&self) -> u64 {
+        self.next + 1
+    }
+
     pub fn insert(&mut self, token: u64, m: Mutation) {
         self.pending.insert(token, m);
     }
@@ -84,6 +91,13 @@ mod tests {
     use super::*;
     use crate::app::AppState;
     use ytm_core::{Playlist, PlaylistId, Track};
+
+    #[test]
+    fn peek_shows_the_next_token_without_taking_it() {
+        let mut log = MutationLog::default();
+        let peeked = log.peek_token();
+        assert_eq!(log.next_token(), peeked, "peek must not consume");
+    }
 
     #[test]
     fn tokens_are_unique() {
@@ -286,10 +300,16 @@ mod tests {
         });
         s.apply(AppEvent::MutationOk {
             token,
+            real_id: Some(PlaylistId::from("real-id")),
             message: "created".into(),
         });
         assert!(s.pending.is_empty());
         assert_eq!(s.playlists.len(), 1, "the row stays");
+        assert_eq!(
+            s.playlists[0].id,
+            PlaylistId::from("real-id"),
+            "and picks up the server's id"
+        );
     }
 
     #[test]
