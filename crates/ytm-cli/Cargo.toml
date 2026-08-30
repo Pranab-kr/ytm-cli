@@ -13,6 +13,7 @@ ytm-core = { path = "../ytm-core" }
 ytm-player = { path = "../ytm-player" }
 ytm-tui = { path = "../ytm-tui" }
 clap.workspace = true
+thiserror.workspace = true
 color-eyre.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

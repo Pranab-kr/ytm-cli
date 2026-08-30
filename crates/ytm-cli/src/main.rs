@@ -1,3 +1,4 @@
+mod config;
 mod logging;
 
 use crossterm::{
@@ -6,7 +7,6 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io::{self, Stdout};
-use std::path::PathBuf;
 
 /// Restores the terminal on drop, including during a panic unwind (NFR-5).
 // Constructed by the event loop in Task 22; nothing enters the alternate
@@ -35,16 +35,16 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Platform cache dir for logs, e.g. `~/.cache/ytm-cli/logs` on Linux.
-fn log_dir() -> PathBuf {
-    directories::ProjectDirs::from("", "", "ytm-cli")
-        .map(|d| d.cache_dir().join("logs"))
-        .unwrap_or_else(|| std::env::temp_dir().join("ytm-cli/logs"))
-}
-
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     // Held for the process lifetime; dropping it loses buffered log lines.
-    let _log_guard = logging::init(&log_dir())?;
+    let _log_guard = logging::init(&config::paths::log_dir())?;
+    let cfg = config::Config::load(None)?;
+    tracing::info!(
+        auth = ?cfg.auth.kind,
+        volume = cfg.playback.volume,
+        vim_keys = cfg.ui.vim_keys,
+        "config loaded"
+    );
     Ok(())
 }

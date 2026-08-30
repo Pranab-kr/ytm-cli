@@ -5579,6 +5579,7 @@ dependencies = [
  "ratatui",
  "serde",
  "souvlaki",
+ "thiserror 2.0.20",
  "tokio",
  "toml",
  "tracing",
