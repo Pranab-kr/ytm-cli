@@ -3,10 +3,10 @@
 //! tiny terminal is how a TUI panics and loses the user's session.
 
 use crate::{
-    app::AppState,
+    app::{AppState, Pane},
     theme::Theme,
     util::text::truncate_to_width,
-    widgets::{nowplaying, sidebar},
+    widgets::{nowplaying, sidebar, tracklist},
 };
 use ratatui::{
     Frame,
@@ -59,13 +59,21 @@ fn draw_rule(f: &mut Frame, area: Rect, t: &Theme) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
-/// The main pane. Task 21 draws only the heading; the list widgets that fill it
-/// arrive in Tasks 23-26.
+/// The main pane: a heading row, then the list for whichever pane is active.
+///
+/// Panes whose list widget has not landed yet (Tasks 24-26) fall through to the
+/// heading alone rather than drawing a list of the wrong shape.
 fn draw_main(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     if area.width == 0 || area.height == 0 {
         return;
     }
     let w = area.width as usize;
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+
     let heading = truncate_to_width(&pane_title(s), w);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -74,12 +82,19 @@ fn draw_main(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
                 .fg(t.fg_bright)
                 .add_modifier(Modifier::BOLD),
         ))),
-        area,
+        rows[0],
     );
+
+    match s.pane {
+        // Track-shaped panes. Playlists shows tracks only once one is open;
+        // the playlist list itself is Task 24.
+        Pane::Songs | Pane::Search | Pane::Queue => tracklist::draw(f, rows[1], s, t),
+        Pane::Playlists if s.open_playlist.is_some() => tracklist::draw(f, rows[1], s, t),
+        _ => {}
+    }
 }
 
 fn pane_title(s: &AppState) -> String {
-    use crate::app::Pane;
     match s.pane {
         Pane::Playlists => match &s.open_playlist {
             Some(id) => s
