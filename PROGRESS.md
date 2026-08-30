@@ -3,12 +3,12 @@
 **Read this first. Update it before you stop.** It is the handoff between agents.
 
 Last updated: 2026-08-31 by the implementation agent
-Current phase: **Phase 6 in progress. Tasks 1-23 committed and green.**
-Next action: **Task 24** — playlist, album, and artist lists.
+Current phase: **Phase 6 in progress. Tasks 1-24 committed and green.**
+Next action: **Task 25** — search with debounce. Last task in Phase 6.
 
-**The app runs and shows real music.** `cargo run -p ytm-cli` loads the owner's
-10 playlists, and Enter on one loads and renders its 83 real tracks with titles,
-artists, and durations. The *playlist* list itself is still unrendered — Task 24.
+**The app is now browsable.** `cargo run -p ytm-cli` lists the owner's 10 real
+playlists with track counts, and Enter on one renders its tracks. Every pane
+except Search draws real rows. Search is Task 25.
 Blocked on the owner: nothing. **Both gates are GREEN.**
 
 Cookie auth is the live auth path. The cookie file expires (see "Cookie
@@ -77,7 +77,7 @@ guessing, and re-verify against the vendored source if a call does not compile.
 | 3 — Audio ⚠️ | 10–12 | ✅ done, gate GREEN | yt-dlp resolver, mpv plays a real track |
 | 4 — Player | 13–16 | ✅ done | Actor thread, queue, transport |
 | 5 — TUI shell | 17–21 | ✅ done | Keymap, theme, text helpers, sidebar, now-playing bar |
-| 6 — Browse | 22–25 | 🟡 in progress (22-23 done) | Event loop, lists, search with debounce |
+| 6 — Browse | 22–25 | 🟡 in progress (22-24 done) | Event loop, lists, search with debounce |
 | 7 — Queue UI | 26–27 | ⬜ not started | Queue view, toasts, help |
 | 8 — CRUD | 28–32 | ⬜ not started | Playlist create/rename/delete, add/remove tracks |
 | 9 — Polish | 33–38 | ⬜ not started | Cache, album art, MPRIS, CLI, README |
@@ -671,3 +671,50 @@ each other in one script.
 Next: **Task 24** — playlist, album, and artist lists. The playlist pane
 currently shows only its heading, so the app cannot yet be navigated without
 already knowing Enter loads the first playlist.
+
+### 2026-08-31 — implementation agent (Task 24, every browse pane renders)
+
+**Task 24 done.** `crates/ytm-tui/src/widgets/playlists.rs` — `draw_playlists`,
+`draw_albums`, `draw_artists` — wired into `render::draw_main`. 7 tests. Gate
+green, committed.
+
+**Verified against the real library.** The playlist pane lists the owner's 10
+playlists with counts: `Eng_songs 87 tracks`, `Funk 90 tracks`,
+`AFTER EFFECTS TRANSITIONS 400 tracks` — the same titles recorded when Gate 1
+went green. Albums and artists are covered by unit tests only: the owner's
+library returns none through `library_albums`/`library_artists` on this account,
+so there is nothing live to render there yet. Worth knowing before someone reads
+an empty Albums pane as a bug — check the log for `event="albums" rows=0` first.
+
+**No `read-only` marker appeared in the live run** because none of the 10 came
+back with `is_system: true`. Both branches are unit-tested, so the marker is
+pinned either way; if "Your Likes" should appear in the library list and does
+not, that is a `mapping::playlist_from_library` question, not a widget one.
+
+**One shared helper, three widgets.** `draw_list` holds the scaffolding every
+list repeats — zero-area guard, empty-state message, `visible_window`, selection
+style — and takes a closure that builds one row's spans. The three public
+functions are then just column math. This is deliberate: the plan said "follow
+the `tracklist::draw` shape exactly", and four hand-copied versions of that
+shape would drift the first time one of them changed.
+
+**Two plan deviations.**
+- The plan specified a 60% title column for playlists. A playlist row has only
+  one text column, so 60% would leave ~40% of every row blank while truncating
+  long titles for nothing; the title now takes what the count and marker do not.
+  `AFTER EFFECTS TRANSITIONS` fits because of it.
+- Its `a_system_playlist_is_visually_marked_as_read_only` test asserted only
+  that the title rendered — which the other tests already cover, so it would
+  pass with no marker at all, exactly the FR-C requirement it names. It now
+  asserts `read-only` is present, plus a new inverse test that an editable
+  playlist does **not** show it (or printing the marker unconditionally would
+  pass). Also added an empty-state test across all three panes.
+
+**`draw_main`'s match is now exhaustive on `Pane`** — no `_` arm. Adding a pane
+will fail to compile rather than silently rendering nothing, which is how the
+missing panes went unnoticed between Tasks 21 and 23.
+
+Next: **Task 25** — search with debounce, the last task in Phase 6. Note that
+`Task::Search` in `app_loop.rs` is `#[allow(dead_code)]` and `spawn_task` already
+handles it; Task 25 emits it and removes the attribute. `Pane::Search` already
+routes to `tracklist::draw`, so results will render as soon as they arrive.
