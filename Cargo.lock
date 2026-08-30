@@ -5576,6 +5576,7 @@ dependencies = [
  "color-eyre",
  "crossterm",
  "directories",
+ "futures",
  "ratatui",
  "serde",
  "souvlaki",
