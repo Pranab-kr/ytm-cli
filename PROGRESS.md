@@ -94,7 +94,7 @@ before building anything on top.
 
 | Gate | Status | Notes |
 |---|---|---|
-| 1 — live API | ⬜ untested | No OAuth client exists yet. `YtMusicSource` is written and compiles; `dump_playlists` example is ready. Needs the owner. |
+| 1 — live API | ⛔ **FAILED — external cause** | OAuth login itself succeeds (token stored, keyring round-trip OK, correct scope). But **InnerTube rejects the OAuth token**: `POST music.youtube.com/youtubei/v1/browse` returns `400 INVALID_ARGUMENT`. The same token succeeds on the official Data API v3, which returned the owner's 5 real playlists — so the token is valid and the failure is Google-side, not ours. Full diagnosis below. |
 | 2 — real audio | ✅ GREEN 2026-08-30 | Owner confirmed audible music. yt-dlp resolved a stream, mpv played it, clock advanced 0→9s of 213s. PipeWire sink at 39%. |
 
 ---
@@ -174,9 +174,10 @@ one should stop, note it here, and ask.
 
 | Task | What is needed | Status |
 |---|---|---|
-| 8.5 | Create a Google Cloud OAuth client ("TVs and Limited Input devices"), then run `YTM_CLIENT_ID=… YTM_CLIENT_SECRET=… cargo run -p ytm-core --example login_spike` and authorize in a browser | ⬜ **BLOCKING Gate 1** |
+| 8.5 | Create a Google Cloud OAuth client ("TVs and Limited Input devices"), add the `.../auth/youtube` scope under Data Access, add the music account as a test user, put id/secret in `~/.config/ytm-cli/config.toml`, run `cargo run -p ytm-core --example login_spike` | ✅ done 2026-08-30 — login works |
 | 9.1 | Capture a real fixture: `… cargo run -p ytm-core --example dump_playlists -- --raw > /tmp/raw.json`, scrub account ids/emails/personal browseIds, replace `crates/ytm-core/tests/fixtures/library_playlists.json` (currently **SYNTHETIC**) | ⬜ |
-| 9.7 | Gate 1: `… cargo run -p ytm-core --example dump_playlists` prints real playlist titles | ⬜ **BLOCKING Phase 5** |
+| 9.7 | Gate 1: `cargo run -p ytm-core --example dump_playlists` prints real playlist titles | ⛔ **FAILS with 400** — needs the owner's auth decision, see Open question 3 |
+| 9.7b | If choosing the cookie path: export `music.youtube.com` cookies from a logged-in browser to a Netscape-format `cookies.txt`, set `auth.kind = "cookie"` and `auth.cookie_file` in config.toml | ⬜ **BLOCKING Gate 1** |
 | 12.6 | Confirm audio is audible | ✅ done 2026-08-30 |
 | 30.5 / 31.5 / 32.5 | Verify playlist edits appear in the YouTube Music web UI | ⬜ |
 | 34.5 | Check album art in a graphics-capable terminal | ⬜ |
@@ -205,6 +206,52 @@ Options for the owner:
 - Drop FR-C5 (remove-track-from-playlist).
 
 Not blocking until **Task 32**. Decide before then.
+
+**3. Gate 1 fails: InnerTube rejects OAuth tokens. The owner must pick an auth path.**
+
+Diagnosed 2026-08-30 by isolating each layer with raw `curl`, one variable at a
+time. Established facts, not guesses:
+
+- OAuth device-code login **works**. Token stored, keyring round-trip true.
+- The token is **valid**: `oauth2.googleapis.com/tokeninfo` reports the right
+  scope (`.../auth/youtube`) and the right `aud` (our client id), unexpired.
+- The token **works on the official API**: `GET
+  www.googleapis.com/youtube/v3/playlists?mine=true` returned **HTTP 200 and the
+  owner's 5 real playlists**.
+- The token **fails on InnerTube**: `POST
+  music.youtube.com/youtubei/v1/browse` with `browseId=FEmusic_liked_playlists`
+  returns `400 INVALID_ARGUMENT`, in Google's API-gateway error envelope rather
+  than InnerTube's own — i.e. rejected before reaching the music backend.
+- Ruled out by direct test, all still 400: with and without the `key=` param;
+  `clientVersion` current (`1.20260830.01.00`) and older (`1.20240826.01.00`);
+  Firefox and Cobalt user agents; `X-Goog-Request-Time` present and absent;
+  `hl`/`gl` added. `ANDROID_MUSIC` and `IOS_MUSIC` give a *different* error
+  ("Precondition check failed"), and `TVHTML5` returns 200 but only a
+  `tvBrowseRenderer` navigation shell — zero playlist ids, no `musicShelfRenderer`.
+  So no client-name substitution rescues it.
+
+**This is not a bug in this codebase and not a bad OAuth client.** It is the same
+breakage the Python `ytmusicapi` project hit: Google stopped honouring
+device-flow OAuth tokens on the InnerTube endpoints. `ytmapi-rs` 0.3.3's OAuth
+path cannot reach the library, whatever we pass it.
+
+Options for the owner (nothing further can be verified without this decision):
+
+- **A — browser-cookie auth (recommended).** Already a settled first-class
+  fallback (FR-A5) and already implemented:
+  `YtMusicSource::from_cookie_file` compiles today. Full YouTube Music API
+  access, so every FR stays reachable. Cost: the owner exports cookies from a
+  logged-in browser, and re-exports when they eventually expire.
+- **B — official Data API v3.** Proven working with this exact token. But it is
+  not the YouTube Music API: no `FEmusic_*` library browsing, no music-specific
+  album/artist shapes, and a 10k units/day quota. Would mean rewriting
+  `ytm-core`'s source layer and abandoning `ytmapi-rs`. Large spec deviation.
+- **C — patch/fork `ytmapi-rs`.** Only worth it if upstream has a fix; the
+  evidence says the block is Google-side, so a fork likely cannot help either.
+
+The OAuth code stays as written either way — it is correct, it is tested, and it
+will work again if Google restores the path. `AuthKind::Cookie` already exists in
+config and `MusicSource` already abstracts both.
 
 **2. The test fixture is SYNTHETIC.** `crates/ytm-core/tests/fixtures/library_playlists.json`
 is hand-written to the documented shape. It validates JSON parsing only, not the
@@ -338,3 +385,31 @@ current track and steps onto it, so the queue grows rather than being replaced.
 That matches "replacing whatever is playing" for audio purposes but leaves
 history in the queue. If the queue view should show something else, that is a UI
 decision, not an actor bug.
+
+### 2026-08-30 — implementation agent (Tasks 17-18, Gate 1 diagnosis)
+
+Tasks 17 (unicode text helpers, 7 tests) and 18 (theme, 5 tests) done and
+committed — both pure functions with no `MusicSource` dependency, so a Gate 1
+failure cannot invalidate them. Held at Task 19 (`AppState`) deliberately.
+
+Also moved the spike examples off env vars onto `~/.config/ytm-cli/config.toml`
+(mode 600, outside the repo) so the client secret never crosses a shell command,
+a transcript, or a process listing. Verified no credential values are tracked in
+git — the only matches are key *names* in source and docs.
+
+**Gate 1 failed, and the cause is external.** See Open question 3 for the full
+evidence. Short version: OAuth login works and the token is provably good (it
+returns the owner's 5 real playlists from the official Data API v3), but
+InnerTube answers `400 INVALID_ARGUMENT` for every variant tried. Google no
+longer honours device-flow OAuth on those endpoints — the same wall the Python
+`ytmusicapi` project hit.
+
+Method note for whoever picks this up: I isolated it with raw `curl` against the
+live endpoint, varying one field per request, after dumping the access token to a
+mode-600 temp file. That file and the throwaway `dump_token.rs` example were
+shredded and deleted afterwards — do not leave either lying around if you repeat
+the exercise.
+
+Do not "fix" the OAuth code. It is correct. The next step is the owner's auth
+decision, and if that is the cookie path, `YtMusicSource::from_cookie_file`
+already exists and needs only a `cookies.txt`.
