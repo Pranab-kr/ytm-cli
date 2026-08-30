@@ -3,8 +3,8 @@
 **Read this first. Update it before you stop.** It is the handoff between agents.
 
 Last updated: 2026-08-30 by the implementation agent
-Current phase: **Phase 5 in progress. Tasks 1-19 committed and green.**
-Next action: **Task 20** — keymap.
+Current phase: **Phase 5 complete. Tasks 1-21 committed and green.**
+Next action: **Task 22** — the event loop. Start of Phase 6.
 Blocked on the owner: nothing. **Both gates are GREEN.**
 
 Cookie auth is the live auth path. The cookie file expires (see "Cookie
@@ -15,8 +15,12 @@ code bug.
 
 ## Where things stand
 
-Tasks 1-19 are implemented, committed, and pass `./scripts/check.sh`. Phases 0-4
-are complete. Phase 5 has started.
+Tasks 1-21 are implemented, committed, and pass `./scripts/check.sh`. Phases 0-5
+are complete. Phase 6 has not started.
+
+The TUI now renders: `render()` draws the sidebar, a dim vertical rule, a main
+pane heading, and the now-playing bar, and the keymap turns key presses into
+`InputAction`s. Nothing wires it to a terminal yet — that is Task 22.
 
 **Gate 2 (real audio) is GREEN.** The owner confirmed hearing music twice on
 2026-08-30: once through the raw `MpvHandle`, and again through the full player
@@ -31,7 +35,7 @@ Verified twice by two different runs. That exercises the full path: cookie auth
 The OAuth path stays broken for external reasons (Open question 3) and is left in
 place unchanged.
 
-**Phase 5 is now cleared to proceed.** The CLAUDE.md rule (no TUI code before
+**Phase 5 was cleared to proceed and is now done.** The CLAUDE.md rule (no TUI code before
 both gates are green) is satisfied: Gate 1 green via cookie auth, Gate 2 green
 via real audio. Tasks 17-18 were done while Gate 1 was red because they are pure
 functions; Task 19 onward was deliberately held until the gate passed, and is now
@@ -66,8 +70,8 @@ guessing, and re-verify against the vendored source if a call does not compile.
 | 2 — Auth ⚠️ | 6–9 | ✅ done, gate GREEN (cookie) | OAuth login, keyring, live library fetch |
 | 3 — Audio ⚠️ | 10–12 | ✅ done, gate GREEN | yt-dlp resolver, mpv plays a real track |
 | 4 — Player | 13–16 | ✅ done | Actor thread, queue, transport |
-| 5 — TUI shell | 17–21 | 🟡 in progress (17-19 done) | Event loop, sidebar, now-playing bar |
-| 6 — Browse | 22–25 | ⬜ not started | Lists, search with debounce |
+| 5 — TUI shell | 17–21 | ✅ done | Keymap, theme, text helpers, sidebar, now-playing bar |
+| 6 — Browse | 22–25 | ⬜ not started | Event loop, lists, search with debounce |
 | 7 — Queue UI | 26–27 | ⬜ not started | Queue view, toasts, help |
 | 8 — CRUD | 28–32 | ⬜ not started | Playlist create/rename/delete, add/remove tracks |
 | 9 — Polish | 33–38 | ⬜ not started | Cache, album art, MPRIS, CLI, README |
@@ -507,3 +511,45 @@ tests rather than the implementation:
 
 Reminder that bit again: run `./scripts/check.sh` as its own command, never
 chained with `&&` before a commit, or a fmt-only failure gets masked.
+
+### 2026-08-30 — implementation agent (Tasks 20-21, Phase 5 complete)
+
+**Phase 5 done.** Keymap and the render entry point. Two commits, gate green on
+each. `cargo test -p ytm-tui` is 37 tests.
+
+- **Task 20** — `KeyMap`, 9 tests. Focus-sensitive by design: in
+  `Focus::SearchInput` every `KeyCode::Char` becomes `InputAction::Char`, so 'j'
+  types a letter instead of scrolling. Ctrl-C is checked before that branch, so
+  quit works while typing. `from_toml_str` makes a binding exclusive — it drops
+  any existing char bound to the same action before inserting the new one, or
+  `down = "e"` would leave both 'j' and 'e' scrolling down.
+- **Task 21** — `progress_bar`, the now-playing bar, the sidebar, and
+  `render::render`. 7 tests, including the 8x4 narrow-terminal one.
+
+**One plan test bug, and it matters for Tasks 23-27 which reuse the pattern.**
+Task 21's `progress_bar_uses_partial_blocks_for_sub_cell_precision` asserted
+`('\u{258F}'..='\u{2588}').contains(&c)`. That range is **inverted** — 258F is
+greater than 2588, so it is empty and contains nothing; the test could not pass
+against any output. Rewrote it as `EIGHTHS[..7].contains(&c)`, which is what it
+meant and is strictly stronger: a bar of solid full blocks now fails it, whereas
+a correctly-ordered range would have accepted `█` as a "partial" block.
+
+**One deliberate deviation from the plan's implementation code.** Its row-2
+layout computed the bar width with `times.len() + tail.len() + flags.len()`.
+`flags` holds `⇄`, `①`, `↻` — three bytes each, one column each — so byte length
+over-counted the chrome by up to 6 and shortened the bar. Now uses
+`util::text::display_width`, per the CLAUDE.md columns-not-bytes rule. Worth
+watching for in Tasks 23-26: the plan uses `.len()` on display strings in a few
+more places.
+
+**What renders today.** Sidebar (22 cols, labels `Playlists`/`Songs`/`Albums`/
+`Artists`/`Search`/`Queue`, reversed-background selection), a dim `│` rule, a
+main pane showing only its heading, and the 3-row now-playing bar. The list
+widgets that fill the main pane are Tasks 23-26; `render::draw_main` is the seam
+they plug into. Nothing has touched a real terminal yet — `render` is only ever
+called from `TestBackend` so far. Task 22 wires it up.
+
+Two notes carried forward for **Task 22**, both already recorded above: surface
+the expired-cookie-vs-empty-library ambiguity (a successful library call
+returning zero rows is the only signal), and every widget must keep guarding on
+a zero-sized `Rect` — the 8x4 test is the regression net for that.
