@@ -10,6 +10,7 @@ mock = []
 [dependencies]
 ytm-core = { path = "../ytm-core" }
 libmpv2.workspace = true
+libmpv2-sys = "4.0.1"
 youtube_dl.workspace = true
 tokio.workspace = true
 thiserror.workspace = true

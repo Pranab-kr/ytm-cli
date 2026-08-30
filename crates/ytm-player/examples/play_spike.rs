@@ -1,46 +1,76 @@
-//! Proves the whole audio path: yt-dlp -> mpv -> speakers.
+//! Proves the whole audio path: yt-dlp -> mpv -> speakers, driven through the
+//! player actor exactly as the TUI will drive it.
 //!
 //! `println!` is allowed here — examples are exempt from the no-stdout rule.
 //!
-//! Run: cargo run -p ytm-player --example play_spike -- <videoId>
+//! Run: cargo run -p ytm-player --example play_spike -- [videoId ...]
 
-use ytm_core::VideoId;
-use ytm_player::{mpv_backend::MpvHandle, resolver::StreamResolver};
+use ytm_core::{Track, VideoId};
+use ytm_player::actor::spawn_player;
+use ytm_player::player::{Player, PlayerCommand, PlayerEvent};
+
+fn stub(id: &str, title: &str) -> Track {
+    Track {
+        video_id: VideoId::from(id),
+        ..Track::stub(id, title)
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let id = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "dQw4w9WgXcQ".to_owned());
-    let id = VideoId::from(id.as_str());
+    let ids: Vec<String> = std::env::args().skip(1).collect();
+    let tracks = if ids.is_empty() {
+        vec![stub("dQw4w9WgXcQ", "first"), stub("9bZkp7q19f0", "second")]
+    } else {
+        ids.iter().map(|i| stub(i, i)).collect()
+    };
 
-    let resolver = StreamResolver::new();
-    println!("resolving {id} ...");
-    let url = resolver.resolve(&id).await?;
-    println!("resolved: {}...", &url[..60.min(url.len())]);
+    let (player, mut events) = spawn_player(60)?;
+    println!("actor started; queueing {} tracks", tracks.len());
+    player.send(PlayerCommand::EnqueueBack(tracks))?;
 
-    let h = MpvHandle::new()?;
-    h.set_volume(60)?;
-    h.load(&url)?;
-    println!("playing 10s ...");
+    // Watch events for 20s, then skip to prove Next works, then stop.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut skipped = false;
+    let mut progress_ticks = 0u32;
 
-    let start = std::time::Instant::now();
-    let mut progressed = false;
-    while start.elapsed().as_secs() < 10 {
-        if let Some(Ok(ev)) = h.poll_event(0.5) {
-            println!("event: {ev:?}");
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            break;
         }
-        if let (Some(p), Some(d)) = (h.position(), h.duration()) {
-            println!("  {p}s / {d}s");
-            if p > 0 {
-                progressed = true;
+        match tokio::time::timeout(left, events.recv()).await {
+            Ok(Some(ev)) => match ev {
+                // Progress is 4Hz; printing every tick would drown everything else.
+                PlayerEvent::Progress { position, duration } => {
+                    progress_ticks += 1;
+                    if progress_ticks.is_multiple_of(8) {
+                        println!("  {position} / {duration}");
+                    }
+                    if !skipped && position.as_secs() >= 8 {
+                        skipped = true;
+                        println!("-> sending Next");
+                        player.send(PlayerCommand::Next)?;
+                    }
+                }
+                PlayerEvent::TrackChanged(Some(t)) => println!("TrackChanged: {}", t.title),
+                PlayerEvent::TrackChanged(None) => println!("TrackChanged: queue empty"),
+                other => println!("{other:?}"),
+            },
+            Ok(None) => {
+                println!("event channel closed");
+                break;
             }
+            Err(_) => break,
         }
     }
-    if progressed {
-        println!("\nGATE: mpv advanced the playback clock. Confirm you HEARD audio.");
+
+    player.send(PlayerCommand::Shutdown)?;
+    println!("\nprogress ticks: {progress_ticks}");
+    if progress_ticks > 0 && skipped {
+        println!("GATE: actor played, reported progress at ~4Hz, and honoured Next.");
     } else {
-        println!("\nGATE: FAILED — the clock never advanced past 0s.");
+        println!("GATE: FAILED — ticks={progress_ticks} skipped={skipped}");
     }
     Ok(())
 }

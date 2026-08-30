@@ -5612,6 +5612,7 @@ name = "ytm-player"
 version = "0.1.0"
 dependencies = [
  "libmpv2",
+ "libmpv2-sys",
  "rand 0.9.5",
  "thiserror 2.0.20",
  "tokio",
