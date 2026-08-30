@@ -3,15 +3,26 @@
 **Read this first. Update it before you stop.** It is the handoff between agents.
 
 Last updated: 2026-08-31 by the implementation agent
-Current phase: **Phase 7 complete. Tasks 1-27 committed and green.**
-Next action: **Task 28** — optimistic mutation tracking. Start of Phase 8.
+Current phase: **Phase 8 code complete. Tasks 1-32 committed and green.**
+Next action: **two owner decisions below**, then **Task 33** — SQLite cache,
+start of Phase 9.
 
 **Every browse pane works against the live account, and the queue is editable.**
 10 real playlists with track counts, Enter opens one and renders its tracks, `/`
 searches YouTube Music with one request per typing pause, and `u` shows the
 queue with the playing entry marked — reorder, remove, and clear all verified
-against real audio. `?` lists every binding. 174 tests pass.
-Blocked on the owner: nothing. **Both gates are GREEN.**
+against real audio. `?` lists every binding. Playlist create, rename, and
+delete are wired with optimistic updates and per-edit rollback. 230 tests pass.
+
+**Blocked on the owner, two things** (details in "Owner decisions due"):
+1. **FR-C5 (remove track from playlist) cannot work** — open question 1 came due
+   at Task 32 exactly as predicted. The code refuses the action with an honest
+   toast rather than sending a request that cannot succeed. Needs a decision.
+2. **No playlist edit has touched the real account yet.** Tasks 30.5/31.5/32.5
+   are manual steps, and writing to the owner's live library was not something to
+   do unasked. Everything is tested against `MockSource`.
+
+**Both gates are GREEN.**
 
 Cookie auth is the live auth path. The cookie file expires (see "Cookie
 expiry" below) — when the library reads empty, re-export it before assuming a
@@ -21,8 +32,9 @@ code bug.
 
 ## Where things stand
 
-Tasks 1-27 are implemented, committed, and pass `./scripts/check.sh`. Phases 0-7
-are complete. Phase 8 (playlist CRUD) has not started.
+Tasks 1-32 are implemented, committed, and pass `./scripts/check.sh`. Phases 0-7
+are complete. Phase 8's code is complete but **unverified against the live
+account** — see "Owner decisions due".
 
 The whole vertical slice is now connected: config -> cookie auth -> `MusicSource`
 -> `tokio::spawn` -> `AppEvent` -> `AppState` -> `render` -> a real terminal, plus
@@ -81,7 +93,7 @@ guessing, and re-verify against the vendored source if a call does not compile.
 | 5 — TUI shell | 17–21 | ✅ done | Keymap, theme, text helpers, sidebar, now-playing bar |
 | 6 — Browse | 22–25 | ✅ done | Event loop, lists, search with debounce |
 | 7 — Queue UI | 26–27 | ✅ done | Queue view, toasts, spinner, help overlay |
-| 8 — CRUD | 28–32 | ⬜ not started | Playlist create/rename/delete, add/remove tracks |
+| 8 — CRUD | 28–32 | 🟡 code done, live-unverified | Playlist create/rename/delete, add/remove tracks. FR-C5 blocked — see open question 1 |
 | 9 — Polish | 33–38 | ⬜ not started | Cache, album art, MPRIS, CLI, README |
 
 ⚠️ = risk phase. See below.
@@ -240,6 +252,48 @@ the window or signing out elsewhere can invalidate the copied cookies.
 in the UI rather than looking like an empty library. There is no auth error to
 catch, so the signal has to be "library call succeeded but returned zero rows"
 -> hint the user to re-export. FR-A6 territory; decide when Task 22 lands.
+
+---
+
+## Owner decisions due
+
+Both of these arrived with Task 32 and neither can be resolved without you.
+
+### 1. FR-C5 (remove a track from a playlist) cannot work as specified
+
+This is open question 1 below, now due. Nothing changed about the diagnosis —
+`ytmapi-rs` 0.3.3 does not parse `setVideoId` out of playlist reads, and
+`remove_playlist_items` requires it. So a track read from a playlist carries
+`set_video_id: None` and the API cannot identify the row to delete.
+
+What the code does about it: `open_remove_confirm` refuses with
+"these tracks cannot be removed — try refreshing the playlist" instead of
+sending a request that cannot succeed. The plumbing behind it
+(`ConfirmAction::RemoveTracks`, `MutationTask::RemoveTracks`,
+`Mutation::RemoveTracks` with exact-index rollback) is written and tested, so
+whichever option you pick, only the *parsing* is missing.
+
+- **A — parse `setVideoId` ourselves** via `raw_json_query`. The field is in the
+  wire JSON; upstream just drops it. Most work, no fork, and it makes FR-C5 work.
+- **B — fork or patch `ytmapi-rs`** to expose it.
+- **C — drop FR-C5.** The refusal toast becomes the permanent behaviour, and the
+  requirement checklist records C5 as out of scope.
+
+### 2. Nobody has verified a playlist edit against the real account
+
+Tasks 30.5, 31.5, and 32.5 are manual steps, and every one of them **writes to
+the live library**. That was not something to do without asking, so all of
+Phase 8 is tested against `MockSource` only.
+
+To clear them, in the running app:
+- `N`, type a throwaway name, Enter — the row appears instantly, a success toast
+  follows, and it should exist in the YouTube Music web UI.
+- `R` on it, rename, Enter — the new title should appear in the web UI.
+- `v` on two tracks, `A`, pick the throwaway playlist, Enter — both should land.
+- `D` on it, `y` — it should disappear. Pressing `n` instead must leave it alone.
+
+Whether an agent should do this on your account, or you would rather drive it
+yourself, is your call.
 
 ---
 
@@ -851,3 +905,59 @@ toast; `app.rs` carries the comment `// Rollback itself is wired in Task 28`.
 modals — `render` has an `if let Some(Modal::Help)` where the other arms go.
 **Open question 1 (`set_video_id` missing from `ytmapi-rs` playlist reads) must
 be decided before Task 32** — FR-C5 cannot work as specified without it.
+
+### 2026-08-31 — implementation agent (Tasks 28-32, Phase 8 code complete)
+
+**Tasks 28-32 done, five commits, gate green on each. 230 tests pass.**
+`mutation.rs` (the optimistic log), `widgets/modal.rs` (confirm + prompt +
+playlist picker), and the CRUD wiring in `app_loop.rs`.
+
+**Stopped short of the live account on purpose.** Every manual step in Phase 8
+writes to the owner's real library, so all of it is `MockSource`-tested and the
+asks are collected under "Owner decisions due". Read that section before
+assuming Phase 8 is finished.
+
+**Open question 1 came due at Task 32, exactly as the plan predicted.** FR-C5
+cannot work: playlist reads carry no `setVideoId`. `open_remove_confirm` refuses
+with a toast rather than sending a doomed request, and every layer behind it is
+built and tested, so options A/B/C differ only in the parsing. Decision needed.
+
+**`MutationOk` gained a `real_id: Option<PlaylistId>` field**, as Task 30's notes
+require: `commit` swaps the temp id for the server's, so the optimistic row is not
+left holding `ytm-cli-temp-N` until the next refresh.
+
+**Task 28 additions beyond the plan.**
+- `MutationLog::peek_token`. A create needs its token to build the temp playlist
+  id *before* `begin_mutation` applies the edit; calling `next_token` for the id
+  consumed a token and made the id name a different edit than the one that
+  settles it. Peek fixes that, with a test that it does not consume.
+- `a_token_cannot_be_settled_twice`. `take` removes on settle, so a duplicated
+  `MutationFailed` is a no-op — worth pinning, because the alternative silently
+  reverts an unrelated later edit.
+- `several_removed_tracks_all_return_to_their_own_indices`. The plan's rollback
+  test only removed one track, which cannot catch an ascending-insert bug.
+
+**Task 30-32 decisions worth knowing.**
+- **Mutations ride `Task::Mutate` through the existing `spawn_task`**, not a
+  separate `spawn_mutation`. The plan sketched the latter; two spawn paths would
+  drift, and the loop already had one. `spawn_mutation` was written, then deleted.
+- **`y`/`n` are resolved in `dispatch_input`, not bound in the keymap.** They mean
+  nothing outside a confirm, and a global binding would shadow real keys (`n` is
+  next-track). Tested through `dispatch_input` so the path a user actually takes
+  is covered.
+- **`Modal::PickPlaylist` carries its own `choices`** rather than reading
+  `state.playlists` at draw time, so a background refresh cannot move the row
+  under the user mid-decision. System playlists are filtered out — YouTube
+  rejects adds to them, so offering one is offering a failure.
+- **`submit_pick` clears `marked`.** The marks were the input to the action;
+  leaving them set makes the next `A` silently repeat it.
+- Refusals happen *before* any optimistic change: renaming or deleting a system
+  playlist, and submitting an empty name, all toast and stop, so there is nothing
+  to roll back. Tested for each.
+
+**One thing the next agent will trip on.** Adding a `Modal` variant breaks
+`widgets/modal.rs`'s match — deliberately, same reasoning as `draw_main`'s
+exhaustive `Pane` match. If `PickPlaylist` had been added with a `_` arm the
+picker would have rendered nothing at all.
+
+Next: the two owner decisions, then **Task 33** (SQLite cache, Phase 9).
