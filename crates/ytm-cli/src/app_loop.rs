@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use ytm_core::MusicSource;
 use ytm_player::player::{Player, PlayerCommand};
 use ytm_tui::{
-    app::{AppState, Modal, Pane, PromptAction, ToastKind},
+    app::{AppState, ConfirmAction, Modal, Pane, PromptAction, ToastKind},
     event::{AppEvent, InputAction},
     keymap::KeyMap,
     mutation::Mutation,
@@ -209,6 +209,72 @@ pub fn open_rename_prompt(state: &mut AppState) -> Option<ytm_core::PlaylistId> 
     Some(id)
 }
 
+/// Ask before deleting (FR-C3). Refuses system playlists outright.
+pub fn open_delete_confirm(state: &mut AppState) {
+    let Some(p) = state.selected_playlist().cloned() else {
+        return;
+    };
+    if p.is_system {
+        // No confirmation for an action that cannot succeed: asking "are you
+        // sure?" about something impossible only wastes a keystroke.
+        let msg = format!(
+            "\"{}\" is managed by YouTube Music and cannot be deleted",
+            p.title
+        );
+        state.push_toast(ToastKind::Error, &msg, state.elapsed_ms);
+        return;
+    }
+    state.modal = Some(Modal::Confirm {
+        text: format!("Delete \"{}\"? This cannot be undone.", p.title),
+        action: ConfirmAction::DeletePlaylist(p.id),
+    });
+}
+
+/// The user pressed `y`. Apply optimistically and hand back the work to do.
+pub fn confirm_action(state: &mut AppState) -> Option<(u64, MutationTask)> {
+    let Some(Modal::Confirm { action, .. }) = state.modal.take() else {
+        return None;
+    };
+    match action {
+        ConfirmAction::DeletePlaylist(id) => {
+            let index = state.playlists.iter().position(|p| p.id == id)?;
+            let snapshot = state.playlists[index].clone();
+            let token = state.begin_mutation(Mutation::DeletePlaylist {
+                id: id.clone(),
+                index,
+                snapshot,
+            });
+            Some((token, MutationTask::Delete { id }))
+        }
+        ConfirmAction::RemoveTracks { playlist, entries } => {
+            // Indices come from the list as it stands, so rollback can put each
+            // track back where it was.
+            let removed: Vec<(usize, ytm_core::Track)> = state
+                .tracks
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| {
+                    t.set_video_id
+                        .as_ref()
+                        .is_some_and(|sv| entries.contains(sv))
+                })
+                .map(|(i, t)| (i, t.clone()))
+                .collect();
+            let token = state.begin_mutation(Mutation::RemoveTracks {
+                playlist: playlist.clone(),
+                removed,
+            });
+            Some((
+                token,
+                MutationTask::RemoveTracks {
+                    id: playlist,
+                    entries,
+                },
+            ))
+        }
+    }
+}
+
 /// Translate one input action into player commands, state changes, and
 /// background work. Pure with respect to I/O — that is what makes it testable.
 pub fn dispatch_input(
@@ -226,6 +292,21 @@ pub fn dispatch_input(
         if action == A::Confirm && matches!(state.modal, Some(Modal::Prompt { .. })) {
             let (token, task) = submit_prompt(state)?;
             return Some(Task::Mutate { token, task });
+        }
+        if matches!(state.modal, Some(Modal::Confirm { .. })) {
+            match action {
+                // `y`/`n` are not keymap bindings: they mean nothing outside a
+                // confirm, and binding them globally would shadow real keys.
+                A::Char('y') | A::Char('Y') | A::Confirm => {
+                    let (token, task) = confirm_action(state)?;
+                    return Some(Task::Mutate { token, task });
+                }
+                A::Char('n') | A::Char('N') => {
+                    state.modal = None;
+                    return None;
+                }
+                _ => {}
+            }
         }
         state.apply(AppEvent::Input(action));
         return None;
@@ -324,6 +405,7 @@ pub fn dispatch_input(
         }
         A::ClearQueue => {}
         A::CreatePlaylist => open_create_prompt(state),
+        A::DeletePlaylist => open_delete_confirm(state),
         A::RenamePlaylist => {
             open_rename_prompt(state);
         }
@@ -1045,6 +1127,139 @@ mod tests {
         dispatch_input(InputAction::RenamePlaylist, &mut s, &src, &*player);
         assert!(matches!(s.modal, Some(ytm_tui::app::Modal::Prompt { .. })));
         assert!(player.commands().is_empty(), "neither touches the player");
+    }
+
+    #[test]
+    fn pressing_delete_opens_a_confirmation_rather_than_deleting() {
+        // FR-C3: destructive actions are never one keystroke.
+        let mut s = AppState {
+            playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
+            selected: 0,
+            ..Default::default()
+        };
+        open_delete_confirm(&mut s);
+        assert!(matches!(s.modal, Some(Modal::Confirm { .. })));
+        assert_eq!(s.playlists.len(), 1, "nothing is removed until confirmed");
+    }
+
+    #[test]
+    fn the_confirmation_names_the_playlist() {
+        let mut s = AppState {
+            playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
+            ..Default::default()
+        };
+        open_delete_confirm(&mut s);
+        match &s.modal {
+            Some(Modal::Confirm { text, .. }) => {
+                assert!(text.contains("Focus"), "got: {text}")
+            }
+            other => panic!("expected a confirm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn confirming_removes_the_row_and_returns_the_task() {
+        let mut s = AppState {
+            playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
+            ..Default::default()
+        };
+        open_delete_confirm(&mut s);
+        let (_token, task) = confirm_action(&mut s).expect("confirm yields work");
+        assert!(matches!(task, MutationTask::Delete { .. }));
+        assert!(s.playlists.is_empty(), "optimistic removal");
+        assert!(s.modal.is_none());
+    }
+
+    #[test]
+    fn a_failed_delete_puts_the_playlist_back() {
+        let mut s = AppState {
+            playlists: vec![
+                ytm_core::Playlist::stub("p1", "A"),
+                ytm_core::Playlist::stub("p2", "B"),
+            ],
+            selected: 1,
+            ..Default::default()
+        };
+        open_delete_confirm(&mut s);
+        let (token, _) = confirm_action(&mut s).unwrap();
+        assert_eq!(s.playlists.len(), 1);
+        s.rollback(token);
+        assert_eq!(s.playlists.len(), 2);
+        assert_eq!(s.playlists[1].title, "B", "restored at its original index");
+    }
+
+    #[test]
+    fn a_system_playlist_cannot_be_deleted() {
+        let mut s = AppState {
+            playlists: vec![ytm_core::Playlist {
+                is_system: true,
+                ..ytm_core::Playlist::stub("LM", "Your Likes")
+            }],
+            ..Default::default()
+        };
+        open_delete_confirm(&mut s);
+        assert!(
+            s.modal.is_none(),
+            "no confirmation for an impossible action"
+        );
+        assert_eq!(s.toasts.len(), 1, "explain why instead");
+    }
+
+    #[test]
+    fn declining_the_confirmation_changes_nothing() {
+        let mut s = AppState {
+            playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
+            ..Default::default()
+        };
+        open_delete_confirm(&mut s);
+        s.apply(AppEvent::Input(InputAction::Cancel));
+        assert!(s.modal.is_none());
+        assert_eq!(s.playlists.len(), 1);
+        assert!(s.pending.is_empty());
+    }
+
+    #[test]
+    fn y_confirms_a_delete_and_n_declines_it() {
+        // Nothing else proves a user can actually answer the box: `y` and `n`
+        // are not in the keymap, so the loop has to resolve them.
+        let (src, player) = deps();
+        let mut yes = AppState {
+            playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
+            ..Default::default()
+        };
+        open_delete_confirm(&mut yes);
+        let task = dispatch_input(InputAction::Char('y'), &mut yes, &src, &*player);
+        assert!(
+            matches!(
+                task,
+                Some(Task::Mutate {
+                    task: MutationTask::Delete { .. },
+                    ..
+                })
+            ),
+            "got {task:?}"
+        );
+        assert!(yes.playlists.is_empty());
+
+        let mut no = AppState {
+            playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
+            ..Default::default()
+        };
+        open_delete_confirm(&mut no);
+        assert!(dispatch_input(InputAction::Char('n'), &mut no, &src, &*player).is_none());
+        assert!(no.modal.is_none(), "n closes the box");
+        assert_eq!(no.playlists.len(), 1, "and deletes nothing");
+    }
+
+    #[test]
+    fn d_on_a_playlist_opens_the_delete_confirmation() {
+        let (src, player) = deps();
+        let mut s = AppState {
+            playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
+            ..Default::default()
+        };
+        dispatch_input(InputAction::DeletePlaylist, &mut s, &src, &*player);
+        assert!(matches!(s.modal, Some(Modal::Confirm { .. })));
     }
 
     #[test]
