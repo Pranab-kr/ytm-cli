@@ -6,3 +6,4 @@ pub use source::{BoxFut, MusicSource, SourceError};
 pub mod auth;
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
+pub mod oauth;
