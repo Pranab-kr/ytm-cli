@@ -177,7 +177,7 @@ one should stop, note it here, and ask.
 | 8.5 | Create a Google Cloud OAuth client ("TVs and Limited Input devices"), add the `.../auth/youtube` scope under Data Access, add the music account as a test user, put id/secret in `~/.config/ytm-cli/config.toml`, run `cargo run -p ytm-core --example login_spike` | ✅ done 2026-08-30 — login works |
 | 9.1 | Capture a real fixture: `… cargo run -p ytm-core --example dump_playlists -- --raw > /tmp/raw.json`, scrub account ids/emails/personal browseIds, replace `crates/ytm-core/tests/fixtures/library_playlists.json` (currently **SYNTHETIC**) | ⬜ |
 | 9.7 | Gate 1: `cargo run -p ytm-core --example dump_playlists` prints real playlist titles | ⛔ **FAILS with 400** — needs the owner's auth decision, see Open question 3 |
-| 9.7b | If choosing the cookie path: export `music.youtube.com` cookies from a logged-in browser to a Netscape-format `cookies.txt`, set `auth.kind = "cookie"` and `auth.cookie_file` in config.toml | ⬜ **BLOCKING Gate 1** |
+| 9.7b | If choosing the cookie path: save the **raw `Cookie:` header value** from a logged-in `music.youtube.com` request into a file (NOT Netscape cookies.txt — `BrowserToken::from_str` uses the contents verbatim as the header and requires `SAPISID=` in it), then set `auth.kind = "cookie"` and `auth.cookie_file` in config.toml | ⬜ **BLOCKING Gate 1** |
 | 12.6 | Confirm audio is audible | ✅ done 2026-08-30 |
 | 30.5 / 31.5 / 32.5 | Verify playlist edits appear in the YouTube Music web UI | ⬜ |
 | 34.5 | Check album art in a graphics-capable terminal | ⬜ |
@@ -239,7 +239,11 @@ Options for the owner (nothing further can be verified without this decision):
 
 - **A — browser-cookie auth (recommended).** Already a settled first-class
   fallback (FR-A5) and already implemented:
-  `YtMusicSource::from_cookie_file` compiles today. Full YouTube Music API
+  `YtMusicSource::from_cookie_file` compiles today. Note the file format: it must
+  be the raw `Cookie:` header string (one line, `SAPISID=...; HSID=...; ...`),
+  because `BrowserToken::from_str` passes the contents straight through as the
+  header and greps it for `SAPISID=`. A Netscape `cookies.txt` export will fail
+  with an opaque `Error parsing header.` Full YouTube Music API
   access, so every FR stays reachable. Cost: the owner exports cookies from a
   logged-in browser, and re-exports when they eventually expire.
 - **B — official Data API v3.** Proven working with this exact token. But it is
