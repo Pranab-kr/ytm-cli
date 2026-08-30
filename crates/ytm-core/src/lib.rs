@@ -4,6 +4,8 @@ pub use model::*;
 pub mod source;
 pub use source::{BoxFut, MusicSource, SourceError};
 pub mod auth;
+pub mod mapping;
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
 pub mod oauth;
+pub mod ytmusic;

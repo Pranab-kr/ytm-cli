@@ -6,6 +6,7 @@
 
 use crate::auth::{StoredToken, TokenStore};
 use ytmapi_rs::Client;
+use ytmapi_rs::auth::OAuthToken;
 use ytmapi_rs::auth::OAuthTokenGenerator;
 use ytmapi_rs::auth::oauth::OAuthDeviceCode;
 
@@ -107,6 +108,37 @@ pub async fn complete_device_login(
     }
 }
 
+/// Rebuild an upstream `OAuthToken` from what we persisted.
+///
+/// Required by FR-A2: after a restart only the `StoredToken` survives, but
+/// `YtMusicSource::from_oauth` needs an `OAuthToken`. Its fields are private
+/// (verified in the 0.3.3 source) and it derives `Deserialize`, so go through
+/// JSON rather than a constructor that does not exist.
+pub fn oauth_token_from_stored(
+    t: &StoredToken,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<OAuthToken, OAuthError> {
+    // Upstream stores a request instant plus a relative expires_in; we store an
+    // absolute expiry. Reconstruct by treating the token as issued now with the
+    // remaining lifetime, so upstream's own refresh timing still works.
+    let now = chrono::Utc::now().timestamp();
+    let remaining = (t.expires_at - now).max(0);
+    let json = serde_json::json!({
+        "token_type": t.token_type,
+        "access_token": t.access_token,
+        "refresh_token": t.refresh_token,
+        "expires_in": remaining,
+        "request_time": {
+            "secs_since_epoch": now.max(0),
+            "nanos_since_epoch": 0,
+        },
+        "client_id": client_id,
+        "client_secret": client_secret,
+    });
+    serde_json::from_value(json).map_err(|e| OAuthError::Rejected(e.to_string()))
+}
+
 /// Convert Google's relative `expires_in` into an absolute instant and store it.
 pub fn persist_token(
     store: &dyn TokenStore,
@@ -170,5 +202,32 @@ mod tests {
             msg.contains("auth.client_id"),
             "must name the config key, got: {msg}"
         );
+    }
+
+    #[test]
+    fn a_stored_token_rebuilds_into_an_upstream_oauth_token() {
+        // FR-A2: after a restart only StoredToken survives, but the API handle
+        // needs an OAuthToken.
+        let t = StoredToken {
+            access_token: "ACCESS".into(),
+            refresh_token: "REFRESH".into(),
+            expires_at: chrono::Utc::now().timestamp() + 3600,
+            token_type: "Bearer".into(),
+        };
+        let rebuilt = oauth_token_from_stored(&t, "cid", "csecret");
+        assert!(rebuilt.is_ok(), "rebuild failed: {:?}", rebuilt.err());
+    }
+
+    #[test]
+    fn an_already_expired_stored_token_still_rebuilds() {
+        // It rebuilds with zero remaining life so upstream can refresh it,
+        // rather than failing here and forcing a fresh browser login.
+        let t = StoredToken {
+            access_token: "ACCESS".into(),
+            refresh_token: "REFRESH".into(),
+            expires_at: chrono::Utc::now().timestamp() - 9999,
+            token_type: "Bearer".into(),
+        };
+        assert!(oauth_token_from_stored(&t, "cid", "csecret").is_ok());
     }
 }

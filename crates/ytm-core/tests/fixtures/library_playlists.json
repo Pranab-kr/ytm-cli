@@ -1,0 +1,23 @@
+{
+  "_comment": "SYNTHETIC fixture — hand-written to the shape ytmapi-rs 0.3.3 parses GetLibraryPlaylistsQuery into (Vec<LibraryPlaylist>). Replace with a real scrubbed capture once Task 9 Step 1 can run. No real account ids, no real browseIds.",
+  "playlists": [
+    {
+      "playlist_id": "PLsyntheticAAAAAAAAAAAAAAAAAAAAAA",
+      "title": "Focus",
+      "thumbnails": [
+        { "height": 226, "width": 226, "url": "https://example.invalid/thumb-focus.jpg" }
+      ],
+      "tracks": "42 songs",
+      "author": "Example Owner",
+      "author_id": null
+    },
+    {
+      "playlist_id": "LM",
+      "title": "Your Likes",
+      "thumbnails": [],
+      "tracks": "7 songs",
+      "author": "Example Owner",
+      "author_id": null
+    }
+  ]
+}
