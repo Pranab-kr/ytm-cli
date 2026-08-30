@@ -20,31 +20,51 @@ use ytm_core::auth::{KeyringStore, TokenStore};
 use ytm_core::oauth::oauth_token_from_stored;
 use ytm_core::ytmusic::YtMusicSource;
 
+/// Both auth paths implement MusicSource; box them so the rest of the example
+/// does not care which one config chose.
+fn boxed<S: MusicSource + 'static>(s: S) -> Box<dyn MusicSource> {
+    Box::new(s)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let raw_mode = std::env::args().any(|a| a == "--raw");
 
-    let common::Creds {
-        client_id,
-        client_secret,
-    } = common::load()?;
+    let source: Box<dyn MusicSource> = match common::auth_choice()? {
+        common::AuthChoice::Cookie(path) => {
+            eprintln!("auth: browser cookie ({})", path.display());
+            if raw_mode {
+                let api = ytmapi_rs::YtMusic::from_cookie_file(&path).await?;
+                let json: String = api
+                    .raw_json_query(ytmapi_rs::query::GetLibraryPlaylistsQuery)
+                    .await?;
+                println!("{json}");
+                return Ok(());
+            }
+            boxed(YtMusicSource::from_cookie_file(&path).await?)
+        }
+        common::AuthChoice::OAuth(common::Creds {
+            client_id,
+            client_secret,
+        }) => {
+            eprintln!("auth: oauth (keyring token)");
+            let stored = KeyringStore::default_store()
+                .load()?
+                .ok_or("no token in the keyring — run the login_spike example first")?;
+            let token = oauth_token_from_stored(&stored, &client_id, &client_secret)?;
+            if raw_mode {
+                // Raw JSON for the fixture. Goes to stdout so it can be redirected.
+                let api = ytmapi_rs::YtMusic::from_auth_token(token);
+                let json: String = api
+                    .raw_json_query(ytmapi_rs::query::GetLibraryPlaylistsQuery)
+                    .await?;
+                println!("{json}");
+                return Ok(());
+            }
+            boxed(YtMusicSource::from_oauth(token))
+        }
+    };
 
-    let stored = KeyringStore::default_store()
-        .load()?
-        .ok_or("no token in the keyring — run the login_spike example first")?;
-    let token = oauth_token_from_stored(&stored, &client_id, &client_secret)?;
-
-    if raw_mode {
-        // Raw JSON for the fixture. Goes to stdout so it can be redirected.
-        let api = ytmapi_rs::YtMusic::from_auth_token(token);
-        let json: String = api
-            .raw_json_query(ytmapi_rs::query::GetLibraryPlaylistsQuery)
-            .await?;
-        println!("{json}");
-        return Ok(());
-    }
-
-    let source = YtMusicSource::from_oauth(token);
     let playlists = source.library_playlists().await?;
 
     println!("{} playlists:", playlists.len());

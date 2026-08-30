@@ -20,10 +20,21 @@ use ytm_core::oauth::{begin_device_login, complete_device_login};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Nothing to do when config selects the cookie path — there is no login step.
     let common::Creds {
         client_id,
         client_secret,
-    } = common::load()?;
+    } = match common::auth_choice()? {
+        common::AuthChoice::OAuth(c) => c,
+        common::AuthChoice::Cookie(path) => {
+            println!(
+                "config has auth.kind = \"cookie\" ({}), so no OAuth login is needed.\n\
+                 Run the dump_playlists example instead.",
+                path.display()
+            );
+            return Ok(());
+        }
+    };
 
     let client = ytmapi_rs::Client::new()?;
     let (info, code) = begin_device_login(&client, &client_id).await?;
