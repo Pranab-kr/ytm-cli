@@ -604,7 +604,9 @@ pub async fn run(
             Some(Ok(ev)) = term_events.next() => {
                 match ev {
                     CtEvent::Key(k) if k.kind == KeyEventKind::Press => {
-                        if let Some(a) = keymap.resolve(k, state.focus) {
+                        // `input_focus`, not `focus`: an open prompt is a text field, so
+                        // letters must resolve to Char(c) rather than commands.
+                        if let Some(a) = keymap.resolve(k, state.input_focus()) {
                             if let Some(task) = dispatch_input(a, &mut state, &source, &player) {
                                 spawn_task(task, source.clone(), app_tx.clone());
                             }

@@ -282,6 +282,25 @@ impl AppState {
         }
     }
 
+    /// The focus the *keymap* should resolve against, which is not always the
+    /// focus the user is navigating with.
+    ///
+    /// `Focus::SearchInput` means "letters are literal, not commands". Two
+    /// modals need that: a prompt, whose letters are the name being typed, and a
+    /// confirm, whose `y`/`n` are answers. Resolving against `self.focus`
+    /// instead left it as Sidebar/Main while the modal was open, so in a prompt
+    /// `q` arrived as Quit, and in a confirm `y` matched nothing at all while
+    /// `n` skipped the track behind the box.
+    ///
+    /// The picker keeps command focus on purpose: it is a list, so `j`/`k` and
+    /// the arrows should move through it.
+    pub fn input_focus(&self) -> Focus {
+        match self.modal {
+            Some(Modal::Prompt { .. }) | Some(Modal::Confirm { .. }) => Focus::SearchInput,
+            _ => self.focus,
+        }
+    }
+
     /// Row count of whatever the main pane is showing.
     pub fn list_len(&self) -> usize {
         match self.pane {
@@ -589,6 +608,59 @@ mod tests {
         };
         s.apply(AppEvent::Input(InputAction::Char('j')));
         assert_eq!(s.search_query, "");
+    }
+
+    #[test]
+    fn a_prompt_modal_makes_the_keymap_treat_letters_as_text() {
+        // The bug: `keymap.resolve` was given `state.focus`, which is still
+        // Sidebar/Main while a modal is open, so `q` resolved to Quit and
+        // Char(c) was never produced. Typing a playlist name was impossible.
+        let s = AppState {
+            modal: Some(Modal::Prompt {
+                title: "Name".into(),
+                value: String::new(),
+                action: PromptAction::CreatePlaylist,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(s.input_focus(), Focus::SearchInput);
+    }
+
+    #[test]
+    fn a_confirm_modal_makes_y_and_n_literal_answers() {
+        // With command focus `y` resolved to nothing and `n` to NextTrack, so a
+        // delete could be neither accepted nor declined.
+        let s = AppState {
+            modal: Some(Modal::Confirm {
+                text: "sure?".into(),
+                action: ConfirmAction::DeletePlaylist("p1".into()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(s.input_focus(), Focus::SearchInput);
+    }
+
+    #[test]
+    fn the_picker_keeps_command_focus_so_navigation_still_resolves() {
+        let s = AppState {
+            modal: Some(Modal::PickPlaylist {
+                targets: vec![],
+                choices: vec![],
+                selected: 0,
+            }),
+            focus: Focus::Main,
+            ..Default::default()
+        };
+        assert_eq!(s.input_focus(), Focus::Main);
+    }
+
+    #[test]
+    fn without_a_modal_input_focus_is_just_the_focus() {
+        let s = AppState {
+            focus: Focus::Main,
+            ..Default::default()
+        };
+        assert_eq!(s.input_focus(), Focus::Main);
     }
 
     #[test]

@@ -17,6 +17,9 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 
+/// Block cursor at the end of the editable line, matching the search field.
+const CURSOR: &str = "\u{258F}";
+
 /// Box size as a share of the frame (spec §6).
 const WIDTH_PCT: u16 = 50;
 const HEIGHT_PCT: u16 = 20;
@@ -29,7 +32,9 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
         }
         Modal::Prompt { title, value, .. } => (
             " Edit ",
-            format!("{title}\n{value}"),
+            // The cursor is part of the value line: an empty prompt otherwise
+            // renders as blank space and reads as a dead box.
+            format!("{title}\n{value}{CURSOR}"),
             "[enter] save   [esc] cancel",
         ),
         Modal::PickPlaylist {
@@ -168,6 +173,23 @@ mod tests {
         let text = text_of(&prompting("Chill"));
         assert!(text.contains("New playlist name"));
         assert!(text.contains("Chill"));
+    }
+
+    #[test]
+    fn the_prompt_shows_a_cursor_so_it_looks_typeable() {
+        // The user's report was two bugs: letters did not arrive, and the box
+        // gave no sign it was a text field at all.
+        assert!(
+            text_of(&prompting("")).contains('\u{258f}'),
+            "an empty prompt must still show where typing goes"
+        );
+        assert!(text_of(&prompting("Chill")).contains('\u{258f}'));
+    }
+
+    #[test]
+    fn a_confirm_box_has_no_cursor() {
+        // It is not a text field; a cursor there would invite typing.
+        assert!(!text_of(&confirming()).contains('\u{258f}'));
     }
 
     #[test]

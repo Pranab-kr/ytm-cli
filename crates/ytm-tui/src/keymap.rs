@@ -210,6 +210,20 @@ mod tests {
     }
 
     #[test]
+    fn every_letter_is_text_while_a_prompt_is_open() {
+        // Resolved against the focus a prompt reports, so a name containing
+        // command letters types normally.
+        let m = KeyMap::default();
+        for c in "quit and next".chars() {
+            assert_eq!(
+                m.resolve(key(c), Focus::SearchInput),
+                Some(InputAction::Char(c)),
+                "{c:?} must be text"
+            );
+        }
+    }
+
+    #[test]
     fn escape_cancels_from_the_search_field() {
         let m = KeyMap::default();
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
