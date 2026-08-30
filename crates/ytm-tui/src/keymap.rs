@@ -42,6 +42,9 @@ impl Default for KeyMap {
             ('x', InputAction::RemoveFromPlaylist),
             ('v', InputAction::ToggleMark),
             ('e', InputAction::PlayNext),
+            ('J', InputAction::MoveEntryDown),
+            ('K', InputAction::MoveEntryUp),
+            ('C', InputAction::ClearQueue),
             ('L', InputAction::Refresh),
         ] {
             chars.insert(c, a);
@@ -134,6 +137,9 @@ fn action_from_name(n: &str) -> Option<InputAction> {
         "open_search" => InputAction::OpenSearch,
         "open_queue" => InputAction::OpenQueue,
         "open_help" => InputAction::OpenHelp,
+        "move_entry_up" => InputAction::MoveEntryUp,
+        "move_entry_down" => InputAction::MoveEntryDown,
+        "clear_queue" => InputAction::ClearQueue,
         _ => return None,
     })
 }
@@ -219,6 +225,28 @@ mod tests {
         let c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(m.resolve(c, Focus::SearchInput), Some(InputAction::Quit));
         assert_eq!(m.resolve(c, Focus::Main), Some(InputAction::Quit));
+    }
+
+    #[test]
+    fn the_queue_editing_keys_are_reachable() {
+        // The dispatch tests pass actions in directly, so without this nothing
+        // proves a user can actually produce them.
+        let m = KeyMap::default();
+        assert_eq!(
+            m.resolve(key('J'), Focus::Main),
+            Some(InputAction::MoveEntryDown)
+        );
+        assert_eq!(
+            m.resolve(key('K'), Focus::Main),
+            Some(InputAction::MoveEntryUp)
+        );
+        assert_eq!(
+            m.resolve(key('C'), Focus::Main),
+            Some(InputAction::ClearQueue)
+        );
+        // Lowercase must stay navigation, or reordering would hijack j/k.
+        assert_eq!(m.resolve(key('j'), Focus::Main), Some(InputAction::Down));
+        assert_eq!(m.resolve(key('k'), Focus::Main), Some(InputAction::Up));
     }
 
     #[test]

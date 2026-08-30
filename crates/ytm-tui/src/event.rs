@@ -35,6 +35,10 @@ pub enum InputAction {
     OpenHelp,
     AddToQueue,
     PlayNext,
+    /// Reorder the selected queue entry (FR-Q3). Queue-only.
+    MoveEntryUp,
+    MoveEntryDown,
+    ClearQueue,
     CreatePlaylist,
     RenamePlaylist,
     DeletePlaylist,

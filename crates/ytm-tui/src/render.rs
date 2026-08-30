@@ -6,7 +6,7 @@ use crate::{
     app::{AppState, Pane},
     theme::Theme,
     util::text::truncate_to_width,
-    widgets::{nowplaying, playlists, search, sidebar, tracklist},
+    widgets::{nowplaying, playlists, queue, search, sidebar, tracklist},
 };
 use ratatui::{
     Frame,
@@ -89,7 +89,8 @@ fn draw_main(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
         // An open playlist shows its tracks; the list of playlists otherwise.
         Pane::Playlists if s.open_playlist.is_some() => tracklist::draw(f, rows[1], s, t),
         Pane::Playlists => playlists::draw_playlists(f, rows[1], s, t),
-        Pane::Songs | Pane::Queue => tracklist::draw(f, rows[1], s, t),
+        Pane::Songs => tracklist::draw(f, rows[1], s, t),
+        Pane::Queue => queue::draw(f, rows[1], s, t),
         Pane::Search => draw_search(f, rows[1], s, t),
         Pane::Albums => playlists::draw_albums(f, rows[1], s, t),
         Pane::Artists => playlists::draw_artists(f, rows[1], s, t),

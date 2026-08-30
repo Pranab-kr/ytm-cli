@@ -105,6 +105,39 @@ pub fn dispatch_input(
                 send(player, PlayerCommand::EnqueueNext(vec![t]));
             }
         }
+        // Queue edits. All three are queue-pane-only: `x` means
+        // remove-from-playlist elsewhere (Task 32), and there is no server-side
+        // track reordering to bind `J`/`K` to (out of scope).
+        //
+        // None of them touch `state.queue`. The actor owns queue truth and
+        // answers with `QueueChanged`; a local edit would leave the view
+        // showing an order the player disagrees with.
+        A::RemoveFromPlaylist if state.pane == Pane::Queue => {
+            if state.selected < state.queue.len() {
+                send(player, PlayerCommand::RemoveFromQueue(state.selected));
+            }
+        }
+        A::MoveEntryUp | A::MoveEntryDown if state.pane == Pane::Queue => {
+            let from = state.selected;
+            let to = if action == A::MoveEntryUp {
+                from.checked_sub(1)
+            } else {
+                Some(from + 1).filter(|t| *t < state.queue.len())
+            };
+            // Out of range at either end: the actor would index past the queue.
+            if let Some(to) = to {
+                send(player, PlayerCommand::MoveInQueue { from, to });
+                // Follow the entry rather than the row, or a held key would
+                // walk the selection back over the track it just moved.
+                state.selected = to;
+            }
+        }
+        A::MoveEntryUp | A::MoveEntryDown => {}
+        A::ClearQueue if state.pane == Pane::Queue => {
+            send(player, PlayerCommand::ClearQueue);
+            state.selected = 0;
+        }
+        A::ClearQueue => {}
         A::Refresh => {
             let task = match state.pane {
                 Pane::Songs => Task::LoadSongs,
@@ -527,6 +560,133 @@ mod tests {
         dispatch_input(InputAction::Down, &mut s, &src, &*player);
         note_search_input(&mut d, &s, 1000);
         assert_eq!(search_tick(&mut d, &mut s, 2000), None);
+    }
+
+    fn queue_of_three() -> AppState {
+        AppState {
+            pane: Pane::Queue,
+            queue: vec![
+                ytm_core::Track::stub("v1", "A"),
+                ytm_core::Track::stub("v2", "B"),
+                ytm_core::Track::stub("v3", "C"),
+            ],
+            focus: Focus::Main,
+            selected: 1,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn x_in_the_queue_removes_the_selected_entry() {
+        let (src, player) = deps();
+        let mut s = queue_of_three();
+        dispatch_input(InputAction::RemoveFromPlaylist, &mut s, &src, &*player);
+        match player.commands()[0] {
+            PlayerCommand::RemoveFromQueue(i) => assert_eq!(i, 1),
+            ref o => panic!("expected RemoveFromQueue, got {o:?}"),
+        }
+    }
+
+    #[test]
+    fn removing_a_queue_entry_does_not_mutate_the_local_queue() {
+        // The actor owns queue truth and answers with QueueChanged. Editing
+        // `state.queue` here would show a row count the player disagrees with.
+        let (src, player) = deps();
+        let mut s = queue_of_three();
+        dispatch_input(InputAction::RemoveFromPlaylist, &mut s, &src, &*player);
+        assert_eq!(s.queue.len(), 3, "the view must wait for QueueChanged");
+    }
+
+    #[test]
+    fn x_outside_the_queue_does_not_touch_the_queue() {
+        // In a playlist, `x` means remove-from-playlist (Task 32), not dequeue.
+        let (src, player) = deps();
+        let mut s = AppState {
+            pane: Pane::Songs,
+            tracks: vec![ytm_core::Track::stub("v1", "A")],
+            ..Default::default()
+        };
+        dispatch_input(InputAction::RemoveFromPlaylist, &mut s, &src, &*player);
+        assert!(player.commands().is_empty());
+    }
+
+    #[test]
+    fn moving_an_entry_down_swaps_it_with_the_next_one() {
+        let (src, player) = deps();
+        let mut s = queue_of_three();
+        dispatch_input(InputAction::MoveEntryDown, &mut s, &src, &*player);
+        match player.commands()[0] {
+            PlayerCommand::MoveInQueue { from, to } => assert_eq!((from, to), (1, 2)),
+            ref o => panic!("expected MoveInQueue, got {o:?}"),
+        }
+        assert_eq!(s.selected, 2, "the selection follows the entry it moved");
+    }
+
+    #[test]
+    fn moving_an_entry_up_swaps_it_with_the_previous_one() {
+        let (src, player) = deps();
+        let mut s = queue_of_three();
+        dispatch_input(InputAction::MoveEntryUp, &mut s, &src, &*player);
+        match player.commands()[0] {
+            PlayerCommand::MoveInQueue { from, to } => assert_eq!((from, to), (1, 0)),
+            ref o => panic!("expected MoveInQueue, got {o:?}"),
+        }
+        assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn an_entry_cannot_be_moved_off_either_end() {
+        let (src, player) = deps();
+        let mut top = AppState {
+            selected: 0,
+            ..queue_of_three()
+        };
+        dispatch_input(InputAction::MoveEntryUp, &mut top, &src, &*player);
+        let mut bottom = AppState {
+            selected: 2,
+            ..queue_of_three()
+        };
+        dispatch_input(InputAction::MoveEntryDown, &mut bottom, &src, &*player);
+        assert!(
+            player.commands().is_empty(),
+            "an out-of-range move would panic the actor"
+        );
+        assert_eq!(top.selected, 0);
+        assert_eq!(bottom.selected, 2);
+    }
+
+    #[test]
+    fn reordering_outside_the_queue_is_ignored() {
+        let (src, player) = deps();
+        let mut s = AppState {
+            pane: Pane::Songs,
+            tracks: vec![
+                ytm_core::Track::stub("v1", "A"),
+                ytm_core::Track::stub("v2", "B"),
+            ],
+            ..Default::default()
+        };
+        dispatch_input(InputAction::MoveEntryDown, &mut s, &src, &*player);
+        assert!(
+            player.commands().is_empty(),
+            "there is no server-side track order to change (out of scope)"
+        );
+    }
+
+    #[test]
+    fn the_clear_binding_empties_the_queue() {
+        let (src, player) = deps();
+        let mut s = queue_of_three();
+        dispatch_input(InputAction::ClearQueue, &mut s, &src, &*player);
+        assert!(matches!(player.commands()[0], PlayerCommand::ClearQueue));
+    }
+
+    #[test]
+    fn clearing_resets_the_selection_so_it_cannot_dangle() {
+        let (src, player) = deps();
+        let mut s = queue_of_three();
+        dispatch_input(InputAction::ClearQueue, &mut s, &src, &*player);
+        assert_eq!(s.selected, 0);
     }
 
     #[test]
