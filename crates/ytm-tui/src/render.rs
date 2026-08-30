@@ -6,7 +6,7 @@ use crate::{
     app::{AppState, Pane},
     theme::Theme,
     util::text::truncate_to_width,
-    widgets::{nowplaying, sidebar, tracklist},
+    widgets::{nowplaying, playlists, sidebar, tracklist},
 };
 use ratatui::{
     Frame,
@@ -61,8 +61,8 @@ fn draw_rule(f: &mut Frame, area: Rect, t: &Theme) {
 
 /// The main pane: a heading row, then the list for whichever pane is active.
 ///
-/// Panes whose list widget has not landed yet (Tasks 24-26) fall through to the
-/// heading alone rather than drawing a list of the wrong shape.
+/// The match is exhaustive on `Pane` rather than ending in a `_` arm, so adding
+/// a pane later fails to compile instead of silently rendering nothing.
 fn draw_main(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -86,11 +86,12 @@ fn draw_main(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     );
 
     match s.pane {
-        // Track-shaped panes. Playlists shows tracks only once one is open;
-        // the playlist list itself is Task 24.
-        Pane::Songs | Pane::Search | Pane::Queue => tracklist::draw(f, rows[1], s, t),
+        // An open playlist shows its tracks; the list of playlists otherwise.
         Pane::Playlists if s.open_playlist.is_some() => tracklist::draw(f, rows[1], s, t),
-        _ => {}
+        Pane::Playlists => playlists::draw_playlists(f, rows[1], s, t),
+        Pane::Songs | Pane::Search | Pane::Queue => tracklist::draw(f, rows[1], s, t),
+        Pane::Albums => playlists::draw_albums(f, rows[1], s, t),
+        Pane::Artists => playlists::draw_artists(f, rows[1], s, t),
     }
 }
 
