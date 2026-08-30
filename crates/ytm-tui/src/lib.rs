@@ -2,5 +2,7 @@
 pub mod app;
 pub mod event;
 pub mod keymap;
+pub mod render;
 pub mod theme;
 pub mod util;
+pub mod widgets;
