@@ -180,6 +180,32 @@ impl AppState {
             }
             return;
         }
+        // While the search field has focus, printable keys are text. The keymap
+        // already resolves them to `Char`/`Backspace` rather than commands, so
+        // this arm only has to edit the buffer.
+        if self.focus == Focus::SearchInput {
+            match a {
+                InputAction::Char(c) => {
+                    self.search_query.push(c);
+                    self.selected = 0;
+                    return;
+                }
+                InputAction::Backspace => {
+                    // By character, not byte: truncating mid-codepoint panics.
+                    self.search_query.pop();
+                    self.selected = 0;
+                    return;
+                }
+                // Esc and Enter both leave the field for the results list.
+                // Neither clears the query or the results — the user is going
+                // to navigate what they just found.
+                InputAction::Cancel | InputAction::Confirm => {
+                    self.focus = Focus::Main;
+                    return;
+                }
+                _ => {}
+            }
+        }
         match a {
             InputAction::Quit => self.should_quit = true,
             InputAction::Down => self.select_next(),
@@ -375,6 +401,80 @@ mod tests {
         let mut s = AppState::default();
         s.apply(AppEvent::Input(InputAction::Quit));
         assert!(s.should_quit);
+    }
+
+    #[test]
+    fn typing_in_the_search_field_builds_the_query() {
+        let mut s = AppState {
+            pane: Pane::Search,
+            focus: Focus::SearchInput,
+            ..Default::default()
+        };
+        for c in "boa".chars() {
+            s.apply(AppEvent::Input(InputAction::Char(c)));
+        }
+        assert_eq!(s.search_query, "boa");
+    }
+
+    #[test]
+    fn backspace_deletes_the_last_character_of_the_query() {
+        let mut s = AppState {
+            pane: Pane::Search,
+            focus: Focus::SearchInput,
+            search_query: "boa".into(),
+            ..Default::default()
+        };
+        s.apply(AppEvent::Input(InputAction::Backspace));
+        assert_eq!(s.search_query, "bo");
+    }
+
+    #[test]
+    fn backspace_on_an_empty_query_is_harmless() {
+        let mut s = AppState {
+            pane: Pane::Search,
+            focus: Focus::SearchInput,
+            ..Default::default()
+        };
+        s.apply(AppEvent::Input(InputAction::Backspace));
+        assert_eq!(s.search_query, "");
+    }
+
+    #[test]
+    fn backspace_removes_a_whole_multibyte_character() {
+        // Truncating by one *byte* would leave invalid UTF-8 and panic.
+        let mut s = AppState {
+            pane: Pane::Search,
+            focus: Focus::SearchInput,
+            search_query: "日本".into(),
+            ..Default::default()
+        };
+        s.apply(AppEvent::Input(InputAction::Backspace));
+        assert_eq!(s.search_query, "日");
+    }
+
+    #[test]
+    fn escape_leaves_the_search_field_without_clearing_the_results() {
+        let mut s = AppState {
+            pane: Pane::Search,
+            focus: Focus::SearchInput,
+            search_query: "boards".into(),
+            search_results: vec![Track::stub("v1", "Roygbiv")],
+            ..Default::default()
+        };
+        s.apply(AppEvent::Input(InputAction::Cancel));
+        assert_eq!(s.focus, Focus::Main, "Esc returns to the results list");
+        assert_eq!(s.search_results.len(), 1, "results must survive");
+    }
+
+    #[test]
+    fn typing_outside_the_search_field_does_not_edit_the_query() {
+        let mut s = AppState {
+            pane: Pane::Songs,
+            focus: Focus::Main,
+            ..Default::default()
+        };
+        s.apply(AppEvent::Input(InputAction::Char('j')));
+        assert_eq!(s.search_query, "");
     }
 
     #[test]

@@ -2,5 +2,6 @@
 //! them mutate it.
 pub mod nowplaying;
 pub mod playlists;
+pub mod search;
 pub mod sidebar;
 pub mod tracklist;

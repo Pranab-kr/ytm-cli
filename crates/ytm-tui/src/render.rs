@@ -6,7 +6,7 @@ use crate::{
     app::{AppState, Pane},
     theme::Theme,
     util::text::truncate_to_width,
-    widgets::{nowplaying, playlists, sidebar, tracklist},
+    widgets::{nowplaying, playlists, search, sidebar, tracklist},
 };
 use ratatui::{
     Frame,
@@ -89,9 +89,31 @@ fn draw_main(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
         // An open playlist shows its tracks; the list of playlists otherwise.
         Pane::Playlists if s.open_playlist.is_some() => tracklist::draw(f, rows[1], s, t),
         Pane::Playlists => playlists::draw_playlists(f, rows[1], s, t),
-        Pane::Songs | Pane::Search | Pane::Queue => tracklist::draw(f, rows[1], s, t),
+        Pane::Songs | Pane::Queue => tracklist::draw(f, rows[1], s, t),
+        Pane::Search => draw_search(f, rows[1], s, t),
         Pane::Albums => playlists::draw_albums(f, rows[1], s, t),
         Pane::Artists => playlists::draw_artists(f, rows[1], s, t),
+    }
+}
+
+/// Search is the one pane with its own input row: the query line, then results.
+fn draw_search(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+
+    search::draw_input(f, rows[0], s, t);
+
+    // "Searched and found nothing" must not look like "hasn't searched yet",
+    // which is what `tracklist`'s generic empty state would say.
+    if s.search_results.is_empty() && !s.search_query.trim().is_empty() {
+        search::draw_no_matches(f, rows[1], t);
+    } else {
+        tracklist::draw(f, rows[1], s, t);
     }
 }
 

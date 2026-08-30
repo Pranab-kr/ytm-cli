@@ -10,6 +10,7 @@ use ytm_tui::{
     app::{AppState, Pane, ToastKind},
     event::{AppEvent, InputAction},
     keymap::KeyMap,
+    search_state::SearchDebounce,
     theme::Theme,
 };
 
@@ -26,9 +27,6 @@ pub enum Task {
     LoadAlbums,
     LoadArtists,
     OpenPlaylist(ytm_core::PlaylistId),
-    /// Constructed by the debounced search in Task 25; `spawn_task` already
-    /// handles it so that task only has to emit it.
-    #[allow(dead_code)]
     Search(String),
 }
 
@@ -122,6 +120,24 @@ pub fn dispatch_input(
     None
 }
 
+/// Record the current query on every keystroke, restarting the debounce timer.
+///
+/// Reads the query from `AppState` rather than taking the character, so the
+/// buffer stays owned by the reducer and this cannot disagree with it.
+/// Keystrokes outside the search pane are ignored — nothing else edits the
+/// query, and noting them would schedule a search the user never asked for.
+pub fn note_search_input(d: &mut SearchDebounce, state: &AppState, now_ms: u64) {
+    if state.pane == Pane::Search {
+        d.note_input(&state.search_query, now_ms);
+    }
+}
+
+/// Call on every tick. Returns a search to run once typing has settled.
+pub fn search_tick(d: &mut SearchDebounce, state: &mut AppState, now_ms: u64) -> Option<Task> {
+    let q = d.should_fire(now_ms)?;
+    start(state, Task::Search(q))
+}
+
 /// A dropped command means the actor thread is gone. There is nothing useful to
 /// do about it from here, so log it rather than unwrapping into a panic that
 /// would take the terminal down with it.
@@ -156,6 +172,7 @@ pub async fn run(
     let mut term_events = EventStream::new();
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(tick_ms.max(1)));
     let started = std::time::Instant::now();
+    let mut debounce = SearchDebounce::default();
 
     // Paint immediately, then load — NFR-1 depends on not awaiting first.
     terminal.draw(|f| ytm_tui::render::render(f, &state, &theme))?;
@@ -168,10 +185,15 @@ pub async fn run(
             Some(Ok(ev)) = term_events.next() => {
                 match ev {
                     CtEvent::Key(k) if k.kind == KeyEventKind::Press => {
-                        if let Some(a) = keymap.resolve(k, state.focus)
-                            && let Some(task) = dispatch_input(a, &mut state, &source, &player) {
+                        if let Some(a) = keymap.resolve(k, state.focus) {
+                            if let Some(task) = dispatch_input(a, &mut state, &source, &player) {
                                 spawn_task(task, source.clone(), app_tx.clone());
                             }
+                            // Restart the debounce timer, so the search fires
+                            // from the tick arm once typing stops.
+                            state.elapsed_ms = started.elapsed().as_millis() as u64;
+                            note_search_input(&mut debounce, &state, state.elapsed_ms);
+                        }
                     }
                     CtEvent::Resize(_, _) => state.apply(AppEvent::Resize),
                     _ => {}
@@ -191,8 +213,12 @@ pub async fn run(
 
             // Render tick
             _ = ticker.tick() => {
-                state.elapsed_ms = started.elapsed().as_millis() as u64;
+                let now_ms = started.elapsed().as_millis() as u64;
+                state.elapsed_ms = now_ms;
                 state.apply(AppEvent::Tick);
+                if let Some(task) = search_tick(&mut debounce, &mut state, now_ms) {
+                    spawn_task(task, source.clone(), app_tx.clone());
+                }
             }
         }
 
@@ -317,7 +343,7 @@ mod tests {
     // `Player` itself arrives via `use super::*`.
     use ytm_player::{mock::MockPlayer, player::PlayerCommand};
     use ytm_tui::{
-        app::{AppState, Pane},
+        app::{AppState, Focus, Pane},
         event::{AppEvent, InputAction},
     };
 
@@ -442,6 +468,65 @@ mod tests {
         // telling the user to re-export cookies they do not use is noise.
         let ev = AppEvent::PlaylistsLoaded(vec![]);
         assert!(empty_library_hint(false, &ev).is_none());
+    }
+
+    #[test]
+    fn typing_a_query_fires_one_search_after_the_pause_not_per_keystroke() {
+        // FR-S2: three keystrokes must cost one request, not three.
+        let (src, player) = deps();
+        let mut d = ytm_tui::search_state::SearchDebounce::new(300);
+        let mut s = AppState {
+            pane: Pane::Search,
+            focus: Focus::SearchInput,
+            ..Default::default()
+        };
+
+        let mut fired = Vec::new();
+        for (i, c) in "boa".chars().enumerate() {
+            let now = 1000 + i as u64 * 50;
+            dispatch_input(InputAction::Char(c), &mut s, &src, &*player);
+            note_search_input(&mut d, &s, now);
+            // A tick between keystrokes is too soon to fire.
+            if let Some(t) = search_tick(&mut d, &mut s, now + 10) {
+                fired.push(t);
+            }
+        }
+        assert!(fired.is_empty(), "fired mid-typing: {fired:?}");
+
+        let task = search_tick(&mut d, &mut s, 1500).expect("must fire after the pause");
+        assert_eq!(task, Task::Search("boa".into()));
+        assert!(s.loading, "the spinner must show while the search runs");
+    }
+
+    #[test]
+    fn a_settled_query_does_not_fire_again_on_every_tick() {
+        let (src, player) = deps();
+        let mut d = ytm_tui::search_state::SearchDebounce::new(300);
+        let mut s = AppState {
+            pane: Pane::Search,
+            focus: Focus::SearchInput,
+            ..Default::default()
+        };
+        dispatch_input(InputAction::Char('x'), &mut s, &src, &*player);
+        note_search_input(&mut d, &s, 1000);
+        assert!(search_tick(&mut d, &mut s, 1400).is_some());
+        for now in [1500, 1600, 5000] {
+            assert_eq!(search_tick(&mut d, &mut s, now), None, "re-fired at {now}");
+        }
+    }
+
+    #[test]
+    fn keystrokes_outside_the_search_pane_never_schedule_a_search() {
+        let (src, player) = deps();
+        let mut d = ytm_tui::search_state::SearchDebounce::new(300);
+        let mut s = AppState {
+            pane: Pane::Songs,
+            focus: Focus::Main,
+            ..Default::default()
+        };
+        dispatch_input(InputAction::Down, &mut s, &src, &*player);
+        note_search_input(&mut d, &s, 1000);
+        assert_eq!(search_tick(&mut d, &mut s, 2000), None);
     }
 
     #[test]
