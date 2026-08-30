@@ -1,0 +1,7 @@
+/target
+*.log
+/logs
+.env
+cookies.txt
+*.cookie
+config.local.toml

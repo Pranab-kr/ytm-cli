@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = ["crates/ytm-core", "crates/ytm-player", "crates/ytm-tui", "crates/ytm-cli"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.96.1"
+license = "MIT"
+
+[workspace.dependencies]
+ytmapi-rs = { version = "0.3.3", default-features = false, features = ["simplified-queries", "rustls"] }
+libmpv2 = "6.0.0"
+youtube_dl = { version = "0.10.0", default-features = false, features = ["tokio", "downloader-rustls-tls"] }
+ratatui = "0.30.2"
+crossterm = { version = "0.29.0", features = ["event-stream"] }
+ratatui-image = { version = "11.0.6", default-features = false, features = ["image-defaults", "crossterm"] }
+throbber-widgets-tui = "0.11.1"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "process"] }
+tokio-stream = "0.1"
+futures = "0.3"
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json"] }
+clap = { version = "4.6.6", features = ["derive"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+keyring = "4.2.0"
+souvlaki = "0.8.3"
+nucleo = "0.5.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+thiserror = "2.0.20"
+color-eyre = "0.6.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2.5"
+directories = "6.0.0"
+unicode-width = "0.2.2"
+chrono = { version = "0.4", features = ["serde"] }

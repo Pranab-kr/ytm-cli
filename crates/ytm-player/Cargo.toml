@@ -1,0 +1,20 @@
+[package]
+name = "ytm-player"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+mock = []
+
+[dependencies]
+ytm-core = { path = "../ytm-core" }
+libmpv2.workspace = true
+youtube_dl.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rand = "0.9"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
