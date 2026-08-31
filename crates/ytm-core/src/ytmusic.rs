@@ -49,6 +49,27 @@ fn classify(e: ytmapi_rs::Error) -> SourceError {
     }
 }
 
+/// Run upstream's typed parse over a response we already hold.
+///
+/// `raw_json_query` + this is equivalent to the typed call but lets us inspect
+/// the JSON first — needed because upstream's parsers fail on an empty library
+/// section instead of yielding an empty list. `ProcessedResult`'s fields are
+/// public and `parse_into` runs on JSON in hand, so this costs no extra request.
+fn parse_json<Q, O>(query: &Q, json: String) -> Result<O, SourceError>
+where
+    O: ytmapi_rs::parse::ParseFrom<Q>,
+{
+    let value: ytmapi_rs::json::Json =
+        serde_json::from_str(&json).map_err(|e| SourceError::Parse(e.to_string()))?;
+    ytmapi_rs::parse::ProcessedResult {
+        query,
+        source: json,
+        json: value,
+    }
+    .parse_into()
+    .map_err(classify)
+}
+
 /// YouTube answers a mutation with an outcome rather than an HTTP error, so a
 /// silent `Failure` would look like success to the UI.
 fn check_outcome(o: ApiOutcome) -> Result<(), SourceError> {
@@ -91,14 +112,41 @@ macro_rules! impl_music_source {
 
             fn library_albums(&self) -> BoxFut<'_, Vec<Album>> {
                 Box::pin(async move {
-                    let raw = self.api.get_library_albums().await.map_err(classify)?;
+                    // Parsed from raw JSON rather than via `get_library_albums`
+                    // because upstream cannot parse an *empty* library: with no
+                    // saved albums YouTube sends a `messageRenderer` ("No albums
+                    // yet") where the parser demands a `gridRenderer`, and the
+                    // failure reached the user as an error toast on a pane that
+                    // should just have read empty (FR-B3). Measured against the
+                    // live account 2026-08-31; fixture in library_raw.rs.
+                    let query = ytmapi_rs::query::GetLibraryAlbumsQuery::default();
+                    let json = self
+                        .api
+                        .raw_json_query::<ytmapi_rs::query::GetLibraryAlbumsQuery>(&query)
+                        .await
+                        .map_err(classify)?;
+                    if crate::library_raw::is_empty_library(&json) {
+                        return Ok(Vec::new());
+                    }
+                    let raw: Vec<ytmapi_rs::parse::SearchResultAlbum> = parse_json(&query, json)?;
                     Ok(raw.iter().map(mapping::album_from_search).collect())
                 })
             }
 
             fn library_artists(&self) -> BoxFut<'_, Vec<Artist>> {
                 Box::pin(async move {
-                    let raw = self.api.get_library_artists().await.map_err(classify)?;
+                    // Same empty-library hazard as albums: an artist list that
+                    // empties would fail to parse rather than render empty.
+                    let query = ytmapi_rs::query::GetLibraryArtistsQuery::default();
+                    let json = self
+                        .api
+                        .raw_json_query::<ytmapi_rs::query::GetLibraryArtistsQuery>(&query)
+                        .await
+                        .map_err(classify)?;
+                    if crate::library_raw::is_empty_library(&json) {
+                        return Ok(Vec::new());
+                    }
+                    let raw: Vec<ytmapi_rs::parse::LibraryArtist> = parse_json(&query, json)?;
                     Ok(raw.iter().map(mapping::artist_from_library).collect())
                 })
             }

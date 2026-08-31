@@ -335,9 +335,58 @@ mod tests {
 
     #[test]
     fn fixture_parses_into_playlists() {
+        // A REAL scrubbed capture since 2026-08-31, so this can assert the wire
+        // shape rather than just "is JSON" — the old hand-written fixture could
+        // only do the latter, which is why it never caught the empty-library
+        // hazard that broke the albums pane (see library_raw.rs).
         let raw = include_str!("../tests/fixtures/library_playlists.json");
         let v: serde_json::Value = serde_json::from_str(raw).expect("fixture must be valid JSON");
-        assert!(v.is_object() || v.is_array(), "fixture shape check");
+
+        let items = v
+            .pointer(
+                "/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer\
+                 /content/sectionListRenderer/contents/0/gridRenderer/items",
+            )
+            .and_then(serde_json::Value::as_array)
+            .expect("the real response keeps library playlists in a gridRenderer");
+        assert!(items.len() > 1, "fixture should hold several playlists");
+
+        // Every row carries the two fields mapping actually reads.
+        let rows: Vec<_> = items
+            .iter()
+            .filter_map(|i| i.get("musicTwoRowItemRenderer"))
+            .collect();
+        assert!(!rows.is_empty(), "rows are musicTwoRowItemRenderer");
+        for r in &rows {
+            assert!(
+                r.pointer("/title/runs/0/text")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|t| !t.is_empty()),
+                "every row needs a title"
+            );
+        }
+
+        // The scrub must hold: no tracking params, no auth-bearing tokens.
+        let body = v.to_string();
+        for leaked in ["clickTrackingParams", "visitorData", "SAPISID"] {
+            assert!(
+                !body.contains(leaked),
+                "{leaked} must never be committed in a fixture"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fixture_is_a_real_capture_not_a_hand_written_one() {
+        // Guards the thing PROGRESS.md tracked as open question 2 for two
+        // sessions: a SYNTHETIC fixture validates JSON parsing only, not the
+        // response shape. If someone replaces this with a hand-written stub,
+        // this test says so.
+        let raw = include_str!("../tests/fixtures/library_playlists.json");
+        assert!(
+            !raw.contains("SYNTHETIC fixture"),
+            "the fixture should be a real scrubbed capture"
+        );
     }
 
     #[test]
