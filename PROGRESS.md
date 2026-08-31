@@ -403,6 +403,28 @@ All four asked for mid-session, built after Task 36 and before the Task 38 pass.
 
 ### Search line-editing (asked: "ctrl+w and ctrl+arrow don't work")
 
+> **Shipped broken once, fixed in `0bff404`. Read this before trusting a green
+> gate on any key binding.** The first attempt implemented the reducer, tested
+> the reducer, and passed the whole gate while the running app could not reach
+> any of it. **Three seams sit between a key press and the screen, and the
+> reducer is only the middle one:**
+>
+> 1. **`keymap.rs` produced nothing.** The `CONTROL` branch matched `'c'`,
+>    `'d'`, `'u'` and fell through to `_ => None`. Plain Left/Right inside the
+>    field were unhandled too, so per-character motion was unreachable as well.
+> 2. **The modal branch of `apply_input` handled only `Char` and `Backspace`**,
+>    so Ctrl+W did nothing while naming a playlist.
+> 3. **`search.rs` drew the caret after the whole query**, ignoring
+>    `search_cursor` — so every motion moved state nothing on screen reflected.
+>    This is the one the owner saw.
+>
+> A test that calls `apply(AppEvent::Input(...))` crosses none of them. Tests
+> now go `KeyEvent -> resolve -> apply -> rendered text`, and there is a render
+> assertion that the caret falls *between* the two halves of the query. The same
+> reachability check now pins `t` and `,`, which are handled in the event loop
+> where no unit test reaches, and one test asserts every action name offered in
+> `[keys]` maps to a real action.
+
 They did nothing because **the search field had no caret** — it only ever
 appended with `push` and deleted with `pop`, so there was no position for a word
 motion to move. Added `search_cursor` (a byte offset, kept on a char boundary)
@@ -499,7 +521,9 @@ suite does not:
 
 - `3` (albums), then `Enter` — **must not start playing anything.** This was the
   fourth bug from session 1; the album pane used to report a stale song.
-- `/`, type two words, then `Ctrl+W`, `Ctrl+←`, `Ctrl+→`.
+- `/`, type two words, then `Ctrl+W`, `Ctrl+←`, `Ctrl+→` — **the caret must
+  visibly move**, not just the text change. This shipped broken once; see the
+  three seams above.
 - `a` on a track — expect a toast naming it. Then `V`, a few `j`, `a` — expect a
   count.
 - `t` a few times, including onto a light theme, in your real terminal.
