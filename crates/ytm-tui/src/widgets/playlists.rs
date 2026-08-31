@@ -19,6 +19,8 @@ const COUNT_WIDTH: usize = 12;
 const YEAR_WIDTH: usize = 6;
 /// Shown on playlists YouTube will not let us edit (FR-C).
 const READONLY: &str = "read-only";
+/// Right-hand tag naming what a home row is: `track`, `playlist`, `album`, `artist`.
+const KIND_WIDTH: usize = 10;
 
 /// Scaffolding every list shares: zero-area guard, empty state, scroll window,
 /// and the selection style. `row` builds the spans for one index, receiving the
@@ -62,6 +64,39 @@ where
         .collect();
 
     f.render_widget(List::new(items), area);
+}
+
+/// The home feed (FR-B6): shelf headings interleaved with their cards.
+///
+/// Headings scroll with the rows rather than sticking, because a carousel's
+/// title is only meaningful next to its own cards. Each card carries a kind tag
+/// — one shelf mixes tracks, playlists, albums, and artists, and without the tag
+/// the user cannot tell which rows `Enter` will play and which will open.
+pub fn draw_home(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
+    use crate::app::HomeRow;
+
+    let w = area.width as usize;
+    let kind_w = KIND_WIDTH;
+    let text_w = w.saturating_sub(kind_w);
+    let title_w = (text_w * 55) / 100;
+    let sub_w = text_w.saturating_sub(title_w);
+
+    draw_list(f, area, s, t, s.home_rows.len(), |idx, style, dim| {
+        match &s.home_rows[idx] {
+            // A heading is not selectable, so it keeps the accent colour even
+            // under the cursor — styling it as a selected row would suggest
+            // Enter does something.
+            HomeRow::Heading(title) => vec![Span::styled(
+                pad_to_width(title, w),
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+            )],
+            HomeRow::Item(i) => vec![
+                Span::styled(pad_to_width(&format!("  {}", i.title), title_w), style),
+                Span::styled(pad_to_width(&i.subtitle, sub_w), dim),
+                Span::styled(format!("{:>kind_w$}", i.kind_label()), dim),
+            ],
+        }
+    });
 }
 
 pub fn draw_playlists(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {

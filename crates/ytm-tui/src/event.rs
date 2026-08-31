@@ -31,6 +31,13 @@ pub enum InputAction {
     ToggleShuffle,
     CycleRepeat,
     OpenSearch,
+    /// Start a live filter over the rows on screen (`/`). Local, no request.
+    OpenFilter,
+    /// Scroll the list without moving the cursor off it (mouse wheel).
+    ScrollUp,
+    ScrollDown,
+    /// Centre the selected row in the viewport (`zz`, from vim).
+    CenterOnCursor,
     OpenQueue,
     OpenHelp,
     AddToQueue,
@@ -80,6 +87,14 @@ pub enum AppEvent {
     ArtistsLoaded(Vec<Artist>),
     PlaylistTracksLoaded {
         id: PlaylistId,
+        tracks: Vec<Track>,
+    },
+    /// The home feed's shelves (FR-B6).
+    HomeLoaded(Vec<ytm_core::HomeShelf>),
+    /// An artist's top tracks, with the name for the heading (FR-B7).
+    ArtistTracksLoaded {
+        id: ytm_core::ArtistId,
+        name: String,
         tracks: Vec<Track>,
     },
     SearchResults {

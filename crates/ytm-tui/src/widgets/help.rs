@@ -49,7 +49,9 @@ fn action_label(a: &InputAction) -> Option<&'static str> {
         A::ToggleMute => "mute",
         A::ToggleShuffle => "shuffle",
         A::CycleRepeat => "repeat mode",
-        A::OpenSearch => "search",
+        A::OpenSearch => "search online",
+        A::OpenFilter => "filter this list",
+        A::CenterOnCursor => "centre this row",
         A::OpenQueue => "queue",
         A::OpenHelp => "this help",
         A::AddToQueue => "add to queue",
@@ -69,6 +71,8 @@ fn action_label(a: &InputAction) -> Option<&'static str> {
         A::EditConfig => "edit config",
         // Not bindings a user presses on purpose.
         A::Confirm | A::Cancel | A::NextPane | A::PrevPane => return None,
+        // Wheel motion, not a binding anyone types.
+        A::ScrollUp | A::ScrollDown => return None,
         A::PageUp | A::PageDown | A::GoTo(_) | A::Char(_) | A::Backspace => return None,
         // Text-field editing. Listed in FIXED_ROWS with their real chords
         // instead: they are Ctrl combinations, not remappable single chars, and
@@ -99,9 +103,10 @@ fn rows(km: &KeyMap) -> Vec<(String, &'static str)> {
 /// cannot report them — the digits are matched in `resolve`, and Tab is a
 /// non-char key. Listed explicitly because FR-U2 says the overlay shows what
 /// the user can actually press.
-const FIXED_ROWS: [(&str, &str); 6] = [
-    ("1-6", "jump to source"),
+const FIXED_ROWS: [(&str, &str); 7] = [
+    ("1-7", "jump to source"),
     ("tab", "next source"),
+    ("^d/^u", "half page down/up"),
     ("^w", "delete word (search)"),
     ("^\u{2190}\u{2192}", "word motion (search)"),
     ("^a/^e", "line start/end (search)"),
@@ -306,7 +311,7 @@ mod tests {
         // explicit row they would be invisible.
         let text = text_of(&help_open());
         assert!(
-            text.contains("1-6"),
+            text.contains("1-7"),
             "the source jump keys should be listed, got: {text}"
         );
     }

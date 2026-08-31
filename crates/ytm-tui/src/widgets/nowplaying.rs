@@ -197,7 +197,16 @@ mod tests {
     #[test]
     fn sidebar_lists_every_source() {
         let text = buffer_text(&AppState::default());
-        for label in ["Playlists", "Songs", "Albums", "Artists", "Search", "Queue"] {
+        // "Fav" rather than "Songs" at the owner's request, and Home leads.
+        for label in [
+            "Home",
+            "Playlists",
+            "Fav",
+            "Albums",
+            "Artists",
+            "Search",
+            "Queue",
+        ] {
             assert!(text.contains(label), "sidebar missing {label}");
         }
     }

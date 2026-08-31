@@ -62,6 +62,7 @@ pub fn edit_config_in_editor(
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        crossterm::event::DisableMouseCapture,
         LeaveAlternateScreen,
         crossterm::cursor::Show
     )?;
@@ -80,6 +81,7 @@ pub fn edit_config_in_editor(
     execute!(
         terminal.backend_mut(),
         EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture,
         crossterm::cursor::Hide
     )?;
     terminal.clear()?;
@@ -110,7 +112,7 @@ pub fn reload_config(text: &str) -> color_eyre::Result<ReloadedConfig> {
 }
 
 /// `$VISUAL` first, then `$EDITOR` — the conventional order.
-fn editor_command() -> Option<String> {
+pub fn editor_command() -> Option<String> {
     for key in ["VISUAL", "EDITOR"] {
         if let Ok(v) = std::env::var(key)
             && !v.trim().is_empty()
@@ -129,11 +131,20 @@ const VOLUME_STEP: i64 = 5;
 /// Work the loop should start in the background as a result of an input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Task {
+    /// The home feed's recommendation shelves (FR-B6).
+    LoadHome,
     LoadPlaylists,
     LoadSongs,
     LoadAlbums,
     LoadArtists,
     OpenPlaylist(ytm_core::PlaylistId),
+    /// An artist's top tracks (FR-B7). Carries the name so the heading can be
+    /// set without looking it up — an artist opened from search is not in
+    /// `artists`, so there would be nothing to look up.
+    OpenArtist {
+        id: ytm_core::ArtistId,
+        name: String,
+    },
     Search(String),
     /// A server-side edit, carrying the token of the optimistic change it
     /// settles. Same spawn path as a read so the loop keeps one.
@@ -317,7 +328,7 @@ pub fn open_rename_prompt(state: &mut AppState) -> Option<ytm_core::PlaylistId> 
 
 /// Ask before deleting (FR-C3). Refuses system playlists outright.
 pub fn open_delete_confirm(state: &mut AppState) {
-    let Some(p) = state.selected_playlist().cloned() else {
+    let Some(p) = state.selected_playlist() else {
         return;
     };
     if p.is_system {
@@ -413,7 +424,7 @@ fn queue_targets(state: &AppState) -> Vec<ytm_core::Track> {
             .cloned()
             .collect();
     }
-    state.selected_track().cloned().into_iter().collect()
+    state.selected_track().into_iter().collect()
 }
 
 /// What the toast says. Names a single track; counts a selection, because
@@ -613,7 +624,39 @@ pub fn dispatch_input(
             if let Some(p) = state.selected_playlist() {
                 return start(state, Task::OpenPlaylist(p.id.clone()));
             }
-            if let Some(t) = state.selected_track().cloned() {
+            // An artist row opens their top tracks (FR-B7). Before this the
+            // Artists pane was a dead end: names on screen, and Enter did
+            // nothing at all.
+            if let Some(a) = state.selected_artist() {
+                return start(
+                    state,
+                    Task::OpenArtist {
+                        id: a.id.clone(),
+                        name: a.name.clone(),
+                    },
+                );
+            }
+            // A home card does whatever its kind implies: a track plays, and a
+            // playlist or artist opens. One carousel holds all of them, so the
+            // row decides, not the pane.
+            if state.pane == Pane::Home
+                && let Some(item) = state.selected_home_item()
+            {
+                match item.target.clone() {
+                    ytm_core::HomeTarget::Playlist(id) => {
+                        return start(state, Task::OpenPlaylist(id));
+                    }
+                    ytm_core::HomeTarget::Artist(id) => {
+                        let name = item.title.clone();
+                        return start(state, Task::OpenArtist { id, name });
+                    }
+                    // An album has no pane of its own (out of scope), so it is
+                    // left alone rather than opening something unrelated.
+                    ytm_core::HomeTarget::Album(_) => return None,
+                    ytm_core::HomeTarget::Track(_) => {}
+                }
+            }
+            if let Some(t) = state.selected_track() {
                 send(player, PlayerCommand::PlayNow(t));
             }
         }
@@ -712,6 +755,7 @@ pub fn dispatch_input(
 /// fetch for either would be a request the user never made.
 fn pane_task(pane: Pane) -> Option<Task> {
     Some(match pane {
+        Pane::Home => Task::LoadHome,
         Pane::Playlists => Task::LoadPlaylists,
         Pane::Songs => Task::LoadSongs,
         Pane::Albums => Task::LoadAlbums,
@@ -772,7 +816,7 @@ pub async fn run(
     config_path: std::path::PathBuf,
     mut theme_name: String,
 ) -> color_eyre::Result<()> {
-    use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind};
+    use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind, MouseEventKind};
     use futures::StreamExt;
 
     // App-internal events (results of background work).
@@ -781,6 +825,8 @@ pub async fn run(
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(tick_ms.max(1)));
     let started = std::time::Instant::now();
     let mut debounce = SearchDebounce::default();
+    // `zz` spans two key presses, so the prefix has to live across iterations.
+    let mut pending = ytm_tui::keymap::Pending::default();
 
     // `main` has already drawn the cached frame — building the source needs a
     // network round trip, and NFR-1 will not survive doing that first. Redrawing
@@ -794,10 +840,26 @@ pub async fn run(
             // Terminal input
             Some(Ok(ev)) = term_events.next() => {
                 match ev {
+                    // The wheel scrolls the focused list (FR-U8). Clicks are not
+                    // bound on purpose — capturing them would cost the user the
+                    // terminal's own text selection.
+                    CtEvent::Mouse(m) => {
+                        let scroll = match m.kind {
+                            MouseEventKind::ScrollDown => Some(InputAction::ScrollDown),
+                            MouseEventKind::ScrollUp => Some(InputAction::ScrollUp),
+                            _ => None,
+                        };
+                        if let Some(a) = scroll {
+                            state.apply(AppEvent::Input(a));
+                        }
+                    }
                     CtEvent::Key(k) if k.kind == KeyEventKind::Press => {
                         // `input_focus`, not `focus`: an open prompt is a text field, so
                         // letters must resolve to Char(c) rather than commands.
-                        if let Some(a) = keymap.resolve(k, state.input_focus()) {
+                        let (action, next) =
+                            keymap.resolve_chord(k, state.input_focus(), pending);
+                        pending = next;
+                        if let Some(a) = action {
                             // Both of these own resources `dispatch_input` cannot
                             // reach: the live theme, and the terminal itself.
                             match a {
@@ -910,6 +972,13 @@ pub async fn run(
             }
         }
 
+        // Set before drawing: the reducer needs the row count for paging and
+        // `zz`, and only the frame knows it.
+        state.viewport_rows = ytm_tui::render::list_rows_for(
+            terminal.size()?.into(),
+            state.pane,
+            !state.search_query.is_empty() || state.focus == ytm_tui::app::Focus::SearchInput,
+        );
         terminal.draw(|f| ytm_tui::render::render(f, &state, &theme, &keymap, &mut art))?;
 
         if state.should_quit {
@@ -927,6 +996,14 @@ fn spawn_task(task: Task, source: Arc<dyn MusicSource>, tx: mpsc::UnboundedSende
         tracing::debug!(?task, "background task started");
         let started = std::time::Instant::now();
         let ev = match task {
+            Task::LoadHome => match source.home_shelves().await {
+                Ok(v) => AppEvent::HomeLoaded(v),
+                Err(e) => AppEvent::Error(e.to_string()),
+            },
+            Task::OpenArtist { id, name } => match source.artist_tracks(id.clone()).await {
+                Ok(tracks) => AppEvent::ArtistTracksLoaded { id, name, tracks },
+                Err(e) => AppEvent::Error(e.to_string()),
+            },
             Task::LoadPlaylists => match source.library_playlists().await {
                 Ok(v) => AppEvent::PlaylistsLoaded(v),
                 Err(e) => AppEvent::Error(e.to_string()),
@@ -1519,6 +1596,7 @@ mod tests {
     #[test]
     fn renaming_a_system_playlist_is_refused_before_any_api_call() {
         let mut s = AppState {
+            pane: Pane::Playlists,
             playlists: vec![ytm_core::Playlist {
                 is_system: true,
                 ..ytm_core::Playlist::stub("LM", "Your Likes")
@@ -1538,6 +1616,7 @@ mod tests {
     fn renaming_an_editable_playlist_prefills_its_current_title() {
         // An empty field would make rename feel like create.
         let mut s = AppState {
+            pane: Pane::Playlists,
             playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
             selected: 0,
             ..Default::default()
@@ -1571,6 +1650,7 @@ mod tests {
     fn a_rejected_rename_puts_the_old_title_back() {
         // The whole point of the mutation log: the row reverts, not the list.
         let mut s = AppState {
+            pane: Pane::Playlists,
             playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
             selected: 0,
             modal: Some(ytm_tui::app::Modal::Prompt {
@@ -1593,6 +1673,7 @@ mod tests {
     fn n_opens_a_create_prompt_and_r_a_rename_prompt() {
         let (src, player) = deps();
         let mut s = AppState {
+            pane: Pane::Playlists,
             playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
             selected: 0,
             ..Default::default()
@@ -1609,6 +1690,7 @@ mod tests {
     fn pressing_delete_opens_a_confirmation_rather_than_deleting() {
         // FR-C3: destructive actions are never one keystroke.
         let mut s = AppState {
+            pane: Pane::Playlists,
             playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
             selected: 0,
             ..Default::default()
@@ -1621,6 +1703,7 @@ mod tests {
     #[test]
     fn the_confirmation_names_the_playlist() {
         let mut s = AppState {
+            pane: Pane::Playlists,
             playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
             ..Default::default()
         };
@@ -1636,6 +1719,7 @@ mod tests {
     #[test]
     fn confirming_removes_the_row_and_returns_the_task() {
         let mut s = AppState {
+            pane: Pane::Playlists,
             playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
             ..Default::default()
         };
@@ -1649,6 +1733,7 @@ mod tests {
     #[test]
     fn a_failed_delete_puts_the_playlist_back() {
         let mut s = AppState {
+            pane: Pane::Playlists,
             playlists: vec![
                 ytm_core::Playlist::stub("p1", "A"),
                 ytm_core::Playlist::stub("p2", "B"),
@@ -1667,6 +1752,7 @@ mod tests {
     #[test]
     fn a_system_playlist_cannot_be_deleted() {
         let mut s = AppState {
+            pane: Pane::Playlists,
             playlists: vec![ytm_core::Playlist {
                 is_system: true,
                 ..ytm_core::Playlist::stub("LM", "Your Likes")
@@ -1684,6 +1770,7 @@ mod tests {
     #[test]
     fn declining_the_confirmation_changes_nothing() {
         let mut s = AppState {
+            pane: Pane::Playlists,
             playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
             ..Default::default()
         };
@@ -1700,6 +1787,7 @@ mod tests {
         // are not in the keymap, so the loop has to resolve them.
         let (src, player) = deps();
         let mut yes = AppState {
+            pane: Pane::Playlists,
             playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
             ..Default::default()
         };
@@ -1731,6 +1819,7 @@ mod tests {
     fn d_on_a_playlist_opens_the_delete_confirmation() {
         let (src, player) = deps();
         let mut s = AppState {
+            pane: Pane::Playlists,
             playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
             ..Default::default()
         };
@@ -2210,10 +2299,11 @@ mod tests {
 
     #[test]
     fn a_number_key_switching_to_a_pane_loads_it() {
-        // Pressing 3 for Albums must fetch albums, or the pane sits empty.
+        // Pressing 4 for Albums must fetch albums, or the pane sits empty.
+        // Home is source 1, so the sources after it all shifted by one.
         let (src, player) = deps();
         let mut s = AppState::default();
-        let task = dispatch_input(InputAction::GoTo(3), &mut s, &src, &*player);
+        let task = dispatch_input(InputAction::GoTo(4), &mut s, &src, &*player);
         assert_eq!(task, Some(Task::LoadAlbums));
         assert_eq!(s.pane, Pane::Albums);
     }
@@ -2223,7 +2313,7 @@ mod tests {
         // The queue is local state owned by the actor; there is nothing to load.
         let (src, player) = deps();
         let mut s = AppState::default();
-        assert!(dispatch_input(InputAction::GoTo(6), &mut s, &src, &*player).is_none());
+        assert!(dispatch_input(InputAction::GoTo(7), &mut s, &src, &*player).is_none());
         assert_eq!(s.pane, Pane::Queue);
     }
 
@@ -2363,8 +2453,9 @@ mod tests {
             tracks: vec![ytm_core::Track::stub("v0", "Left over from Songs")],
             ..Default::default()
         };
-        // 3 = Albums. The songs stay in `tracks`; the pane now shows albums.
-        s.apply(AppEvent::Input(InputAction::GoTo(3)));
+        // 4 = Albums (Home is source 1). The songs stay in `tracks`; the pane
+        // now shows albums.
+        s.apply(AppEvent::Input(InputAction::GoTo(4)));
         assert_eq!(s.pane, Pane::Albums);
         dispatch_input(InputAction::Confirm, &mut s, &src, &*player);
         let log = player.commands();
@@ -2383,7 +2474,7 @@ mod tests {
             tracks: vec![ytm_core::Track::stub("v0", "Left over from Songs")],
             ..Default::default()
         };
-        s.apply(AppEvent::Input(InputAction::GoTo(3)));
+        s.apply(AppEvent::Input(InputAction::GoTo(4)));
         dispatch_input(InputAction::AddToQueue, &mut s, &src, &*player);
         let log = player.commands();
         assert!(log.is_empty(), "`a` on an album row queued a song: {log:?}");

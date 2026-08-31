@@ -5,8 +5,12 @@
 #   macOS:   ~/Library/Application Support/ytm-cli/config.toml
 #
 # Every key below is shown with its built-in default, so a commented-out file
-# behaves exactly like no file at all. Press `,` in the app to open this file in
-# $EDITOR — keybindings and theme reload when you save and exit.
+# behaves exactly like no file at all. Uncomment a line to change it.
+#
+# Two ways in:
+#   ytm-cli config          write this file and open it in $EDITOR
+#   ,                       same thing from inside the app
+# Keybindings and the theme reload when you save and exit — no restart.
 
 [auth]
 # "oauth" or "cookie". Cookie auth is the working path today; see the README.
@@ -25,6 +29,7 @@ shuffle = false    # start shuffled
 
 [ui]
 vim_keys = true    # h/j/k/l navigation alongside the arrow keys
+mouse = true       # scroll wheel scrolls the focused list
 tick_ms = 250      # redraw interval; lower is smoother and busier
 album_art = true   # art in graphics-capable terminals (kitty, iTerm2, sixel)
 
@@ -56,7 +61,8 @@ confirm_on_quit = false
 # end = "G"
 # quit = "q"
 # open_help = "?"
-# open_search = "/"
+# open_search = "S"      # search YouTube Music (asks the server)
+# open_filter = "/"      # filter the rows already on screen
 # open_queue = "u"
 # toggle_pause = " "
 # next_track = "n"
@@ -81,5 +87,19 @@ confirm_on_quit = false
 # move_entry_up = "K"
 # clear_queue = "C"
 # refresh = "L"
+# center_on_cursor = "z" # `zz` centres the selected row (press twice)
+# page_down = "d"        # also Ctrl+D / PageDown
+# page_up = "u"          # also Ctrl+U / PageUp
 # cycle_theme = "t"
 # edit_config = ","
+
+# Not remappable, listed so they are discoverable:
+#   1-7          jump to a source (Home, Playlists, Fav, Albums, Artists,
+#                Search, Queue)
+#   tab          next source
+#   zz           centre the selected row
+#   ^d / ^u      half page down / up
+#   ^w           delete the previous word, in a text field
+#   ^left/right  move a word, in a text field
+#   ^a / ^e      start / end of line, in a text field
+#   wheel        scroll the focused list

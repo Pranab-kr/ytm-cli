@@ -111,12 +111,40 @@ Tokens go to the OS keyring, never to disk or the log.
 
 ```bash
 ytm-cli                  # the TUI
+ytm-cli config           # write config.toml with every default, then open it
 ytm-cli login            # OAuth device-code sign-in
 ytm-cli logout           # clear the keyring entry
 ytm-cli playlists        # print playlists and exit — the fastest auth check
 ytm-cli cache clear      # delete cached metadata
 YTM_LOG=debug ytm-cli    # verbose logging (to a file, not the screen)
 ```
+
+### Changing keybindings and settings
+
+Run this once:
+
+```bash
+ytm-cli config
+```
+
+It writes `config.toml` to the platform config dir and opens it in `$EDITOR`.
+The file that lands lists **every setting and every keybinding at its default
+value, commented out** — so changing one is uncommenting a line and editing it.
+Nothing has to be written from scratch, and no schema has to be looked up.
+
+```toml
+[keys]
+# open_filter = "/"      # <- uncomment, change to what you want
+# add_to_queue = "a"
+```
+
+An existing `config.toml` is never overwritten; it is opened as it is. Add
+`--no-edit` to write and print the path without opening an editor. The file is
+validated when you close the editor, so a typo is reported rather than silently
+ignored.
+
+`,` inside the app does the same thing, and keybindings and the theme reload the
+moment you save and exit — no restart.
 
 From a checkout, `cargo run -p ytm-cli -- <subcommand>` works the same.
 
@@ -134,10 +162,13 @@ Press `?` in the app for the live list, which reflects your rebinds. Defaults:
 | `j` / `k` or ↓ / ↑ | down / up |
 | `h` / `l` or ← / → | up a level / into the selection |
 | `g` / `G` | first / last row |
-| `Ctrl+d` / `Ctrl+u` | page down / up |
-| `1`–`6` | jump to a source (playlists, songs, albums, artists, search, queue) |
+| `Ctrl+d` / `Ctrl+u` | half page down / up |
+| `PageDown` / `PageUp` | half page down / up |
+| `zz` | centre the selected row |
+| scroll wheel | scroll the focused list |
+| `1`–`7` | jump to a source (home, playlists, fav, albums, artists, search, queue) |
 | `Tab` | next source |
-| `Enter` | open a playlist, or play a track |
+| `Enter` | play a track, or open a playlist / artist |
 | `q` / `Ctrl+c` | quit |
 
 ### Playback
@@ -177,11 +208,17 @@ Press `?` in the app for the live list, which reflects your rebinds. Defaults:
 | `D` | delete playlist |
 | `L` | reload the current pane |
 
-### Search
+### Search and filter
+
+Two different things: `/` narrows the rows already on screen without asking the
+server, and `S` searches YouTube Music.
 
 | Key | Action |
 |---|---|
-| `/` | search |
+| `/` | filter the current list (title, artist, album) |
+| `S` | search YouTube Music |
+| `Esc` | in a filter, abandon it and restore the full list |
+| `Enter` | in a filter, keep it and move to the rows |
 | `Ctrl+w` | delete the previous word |
 | `Ctrl+←` / `Ctrl+→` | move a word at a time |
 | `Ctrl+a` / `Ctrl+e` | start / end of line |

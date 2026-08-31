@@ -15,9 +15,12 @@ use ratatui::{
 };
 
 /// Display order of the sources, top to bottom.
-pub const SOURCES: [(Pane, &str); 6] = [
+pub const SOURCES: [(Pane, &str); 7] = [
+    (Pane::Home, "Home"),
     (Pane::Playlists, "Playlists"),
-    (Pane::Songs, "Songs"),
+    // "Fav" rather than "Songs": the pane is the liked/saved songs, and the old
+    // label read as if it listed everything.
+    (Pane::Songs, "Fav"),
     (Pane::Albums, "Albums"),
     (Pane::Artists, "Artists"),
     (Pane::Search, "Search"),

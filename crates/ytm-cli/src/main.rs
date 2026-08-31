@@ -5,6 +5,7 @@ mod mpris;
 
 use color_eyre::eyre::{Context, eyre};
 use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -23,7 +24,15 @@ impl TerminalGuard {
     pub fn new() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut out = io::stdout();
-        execute!(out, EnterAlternateScreen, crossterm::cursor::Hide)?;
+        // Mouse capture is for the wheel only (FR-U8). Clicks are deliberately
+        // not bound: capturing them would take the terminal's own click-drag
+        // text selection away from the user, which costs more than it adds.
+        execute!(
+            out,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            crossterm::cursor::Hide
+        )?;
         Ok(Self {
             terminal: Terminal::new(CrosstermBackend::new(out))?,
         })
@@ -38,7 +47,14 @@ impl Drop for TerminalGuard {
 
 fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+    // Mouse capture off before leaving: a terminal left in capture mode ignores
+    // the user's own selection and scrollback afterwards.
+    let _ = execute!(
+        io::stdout(),
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    );
 }
 
 /// Put the terminal back *before* the panic message is printed, or the report
@@ -165,6 +181,12 @@ pub enum Command {
     Logout,
     /// Print your playlists and exit
     Playlists,
+    /// Write config.toml with every default and binding, then open it
+    Config {
+        /// Write the file and print its path without opening an editor
+        #[arg(long)]
+        no_edit: bool,
+    },
     /// Cache maintenance
     Cache {
         #[command(subcommand)]
@@ -258,6 +280,68 @@ async fn run_playlists(cfg: &config::Config) -> color_eyre::Result<()> {
     Ok(())
 }
 
+/// Write the documented config and open it in `$EDITOR` (FR-U9).
+///
+/// The point is that nothing has to be written by hand: the file that lands
+/// carries every setting and every keybinding at its default value, commented
+/// out, so changing one is uncommenting a line. Without this the user had to
+/// know the file's location, its schema, and the action names before they could
+/// rebind anything.
+///
+/// An existing file is never overwritten — that would discard the user's own
+/// settings, which is the opposite of helpful. It is opened as it is.
+fn run_config(no_edit: bool) -> color_eyre::Result<()> {
+    let path = config::Config::default_path();
+    let existed = path.exists();
+    if !existed {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&path, config::EXAMPLE_TOML)?;
+    }
+
+    println!(
+        "{} {}",
+        if existed {
+            "config:"
+        } else {
+            "config written:"
+        },
+        path.display()
+    );
+
+    if no_edit {
+        println!("\nEvery setting and keybinding is in that file, commented out at its");
+        println!("default. Uncomment a line to change it.");
+        return Ok(());
+    }
+
+    let Some(editor) = app_loop::editor_command() else {
+        // Not an error: the file is written, which is the useful half. Telling
+        // the user to set $EDITOR and exiting 1 would bury that.
+        println!("\n$EDITOR is not set, so the file was not opened.");
+        println!("Edit it directly, or set $EDITOR and run this again.");
+        return Ok(());
+    };
+
+    let mut parts = editor.split_whitespace();
+    let bin = parts.next().unwrap_or("vi");
+    let status = std::process::Command::new(bin)
+        .args(parts)
+        .arg(&path)
+        .status()?;
+    if !status.success() {
+        return Err(eyre!("{bin} exited with {status}"));
+    }
+    // Validated after editing so a typo is caught here rather than surfacing as
+    // a silently ignored binding later.
+    match config::Config::load(Some(&path)) {
+        Ok(_) => println!("config is valid"),
+        Err(e) => return Err(eyre!("config.toml is not valid: {e}")),
+    }
+    Ok(())
+}
+
 fn run_cache_clear() -> color_eyre::Result<()> {
     let path = config::paths::cache_dir().join("cache.db");
     let cache = ytm_core::cache::Cache::open(&path)?;
@@ -281,6 +365,7 @@ async fn main() -> color_eyre::Result<()> {
         Some(Command::Login) => return run_login(&cfg).await,
         Some(Command::Logout) => return run_logout(),
         Some(Command::Playlists) => return run_playlists(&cfg).await,
+        Some(Command::Config { no_edit }) => return run_config(*no_edit),
         Some(Command::Cache { action }) => {
             return match action {
                 CacheAction::Clear => run_cache_clear(),

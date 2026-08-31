@@ -30,6 +30,25 @@ const ART_GAP: u16 = 2;
 /// A shredded track list is worse than absent art (FR-U5).
 const MAIN_MIN_WIDTH: u16 = 48;
 
+/// Rows the list area can show inside a terminal of this size.
+///
+/// The reducer needs it for paging and `zz`, but `render` takes `&AppState` and
+/// cannot write it back, so the loop sets it from the frame size before each
+/// draw. Kept here beside the layout constants it derives from — a copy in the
+/// loop would drift the moment the chrome changed.
+pub fn list_rows_for(area: Rect, pane: Pane, has_search_input: bool) -> usize {
+    // Now-playing bar, then the pane heading inside the main area.
+    let body = area.height.saturating_sub(NOWPLAYING_HEIGHT);
+    let rows = body.saturating_sub(1);
+    // The search pane spends one more row on its query line.
+    let rows = if pane == Pane::Search && has_search_input {
+        rows.saturating_sub(1)
+    } else {
+        rows
+    };
+    rows as usize
+}
+
 /// Split the main area into list and art panel, or leave it whole.
 ///
 /// Pure math so the rule is testable without a terminal or an image protocol.
@@ -143,6 +162,7 @@ fn draw_main(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     toast::draw_spinner(f, rows[0], s, t);
 
     match s.pane {
+        Pane::Home => playlists::draw_home(f, rows[1], s, t),
         // An open playlist shows its tracks; the list of playlists otherwise.
         Pane::Playlists if s.open_playlist.is_some() => tracklist::draw(f, rows[1], s, t),
         Pane::Playlists => playlists::draw_playlists(f, rows[1], s, t),
@@ -150,6 +170,8 @@ fn draw_main(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
         Pane::Queue => queue::draw(f, rows[1], s, t),
         Pane::Search => draw_search(f, rows[1], s, t),
         Pane::Albums => playlists::draw_albums(f, rows[1], s, t),
+        // An open artist shows their tracks, like an open playlist does.
+        Pane::Artists if s.open_artist.is_some() => tracklist::draw(f, rows[1], s, t),
         Pane::Artists => playlists::draw_artists(f, rows[1], s, t),
     }
 }
@@ -206,9 +228,16 @@ fn pane_title(s: &AppState) -> String {
                 .unwrap_or_else(|| "Playlist".to_owned()),
             None => "Playlists".to_owned(),
         },
-        Pane::Songs => "Songs".to_owned(),
+        Pane::Home => "Home".to_owned(),
+        // Renamed at the owner's request: the pane is the liked/saved songs, and
+        // "Songs" read as if it were every song.
+        Pane::Songs => "Fav".to_owned(),
         Pane::Albums => "Albums".to_owned(),
-        Pane::Artists => "Artists".to_owned(),
+        // An open artist is headed by their name, like an open playlist.
+        Pane::Artists => match &s.open_artist {
+            Some((_, name)) => name.clone(),
+            None => "Artists".to_owned(),
+        },
         Pane::Search => "Search".to_owned(),
         Pane::Queue => "Queue".to_owned(),
     }
@@ -383,9 +412,26 @@ mod tests {
             crate::event::InputAction::ToggleVisual,
         ));
         let text = frame_text(&s, &mut ArtCache::disabled(), 30, 10);
-        assert!(
-            text.contains("Songs"),
-            "the pane name survives, got: {text}"
-        );
+        assert!(text.contains("Fav"), "the pane name survives, got: {text}");
+    }
+
+    #[test]
+    fn the_viewport_row_count_excludes_the_chrome() {
+        // Paging and `zz` are computed from this. If it counted the now-playing
+        // bar or the heading, a half-page jump would overshoot the screen.
+        let area = Rect::new(0, 0, 80, 24);
+        // 24 - 3 (now playing) - 1 (heading) = 20
+        assert_eq!(list_rows_for(area, Pane::Songs, false), 20);
+        // The search pane also spends a row on the query line.
+        assert_eq!(list_rows_for(area, Pane::Search, true), 19);
+    }
+
+    #[test]
+    fn a_tiny_terminal_reports_no_rows_rather_than_underflowing() {
+        // These are u16 subtractions; without saturation a short terminal would
+        // wrap to 65535 and every page key would jump to the end of the list.
+        let area = Rect::new(0, 0, 80, 2);
+        assert_eq!(list_rows_for(area, Pane::Songs, false), 0);
+        assert_eq!(list_rows_for(Rect::new(0, 0, 80, 0), Pane::Songs, false), 0);
     }
 }

@@ -10,6 +10,20 @@ pub struct KeyMap {
     chars: HashMap<char, InputAction>,
 }
 
+/// Multi-key chords in progress.
+///
+/// `zz` is the only one, but it cannot be a plain char binding: `z` alone must
+/// do nothing and wait. Kept beside the keymap rather than inside it so
+/// `resolve` stays a pure function of (key, focus) — the pending prefix is
+/// session state, not configuration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Pending {
+    #[default]
+    None,
+    /// `z` seen; the next key completes or abandons the chord.
+    Z,
+}
+
 impl Default for KeyMap {
     fn default() -> Self {
         let mut chars = HashMap::new();
@@ -22,7 +36,10 @@ impl Default for KeyMap {
             ('G', InputAction::End),
             ('q', InputAction::Quit),
             ('?', InputAction::OpenHelp),
-            ('/', InputAction::OpenSearch),
+            // Owner request: `/` filters the list in place (like less/vim), and
+            // `S` opens the server-side search pane.
+            ('/', InputAction::OpenFilter),
+            ('S', InputAction::OpenSearch),
             ('u', InputAction::OpenQueue),
             (' ', InputAction::TogglePause),
             ('n', InputAction::NextTrack),
@@ -57,6 +74,33 @@ impl Default for KeyMap {
 }
 
 impl KeyMap {
+    /// Resolve a key that may be part of a multi-key chord.
+    ///
+    /// Returns the action and the new pending state. Only navigation focus takes
+    /// chords: in a text field `z` is a letter.
+    pub fn resolve_chord(
+        &self,
+        key: KeyEvent,
+        focus: Focus,
+        pending: Pending,
+    ) -> (Option<InputAction>, Pending) {
+        let typing = matches!(focus, Focus::SearchInput | Focus::FilterInput);
+        if !typing && !key.modifiers.contains(KeyModifiers::CONTROL) {
+            match (pending, key.code) {
+                // `zz` centres. A second `z` is the only completion; anything
+                // else abandons the prefix and is handled normally, so a
+                // mistyped `z` costs nothing.
+                (Pending::Z, KeyCode::Char('z')) => {
+                    return (Some(InputAction::CenterOnCursor), Pending::None);
+                }
+                (Pending::None, KeyCode::Char('z')) => return (None, Pending::Z),
+                (Pending::Z, _) => return (self.resolve(key, focus), Pending::None),
+                _ => {}
+            }
+        }
+        (self.resolve(key, focus), Pending::None)
+    }
+
     pub fn resolve(&self, key: KeyEvent, focus: Focus) -> Option<InputAction> {
         // Ctrl-C escapes everything, including a text field.
         if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -68,7 +112,7 @@ impl KeyMap {
             // The readline chords only mean anything where there is text and a
             // caret. Outside a field they stay unbound rather than being given
             // some second meaning in a list.
-            if focus == Focus::SearchInput {
+            if focus == Focus::SearchInput || focus == Focus::FilterInput {
                 return match key.code {
                     KeyCode::Char('w') => Some(InputAction::DeleteWordBack),
                     KeyCode::Char('a') => Some(InputAction::LineStart),
@@ -84,6 +128,20 @@ impl KeyMap {
             return match key.code {
                 KeyCode::Char('d') => Some(InputAction::PageDown),
                 KeyCode::Char('u') => Some(InputAction::PageUp),
+                _ => None,
+            };
+        }
+
+        // A filter field is a text field: the same editing keys, but Esc and
+        // Enter mean "stop editing", not "clear".
+        if focus == Focus::FilterInput {
+            return match key.code {
+                KeyCode::Char(c) => Some(InputAction::Char(c)),
+                KeyCode::Backspace => Some(InputAction::Backspace),
+                KeyCode::Esc => Some(InputAction::Cancel),
+                KeyCode::Enter => Some(InputAction::Confirm),
+                KeyCode::Down => Some(InputAction::Down),
+                KeyCode::Up => Some(InputAction::Up),
                 _ => None,
             };
         }
@@ -107,11 +165,11 @@ impl KeyMap {
         }
 
         match key.code {
-            // 1-6 jump to a source, checked before the char table so a digit
+            // 1-7 jump to a source, checked before the char table so a digit
             // cannot be rebound to something else by accident. Only the digits
-            // that name a source are bound; 7-9 and 0 fall through to `None`
+            // that name a source are bound; 8-9 and 0 fall through to `None`
             // rather than being swallowed.
-            KeyCode::Char(c @ '1'..='6') => Some(InputAction::GoTo(c as u8 - b'0')),
+            KeyCode::Char(c @ '1'..='7') => Some(InputAction::GoTo(c as u8 - b'0')),
             KeyCode::Char(c) => self.chars.get(&c).cloned(),
             KeyCode::Down => Some(InputAction::Down),
             KeyCode::Up => Some(InputAction::Up),
@@ -202,6 +260,10 @@ const ACTION_NAMES: &[&str] = &[
     "volume_down",
     "toggle_mute",
     "refresh",
+    "open_filter",
+    "center_on_cursor",
+    "page_down",
+    "page_up",
 ];
 
 fn action_from_name(n: &str) -> Option<InputAction> {
@@ -239,6 +301,10 @@ fn action_from_name(n: &str) -> Option<InputAction> {
         "volume_down" => InputAction::VolumeDown,
         "toggle_mute" => InputAction::ToggleMute,
         "refresh" => InputAction::Refresh,
+        "open_filter" => InputAction::OpenFilter,
+        "center_on_cursor" => InputAction::CenterOnCursor,
+        "page_down" => InputAction::PageDown,
+        "page_up" => InputAction::PageUp,
         "home" => InputAction::Home,
         "end" => InputAction::End,
         _ => return None,
@@ -386,14 +452,14 @@ mod tests {
     fn number_keys_jump_straight_to_a_source() {
         let m = KeyMap::default();
         assert_eq!(m.resolve(key('1'), Focus::Main), Some(InputAction::GoTo(1)));
-        assert_eq!(m.resolve(key('6'), Focus::Main), Some(InputAction::GoTo(6)));
+        assert_eq!(m.resolve(key('7'), Focus::Main), Some(InputAction::GoTo(7)));
     }
 
     #[test]
     fn digits_outside_the_source_range_are_not_bound() {
-        // 7-9 and 0 name no source; binding them would swallow the key.
+        // 8-9 and 0 name no source; binding them would swallow the key.
         let m = KeyMap::default();
-        assert_eq!(m.resolve(key('7'), Focus::Main), None);
+        assert_eq!(m.resolve(key('8'), Focus::Main), None);
         assert_eq!(m.resolve(key('0'), Focus::Main), None);
     }
 
