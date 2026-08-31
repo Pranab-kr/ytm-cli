@@ -60,7 +60,7 @@ leaves your machine. Use it knowing that, or don't use it.
 | libmpv | 2.5.0 | audio playback |
 | yt-dlp | 2026.08.19 | resolving stream URLs |
 
-**Arch / Manjaro / EndeavourOS:**
+**Arch / CachyOs / Manjaro / EndeavourOS:**
 
 ```bash
 sudo pacman -S --needed rust mpv yt-dlp git base-devel
@@ -83,6 +83,64 @@ sudo apt install libmpv-dev yt-dlp git build-essential
 brew install mpv yt-dlp
 # Rust via https://rustup.rs
 ```
+
+<details>
+<summary><b>Windows</b> — via WSL2 (click the arrow to expand)</summary>
+
+<br>
+
+**Nobody has run this on Windows yet.** The spec calls Windows best-effort and
+untested (NFR-10). What follows is reasoned from the dependency graph, not from a
+working install — corrections welcome if you try it.
+
+**Use WSL2.** From the app's point of view a WSL2 install *is* Linux, so nothing
+about the build changes:
+
+```bash
+sudo apt install libmpv-dev yt-dlp git build-essential
+# Rust via https://rustup.rs — the packaged rustc is usually too old
+```
+
+Then follow [Install](#install) below, unchanged.
+
+Two things decide whether it is usable:
+
+- **Audio needs WSLg** — Windows 11, or a Windows 10 build new enough to have it.
+  WSLg ships PulseAudio and mpv finds it with no configuration. Without WSLg
+  there is no audio device inside WSL at all, and bridging one to the Windows
+  host by hand is more trouble than it is worth.
+- **The cookie file lives on the Windows side.** You export it from a Windows
+  browser, so `auth.cookie_file` points across the mount:
+
+  ```toml
+  cookie_file = "/mnt/c/Users/<you>/Downloads/music.youtube.com_cookies.txt"
+  ```
+
+**Media keys do not work in WSL** — there is no D-Bus session bus for MPRIS to
+attach to. That is handled rather than fatal: the app logs it and runs without
+them. Album art depends on the terminal — Windows Terminal 1.22+ has sixel, and
+anything older falls back to half-blocks on its own.
+
+### Native Windows, without WSL
+
+Possible, unproven, and the linker is the hard part. `libmpv2-sys`'s build script
+is one line — `cargo:rustc-link-lib=mpv` — with no pkg-config, no vcpkg, and no
+platform handling. An MSVC build therefore needs `mpv.lib` on your `LIB` path and
+`libmpv-2.dll` beside the binary at runtime; the
+[shinchiro mpv builds](https://github.com/shinchiro/mpv-winbuild-cmake/releases)
+ship both. `rusqlite` is vendored (`bundled`), so the MSVC build tools are
+required. `yt-dlp.exe` on `PATH` works as-is, and `crossterm`, `ratatui`,
+`reqwest` (rustls) and `directories` are all fine — config lands in `%APPDATA%`.
+
+Three things degrade rather than break, each already handled in code:
+
+| What | Why | What happens |
+|---|---|---|
+| Media keys | `souvlaki`'s Windows backend needs a real window handle; the app passes none | logged at info, app runs without them |
+| Album art | no kitty/sixel support in most Windows terminals | falls back to half-blocks |
+| Cookie-file hardening | the `0600` chmod on the temp cookie jar is `#[cfg(unix)]` | `%TEMP%` is already per-user and ACL'd, but the explicit guard is absent |
+
+</details>
 
 `yt-dlp` is called as a subprocess and needs to stay current — YouTube breaks
 stream extraction regularly. If playback stops working, update it first.
