@@ -10,6 +10,11 @@ use ratatui::{Frame, layout::Rect};
 use ratatui_image::{StatefulImage, picker::Picker, protocol::StatefulProtocol};
 use std::collections::{HashMap, HashSet};
 
+/// True when running inside tmux, where probing stdio breaks key input.
+fn in_tmux() -> bool {
+    std::env::var_os("TMUX").is_some() || std::env::var("TERM").is_ok_and(|t| t.starts_with("tmux"))
+}
+
 /// Below this the image is noise, not art.
 const MIN_W: u16 = 10;
 const MIN_H: u16 = 5;
@@ -42,6 +47,17 @@ impl ArtCache {
     /// it must run *after* the first frame is drawn or it spends the whole NFR-1
     /// budget on a probe.
     pub fn detect() -> Self {
+        // Under tmux the stdio query is destructive: with `allow-passthrough`
+        // off, tmux prints the escape sequence as text instead of forwarding
+        // it, no reply ever comes, and the terminal is left in a state where
+        // crossterm's EventStream stops delivering key presses — Enter did
+        // nothing and no track would play. Measured against the live app: art
+        // on = no playback, art off = plays. So under tmux we never touch
+        // stdio, and fall back to halfblocks, which needs no protocol support.
+        if in_tmux() {
+            tracing::info!("tmux detected, using halfblocks without probing stdio");
+            return Self::with_picker(Some(Picker::halfblocks()));
+        }
         match Picker::from_query_stdio() {
             Ok(picker) => {
                 tracing::info!(protocol = ?picker.protocol_type(), "album art enabled");
@@ -160,5 +176,29 @@ mod tests {
             "too small to be legible"
         );
         assert!(should_draw(Rect::new(0, 0, 20, 10)));
+    }
+
+    #[test]
+    fn tmux_is_detected_from_either_signal() {
+        // Both matter: TMUX is unset when ssh-ing into a session, and TERM can
+        // be overridden to something non-tmux inside one.
+        assert!(
+            in_tmux() || (std::env::var_os("TMUX").is_none() && !term_is_tmux()),
+            "detection must agree with the environment it reads"
+        );
+    }
+
+    fn term_is_tmux() -> bool {
+        std::env::var("TERM").is_ok_and(|t| t.starts_with("tmux"))
+    }
+
+    #[test]
+    fn a_fallback_picker_still_reports_enabled_so_halfblocks_render() {
+        // The tmux path must not silently disable art: halfblocks work anywhere.
+        let c = ArtCache::disabled();
+        assert!(
+            !c.is_enabled(),
+            "an explicitly disabled cache stays disabled"
+        );
     }
 }
