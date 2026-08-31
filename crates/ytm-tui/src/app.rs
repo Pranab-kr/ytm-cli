@@ -112,10 +112,19 @@ pub struct AppState {
     pub open_playlist: Option<PlaylistId>,
 
     pub search_query: String,
+    /// Byte offset of the caret within `search_query`. Bytes, not chars, so it
+    /// can index the string directly — always kept on a char boundary.
+    pub search_cursor: usize,
     pub search_results: Vec<Track>,
 
     /// Multi-select for bulk add/remove (FR-C4).
     pub marked: HashSet<VideoId>,
+
+    /// Anchor row of an active range selection, or `None` outside visual mode.
+    pub visual_anchor: Option<usize>,
+    /// Marks that existed when visual mode began, so recomputing the range
+    /// cannot discard rows the user had already marked by hand.
+    pub marks_before_visual: HashSet<VideoId>,
 
     pub now_playing: Option<Track>,
     pub playback: PlaybackState,
@@ -238,14 +247,70 @@ impl AppState {
         if self.focus == Focus::SearchInput {
             match a {
                 InputAction::Char(c) => {
-                    self.search_query.push(c);
+                    let at = self.clamped_cursor();
+                    self.search_query.insert(at, c);
+                    self.search_cursor = at + c.len_utf8();
                     self.selected = 0;
                     return;
                 }
                 InputAction::Backspace => {
-                    // By character, not byte: truncating mid-codepoint panics.
-                    self.search_query.pop();
+                    // Remove the char before the caret, by boundary rather than
+                    // by byte: slicing mid-codepoint panics.
+                    let at = self.clamped_cursor();
+                    if let Some((i, _)) = self.search_query[..at].char_indices().next_back() {
+                        self.search_query.remove(i);
+                        self.search_cursor = i;
+                    }
                     self.selected = 0;
+                    return;
+                }
+                // Ctrl+W. Shell-style, so it eats a trailing space with the word.
+                InputAction::DeleteWordBack => {
+                    let at = self.clamped_cursor();
+                    let from = crate::util::text::prev_word_boundary(&self.search_query, at);
+                    self.search_query.replace_range(from..at, "");
+                    self.search_cursor = from;
+                    self.selected = 0;
+                    return;
+                }
+                InputAction::WordLeft => {
+                    self.search_cursor = crate::util::text::prev_word_boundary(
+                        &self.search_query,
+                        self.clamped_cursor(),
+                    );
+                    return;
+                }
+                InputAction::WordRight => {
+                    self.search_cursor = crate::util::text::next_word_boundary(
+                        &self.search_query,
+                        self.clamped_cursor(),
+                    );
+                    return;
+                }
+                InputAction::CharLeft => {
+                    let at = self.clamped_cursor();
+                    self.search_cursor = self.search_query[..at]
+                        .char_indices()
+                        .next_back()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    return;
+                }
+                InputAction::CharRight => {
+                    let at = self.clamped_cursor();
+                    self.search_cursor = self.search_query[at..]
+                        .chars()
+                        .next()
+                        .map(|c| at + c.len_utf8())
+                        .unwrap_or(at);
+                    return;
+                }
+                InputAction::LineStart => {
+                    self.search_cursor = 0;
+                    return;
+                }
+                InputAction::LineEnd => {
+                    self.search_cursor = self.search_query.len();
                     return;
                 }
                 // Esc and Enter both leave the field for the results list.
@@ -260,16 +325,30 @@ impl AppState {
         }
         match a {
             InputAction::Quit => self.should_quit = true,
-            InputAction::Down => self.select_next(),
-            InputAction::Up => self.select_prev(),
-            InputAction::Home => self.selected = 0,
-            InputAction::End => self.selected = self.list_len().saturating_sub(1),
+            // Every row movement redraws an active range, so the four are
+            // grouped rather than each remembering to call the refresh.
+            InputAction::Down | InputAction::Up | InputAction::Home | InputAction::End => {
+                match a {
+                    InputAction::Down => self.select_next(),
+                    InputAction::Up => self.select_prev(),
+                    InputAction::Home => self.selected = 0,
+                    _ => self.selected = self.list_len().saturating_sub(1),
+                }
+                self.refresh_visual_marks();
+            }
+            InputAction::ToggleVisual => self.toggle_visual(),
             InputAction::OpenHelp => self.modal = Some(Modal::Help),
             InputAction::OpenSearch => {
                 self.set_pane(Pane::Search);
                 self.focus = Focus::SearchInput;
+                // Reopening lands the caret after whatever query is still there.
+                self.search_cursor = self.search_query.len();
             }
             InputAction::OpenQueue => self.set_pane(Pane::Queue),
+            // Esc means "undo this selection" while a range is being made.
+            // Guarded so it only claims the key during visual mode; outside it,
+            // Esc keeps whatever meaning it had.
+            InputAction::Cancel if self.visual_anchor.is_some() => self.cancel_visual(),
             // `h` is "go up a level" first and "focus the sidebar" second, so
             // the pair reads like opening and closing a folder. Only the
             // playlist pane has a level to leave; everywhere else `h` keeps its
@@ -369,6 +448,8 @@ impl AppState {
         self.selected = 0;
         self.scroll_offset = 0;
         self.marked.clear();
+        self.visual_anchor = None;
+        self.marks_before_visual.clear();
         true
     }
 
@@ -400,6 +481,10 @@ impl AppState {
         self.selected = 0;
         self.scroll_offset = 0;
         self.marked.clear();
+        // The anchor indexes the pane being left. Carrying it over would mark
+        // whichever rows happened to sit at those indices in the new pane.
+        self.visual_anchor = None;
+        self.marks_before_visual.clear();
     }
 
     pub fn push_toast(&mut self, kind: ToastKind, text: &str, now_ms: u64) {
@@ -484,6 +569,100 @@ impl AppState {
         }
     }
 
+    /// The caret, guaranteed in range and on a char boundary.
+    ///
+    /// The query can be replaced from outside the field (a cleared pane, a
+    /// restored session), so a stored offset may be stale — and slicing a stale
+    /// one panics rather than misbehaving.
+    fn clamped_cursor(&self) -> usize {
+        let mut at = self.search_cursor.min(self.search_query.len());
+        while at > 0 && !self.search_query.is_char_boundary(at) {
+            at -= 1;
+        }
+        at
+    }
+
+    /// Video ids of the rows the main pane is showing, in display order.
+    ///
+    /// Mirrors `selected_track`'s pane mapping so a range and a hand-made mark
+    /// can never disagree about which list they are indexing.
+    fn row_ids(&self) -> Vec<VideoId> {
+        self.track_rows()
+            .iter()
+            .map(|t| t.video_id.clone())
+            .collect()
+    }
+
+    /// The pane's rows when they are tracks, empty when they are not.
+    ///
+    /// One place so `selected_track`, a visual range, and the bulk-action
+    /// targets can never disagree about which list is on screen.
+    pub fn track_rows(&self) -> &[Track] {
+        match self.pane {
+            Pane::Search => &self.search_results,
+            Pane::Queue => &self.queue,
+            Pane::Songs => &self.tracks,
+            Pane::Playlists if self.open_playlist.is_some() => &self.tracks,
+            Pane::Playlists | Pane::Albums | Pane::Artists => &[],
+        }
+    }
+
+    /// Start or end a range selection anchored at the current row (`V`).
+    ///
+    /// Ending it keeps the marks: the selection exists so `A` or `x` can act on
+    /// it, so dropping them here would make the mode useless. `Esc` is the way
+    /// out that undoes it.
+    pub fn toggle_visual(&mut self) {
+        if self.visual_anchor.is_some() {
+            self.visual_anchor = None;
+            self.marks_before_visual.clear();
+            return;
+        }
+        // Nothing to anchor to on an empty list, and an anchor into a list with
+        // no rows would mark by coincidence once one loaded.
+        if self.selected_track().is_none() {
+            return;
+        }
+        // Remembered so extending, shrinking, or cancelling the range can be
+        // recomputed from scratch without discarding marks made by hand.
+        self.marks_before_visual = self.marked.clone();
+        self.visual_anchor = Some(self.selected);
+        self.refresh_visual_marks();
+    }
+
+    /// Leave visual mode and put the marks back as they were when it started.
+    pub fn cancel_visual(&mut self) {
+        if self.visual_anchor.take().is_some() {
+            self.marked = std::mem::take(&mut self.marks_before_visual);
+        }
+    }
+
+    /// Redraw the range after the cursor moved.
+    ///
+    /// Recomputed from the anchor rather than accumulated, so walking back over
+    /// rows unmarks them instead of leaving the overshoot behind.
+    pub fn refresh_visual_marks(&mut self) {
+        let Some(anchor) = self.visual_anchor else {
+            return;
+        };
+        let rows = self.row_ids();
+        if rows.is_empty() {
+            return;
+        }
+        // Clamped: a refresh can land after the list shrank under the anchor.
+        let last = rows.len() - 1;
+        let a = anchor.min(last);
+        let b = self.selected.min(last);
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        self.marked = self.marks_before_visual.clone();
+        self.marked.extend(rows[lo..=hi].iter().cloned());
+    }
+
+    /// True while a range selection is being made — the status line says so.
+    pub fn in_visual_mode(&self) -> bool {
+        self.visual_anchor.is_some()
+    }
+
     /// Mark or unmark the selected track for a bulk action (FR-C4).
     pub fn toggle_mark(&mut self) {
         let Some(id) = self.selected_track().map(|t| t.video_id.clone()) else {
@@ -494,11 +673,25 @@ impl AppState {
         }
     }
 
+    /// The track under the cursor, or `None` when this pane's rows are not
+    /// tracks.
+    ///
+    /// Exhaustive on `Pane` rather than falling through to `tracks`: Albums,
+    /// Artists, and the playlist list keep whatever `tracks` was last loaded
+    /// with, so the old `_` arm reported a song that was not on screen. `Enter`
+    /// then played it and `a` queued it, and `v` marked it invisibly.
     pub fn selected_track(&self) -> Option<&Track> {
         match self.pane {
             Pane::Search => self.search_results.get(self.selected),
             Pane::Queue => self.queue.get(self.selected),
-            _ => self.tracks.get(self.selected),
+            Pane::Songs => self.tracks.get(self.selected),
+            // Only an open playlist shows tracks; the list of playlists does not.
+            Pane::Playlists => self
+                .open_playlist
+                .is_some()
+                .then(|| self.tracks.get(self.selected))
+                .flatten(),
+            Pane::Albums | Pane::Artists => None,
         }
     }
 
@@ -624,6 +817,8 @@ mod tests {
             pane: Pane::Search,
             focus: Focus::SearchInput,
             search_query: "boa".into(),
+            // The field has a caret now, so a test that types must place it.
+            search_cursor: 3,
             ..Default::default()
         };
         s.apply(AppEvent::Input(InputAction::Backspace));
@@ -648,6 +843,7 @@ mod tests {
             pane: Pane::Search,
             focus: Focus::SearchInput,
             search_query: "日本".into(),
+            search_cursor: "日本".len(),
             ..Default::default()
         };
         s.apply(AppEvent::Input(InputAction::Backspace));
@@ -866,5 +1062,378 @@ mod tests {
         s.apply_input(InputAction::Down);
         assert_eq!(s.selected, 1, "list_len must count playlists again");
         assert!(s.selected_playlist().is_some());
+    }
+
+    /// A songs pane with `n` rows, focused on the list.
+    fn songs(n: usize) -> AppState {
+        AppState {
+            pane: Pane::Songs,
+            focus: Focus::Main,
+            tracks: (0..n)
+                .map(|i| Track::stub(&format!("v{i}"), &format!("Track {i}")))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn marked_ids(s: &AppState) -> Vec<String> {
+        let mut v: Vec<String> = s.marked.iter().map(|i| i.0.clone()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn visual_mode_marks_the_anchor_row_as_soon_as_it_opens() {
+        // Otherwise `V` then `A` on a single row would add nothing.
+        let mut s = songs(5);
+        s.selected = 2;
+        s.apply(AppEvent::Input(InputAction::ToggleVisual));
+        assert_eq!(s.visual_anchor, Some(2));
+        assert_eq!(marked_ids(&s), vec!["v2"]);
+    }
+
+    #[test]
+    fn moving_down_in_visual_mode_extends_the_range() {
+        let mut s = songs(5);
+        s.selected = 1;
+        s.apply(AppEvent::Input(InputAction::ToggleVisual));
+        s.apply(AppEvent::Input(InputAction::Down));
+        s.apply(AppEvent::Input(InputAction::Down));
+        assert_eq!(marked_ids(&s), vec!["v1", "v2", "v3"]);
+    }
+
+    #[test]
+    fn moving_up_from_the_anchor_extends_backwards() {
+        // The range is anchor..=cursor in either direction, like vim.
+        let mut s = songs(5);
+        s.selected = 3;
+        s.apply(AppEvent::Input(InputAction::ToggleVisual));
+        s.apply(AppEvent::Input(InputAction::Up));
+        s.apply(AppEvent::Input(InputAction::Up));
+        assert_eq!(marked_ids(&s), vec!["v1", "v2", "v3"]);
+    }
+
+    #[test]
+    fn shrinking_the_range_unmarks_the_rows_left_behind() {
+        // Overshooting and coming back must not leave stale marks.
+        let mut s = songs(6);
+        s.selected = 0;
+        s.apply(AppEvent::Input(InputAction::ToggleVisual));
+        for _ in 0..4 {
+            s.apply(AppEvent::Input(InputAction::Down));
+        }
+        assert_eq!(marked_ids(&s).len(), 5);
+        for _ in 0..3 {
+            s.apply(AppEvent::Input(InputAction::Up));
+        }
+        assert_eq!(marked_ids(&s), vec!["v0", "v1"]);
+    }
+
+    #[test]
+    fn crossing_back_over_the_anchor_flips_the_range() {
+        let mut s = songs(6);
+        s.selected = 3;
+        s.apply(AppEvent::Input(InputAction::ToggleVisual));
+        s.apply(AppEvent::Input(InputAction::Down)); // 3..=4
+        s.apply(AppEvent::Input(InputAction::Up));
+        s.apply(AppEvent::Input(InputAction::Up)); // 2..=3
+        assert_eq!(marked_ids(&s), vec!["v2", "v3"]);
+    }
+
+    #[test]
+    fn a_second_v_leaves_visual_mode_but_keeps_the_marks() {
+        // The marks are the point of the selection — `A` comes next.
+        let mut s = songs(5);
+        s.apply(AppEvent::Input(InputAction::ToggleVisual));
+        s.apply(AppEvent::Input(InputAction::Down));
+        s.apply(AppEvent::Input(InputAction::ToggleVisual));
+        assert_eq!(s.visual_anchor, None, "visual mode must end");
+        assert_eq!(marked_ids(&s), vec!["v0", "v1"], "marks survive");
+    }
+
+    #[test]
+    fn escape_cancels_visual_mode_and_restores_the_previous_marks() {
+        // Esc is "undo this selection", so a hand-marked row from before must
+        // come back and the range's own rows must go.
+        let mut s = songs(6);
+        s.selected = 5;
+        s.toggle_mark(); // hand-marked v5, before visual mode
+        s.selected = 0;
+        s.apply(AppEvent::Input(InputAction::ToggleVisual));
+        s.apply(AppEvent::Input(InputAction::Down));
+        assert_eq!(marked_ids(&s), vec!["v0", "v1", "v5"]);
+        s.apply(AppEvent::Input(InputAction::Cancel));
+        assert_eq!(s.visual_anchor, None);
+        assert_eq!(marked_ids(&s), vec!["v5"], "only the old mark remains");
+    }
+
+    #[test]
+    fn a_range_selection_adds_to_marks_made_by_hand() {
+        // FR-C4 multi-select: `v` on scattered rows then `V` over a run must
+        // give the union, not one or the other.
+        let mut s = songs(8);
+        s.selected = 7;
+        s.toggle_mark();
+        s.selected = 1;
+        s.apply(AppEvent::Input(InputAction::ToggleVisual));
+        s.apply(AppEvent::Input(InputAction::Down));
+        assert_eq!(marked_ids(&s), vec!["v1", "v2", "v7"]);
+    }
+
+    #[test]
+    fn home_and_end_extend_the_range_too() {
+        // Any movement while visual is on redraws the range, not just j/k.
+        let mut s = songs(5);
+        s.selected = 2;
+        s.apply(AppEvent::Input(InputAction::ToggleVisual));
+        s.apply(AppEvent::Input(InputAction::End));
+        assert_eq!(marked_ids(&s), vec!["v2", "v3", "v4"]);
+        s.apply(AppEvent::Input(InputAction::Home));
+        assert_eq!(marked_ids(&s), vec!["v0", "v1", "v2"]);
+    }
+
+    #[test]
+    fn changing_pane_leaves_visual_mode() {
+        // The anchor indexes the old list; keeping it would mark by coincidence.
+        let mut s = songs(5);
+        s.apply(AppEvent::Input(InputAction::ToggleVisual));
+        s.set_pane(Pane::Albums);
+        assert_eq!(s.visual_anchor, None);
+        assert!(s.marked.is_empty());
+    }
+
+    #[test]
+    fn leaving_an_open_playlist_leaves_visual_mode() {
+        let mut s = songs(5);
+        s.pane = Pane::Playlists;
+        s.open_playlist = Some(PlaylistId::from("p1"));
+        s.apply(AppEvent::Input(InputAction::ToggleVisual));
+        assert!(s.close_open_playlist());
+        assert_eq!(s.visual_anchor, None);
+        assert!(s.marked.is_empty());
+    }
+
+    #[test]
+    fn visual_mode_on_an_empty_list_does_nothing() {
+        let mut s = AppState {
+            pane: Pane::Songs,
+            focus: Focus::Main,
+            ..Default::default()
+        };
+        s.apply(AppEvent::Input(InputAction::ToggleVisual));
+        assert_eq!(s.visual_anchor, None, "no row to anchor to");
+        assert!(s.marked.is_empty());
+    }
+
+    #[test]
+    fn visual_mode_works_in_the_queue_pane() {
+        // The queue reads its rows from a different vec, so the range has to
+        // follow `selected_track`, not `tracks`.
+        let mut s = AppState {
+            pane: Pane::Queue,
+            focus: Focus::Main,
+            queue: (0..4).map(|i| Track::stub(&format!("q{i}"), "T")).collect(),
+            ..Default::default()
+        };
+        s.apply(AppEvent::Input(InputAction::ToggleVisual));
+        s.apply(AppEvent::Input(InputAction::Down));
+        assert_eq!(marked_ids(&s), vec!["q0", "q1"]);
+    }
+
+    #[test]
+    fn a_range_over_the_whole_list_marks_every_row() {
+        let mut s = songs(4);
+        s.apply(AppEvent::Input(InputAction::ToggleVisual));
+        s.apply(AppEvent::Input(InputAction::End));
+        assert_eq!(marked_ids(&s), vec!["v0", "v1", "v2", "v3"]);
+    }
+
+    #[test]
+    fn marking_a_playlist_row_does_not_mark_a_stale_track() {
+        let mut s = songs(3);
+        // Visit the songs pane, then switch to the playlist list. `tracks` still
+        // holds the song rows, but the pane now shows playlists.
+        s.set_pane(Pane::Playlists);
+        s.playlists = vec![Playlist::stub("p1", "Focus"), Playlist::stub("p2", "Chill")];
+        assert!(s.open_playlist.is_none(), "showing the playlist list");
+        s.toggle_mark();
+        assert!(
+            s.marked.is_empty(),
+            "a playlist row is not a track; marked {:?}",
+            marked_ids(&s)
+        );
+    }
+
+    #[test]
+    fn the_albums_pane_reports_no_selected_track() {
+        // `selected_track` falls through to `tracks` for every pane it does not
+        // name, so a pane showing albums reports a song that is not on screen.
+        let mut s = songs(3);
+        s.set_pane(Pane::Albums);
+        s.albums = vec![Album {
+            id: AlbumId::from("a1"),
+            title: "Geogaddi".into(),
+            artists: vec![],
+            year: None,
+            thumbnail_url: None,
+        }];
+        assert!(
+            s.selected_track().is_none(),
+            "an album row is not a track, got {:?}",
+            s.selected_track().map(|t| t.title.clone())
+        );
+    }
+
+    #[test]
+    fn the_playlist_list_reports_no_selected_track() {
+        let mut s = songs(3);
+        s.set_pane(Pane::Playlists);
+        s.playlists = vec![Playlist::stub("p1", "Focus")];
+        assert!(
+            s.selected_track().is_none(),
+            "a playlist row is not a track"
+        );
+    }
+
+    /// A search pane with the field focused and `q` already typed.
+    fn searching(q: &str) -> AppState {
+        AppState {
+            pane: Pane::Search,
+            focus: Focus::SearchInput,
+            search_query: q.to_owned(),
+            search_cursor: q.len(),
+            ..Default::default()
+        }
+    }
+
+    fn press(s: &mut AppState, a: InputAction) {
+        s.apply(AppEvent::Input(a));
+    }
+
+    #[test]
+    fn ctrl_w_deletes_the_word_before_the_cursor() {
+        let mut s = searching("boards of canada");
+        press(&mut s, InputAction::DeleteWordBack);
+        assert_eq!(s.search_query, "boards of ");
+        assert_eq!(s.search_cursor, s.search_query.len());
+    }
+
+    #[test]
+    fn ctrl_w_deletes_only_up_to_the_cursor() {
+        // With the caret mid-line the tail must survive.
+        let mut s = searching("boards of canada");
+        s.search_cursor = "boards of".len();
+        press(&mut s, InputAction::DeleteWordBack);
+        assert_eq!(s.search_query, "boards  canada");
+        assert_eq!(s.search_cursor, "boards ".len());
+    }
+
+    #[test]
+    fn ctrl_w_on_an_empty_field_is_harmless() {
+        let mut s = searching("");
+        press(&mut s, InputAction::DeleteWordBack);
+        assert_eq!(s.search_query, "");
+        assert_eq!(s.search_cursor, 0);
+    }
+
+    #[test]
+    fn ctrl_w_repeated_clears_the_line_word_by_word() {
+        let mut s = searching("one two three");
+        press(&mut s, InputAction::DeleteWordBack);
+        assert_eq!(s.search_query, "one two ");
+        press(&mut s, InputAction::DeleteWordBack);
+        assert_eq!(s.search_query, "one ");
+        press(&mut s, InputAction::DeleteWordBack);
+        assert_eq!(s.search_query, "");
+        press(&mut s, InputAction::DeleteWordBack);
+        assert_eq!(s.search_query, "", "still nothing to delete");
+    }
+
+    #[test]
+    fn ctrl_arrows_move_the_cursor_a_word_at_a_time() {
+        let mut s = searching("boards of canada");
+        press(&mut s, InputAction::WordLeft);
+        assert_eq!(s.search_cursor, "boards of ".len());
+        press(&mut s, InputAction::WordLeft);
+        assert_eq!(s.search_cursor, "boards ".len());
+        press(&mut s, InputAction::WordRight);
+        assert_eq!(s.search_cursor, "boards of ".len());
+    }
+
+    #[test]
+    fn word_motion_clamps_at_both_ends() {
+        let mut s = searching("boards");
+        s.search_cursor = 0;
+        press(&mut s, InputAction::WordLeft);
+        assert_eq!(s.search_cursor, 0);
+        press(&mut s, InputAction::WordRight);
+        press(&mut s, InputAction::WordRight);
+        assert_eq!(s.search_cursor, "boards".len());
+    }
+
+    #[test]
+    fn typing_inserts_at_the_cursor_not_the_end() {
+        let mut s = searching("boards canada");
+        s.search_cursor = "boards ".len();
+        press(&mut s, InputAction::Char('o'));
+        press(&mut s, InputAction::Char('f'));
+        press(&mut s, InputAction::Char(' '));
+        assert_eq!(s.search_query, "boards of canada");
+        assert_eq!(s.search_cursor, "boards of ".len());
+    }
+
+    #[test]
+    fn backspace_deletes_at_the_cursor_not_the_end() {
+        let mut s = searching("boardss of");
+        s.search_cursor = "boardss".len();
+        press(&mut s, InputAction::Backspace);
+        assert_eq!(s.search_query, "boards of");
+        assert_eq!(s.search_cursor, "boards".len());
+    }
+
+    #[test]
+    fn backspace_removes_a_whole_multibyte_character_at_the_cursor() {
+        // Byte-slicing a codepoint would panic and take the terminal with it.
+        let mut s = searching("日本語");
+        press(&mut s, InputAction::Backspace);
+        assert_eq!(s.search_query, "日本");
+        assert!(s.search_query.is_char_boundary(s.search_cursor));
+    }
+
+    #[test]
+    fn left_and_right_move_by_character_inside_the_field() {
+        let mut s = searching("abc");
+        press(&mut s, InputAction::CharLeft);
+        assert_eq!(s.search_cursor, 2);
+        press(&mut s, InputAction::CharRight);
+        assert_eq!(s.search_cursor, 3);
+    }
+
+    #[test]
+    fn character_motion_steps_over_a_whole_multibyte_character() {
+        let mut s = searching("日本");
+        press(&mut s, InputAction::CharLeft);
+        assert!(s.search_query.is_char_boundary(s.search_cursor));
+        assert_eq!(s.search_cursor, "日".len());
+    }
+
+    #[test]
+    fn ctrl_a_and_ctrl_e_jump_to_the_ends_of_the_line() {
+        let mut s = searching("boards of canada");
+        press(&mut s, InputAction::LineStart);
+        assert_eq!(s.search_cursor, 0);
+        press(&mut s, InputAction::LineEnd);
+        assert_eq!(s.search_cursor, s.search_query.len());
+    }
+
+    #[test]
+    fn a_fresh_query_puts_the_cursor_at_the_end() {
+        // Reopening the pane and typing must not insert at offset 0.
+        let mut s = AppState::default();
+        s.apply(AppEvent::Input(InputAction::OpenSearch));
+        press(&mut s, InputAction::Char('b'));
+        press(&mut s, InputAction::Char('o'));
+        assert_eq!(s.search_query, "bo");
+        assert_eq!(s.search_cursor, 2);
     }
 }

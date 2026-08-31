@@ -16,6 +16,111 @@ use ytm_tui::{
     theme::Theme,
 };
 
+/// What a config reload produced. Both are rebuilt together: a `[keys]` change
+/// and a `[ui] theme` change land in the same file.
+pub struct ReloadedConfig {
+    pub keymap: KeyMap,
+    pub theme: Theme,
+    pub theme_name: String,
+}
+
+/// Suspend the TUI, open `$EDITOR` on the config, and reload on exit (`,`).
+///
+/// Returns `Ok(None)` when there is nothing to apply — no editor configured, or
+/// the user quit without saving. A parse error is returned rather than applied,
+/// so a typo leaves the running keymap and theme intact instead of resetting
+/// them to defaults mid-session.
+///
+/// The alternate screen and raw mode have to be released around the child: an
+/// editor drawing into our screen buffer inherits a terminal it cannot use, and
+/// leaving raw mode on means it never sees a newline.
+pub fn edit_config_in_editor(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    path: &std::path::Path,
+) -> color_eyre::Result<Option<ReloadedConfig>> {
+    use crossterm::{
+        execute,
+        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    };
+
+    let Some(editor) = editor_command() else {
+        return Err(color_eyre::eyre::eyre!(
+            "set $EDITOR (or $VISUAL) to edit the config from here"
+        ));
+    };
+
+    // Written on demand so the editor always opens on something real, and the
+    // user gets the documented defaults rather than an empty buffer.
+    if !path.exists() {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, crate::config::EXAMPLE_TOML)?;
+    }
+    let before = std::fs::read_to_string(path).unwrap_or_default();
+
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    )?;
+
+    // Split so `EDITOR="code -w"` works, not just a bare binary name.
+    let mut parts = editor.split_whitespace();
+    let bin = parts.next().unwrap_or("vi");
+    let status = std::process::Command::new(bin)
+        .args(parts)
+        .arg(path)
+        .status();
+
+    // Restore the TUI before reporting anything: an error surfaces as a toast,
+    // which needs the alternate screen back.
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        crossterm::cursor::Hide
+    )?;
+    terminal.clear()?;
+
+    let status = status?;
+    if !status.success() {
+        return Err(color_eyre::eyre::eyre!("{bin} exited with {status}"));
+    }
+    let after = std::fs::read_to_string(path)?;
+    if after == before {
+        return Ok(None);
+    }
+    reload_config(&after).map(Some)
+}
+
+/// Rebuild the keymap and theme from config text. Separate from the editor so
+/// it is testable without spawning a process.
+pub fn reload_config(text: &str) -> color_eyre::Result<ReloadedConfig> {
+    let cfg = crate::config::Config::from_toml_str(text)?;
+    let keys_toml = toml::to_string(&cfg.keys)?;
+    let keymap = KeyMap::from_toml_str(&keys_toml)?;
+    let (theme, theme_name) = crate::config::resolve_theme(&cfg)?;
+    Ok(ReloadedConfig {
+        keymap,
+        theme,
+        theme_name,
+    })
+}
+
+/// `$VISUAL` first, then `$EDITOR` — the conventional order.
+fn editor_command() -> Option<String> {
+    for key in ["VISUAL", "EDITOR"] {
+        if let Ok(v) = std::env::var(key)
+            && !v.trim().is_empty()
+        {
+            return Some(v);
+        }
+    }
+    None
+}
+
 /// Seek step in seconds (FR-P4).
 const SEEK_STEP: i64 = 5;
 /// Volume step per key press.
@@ -277,14 +382,52 @@ pub fn confirm_action(state: &mut AppState) -> Option<(u64, MutationTask)> {
 }
 
 /// Marked tracks if any, otherwise the selected one (FR-C4).
+///
+/// Ordered by the rows on screen, not by `marked`'s iteration order: it is a
+/// `HashSet`, so returning it directly sent a marked run to the API scrambled.
 pub fn targets_for_add(state: &AppState) -> Vec<ytm_core::VideoId> {
     if !state.marked.is_empty() {
-        return state.marked.iter().cloned().collect();
+        return state
+            .track_rows()
+            .iter()
+            .map(|t| t.video_id.clone())
+            .filter(|id| state.marked.contains(id))
+            .collect();
     }
     state
         .selected_track()
         .map(|t| vec![t.video_id.clone()])
         .unwrap_or_default()
+}
+
+/// Full tracks for a queue action: the marked rows, else the selected one.
+///
+/// Returns tracks rather than ids because the player queues `Track`s, and
+/// re-looking them up by id would be a second source of truth.
+fn queue_targets(state: &AppState) -> Vec<ytm_core::Track> {
+    if !state.marked.is_empty() {
+        return state
+            .track_rows()
+            .iter()
+            .filter(|t| state.marked.contains(&t.video_id))
+            .cloned()
+            .collect();
+    }
+    state.selected_track().cloned().into_iter().collect()
+}
+
+/// What the toast says. Names a single track; counts a selection, because
+/// naming only the first of twelve reads as a bug.
+fn enqueue_message(tracks: &[ytm_core::Track], next: bool) -> String {
+    let where_to = if next {
+        "playing next"
+    } else {
+        "added to queue"
+    };
+    match tracks {
+        [one] => format!("{}: {}", where_to, one.title),
+        many => format!("{} {} tracks", where_to, many.len()),
+    }
 }
 
 /// Open the target-playlist picker for the marked or selected tracks.
@@ -474,15 +617,24 @@ pub fn dispatch_input(
                 send(player, PlayerCommand::PlayNow(t));
             }
         }
-        A::AddToQueue => {
-            if let Some(t) = state.selected_track().cloned() {
-                send(player, PlayerCommand::EnqueueBack(vec![t]));
+        // Both honour a marked selection, so `V` over a run then `a` queues the
+        // whole range rather than only the row under the cursor.
+        A::AddToQueue | A::PlayNext => {
+            let tracks = queue_targets(state);
+            if tracks.is_empty() {
+                return None;
             }
-        }
-        A::PlayNext => {
-            if let Some(t) = state.selected_track().cloned() {
-                send(player, PlayerCommand::EnqueueNext(vec![t]));
-            }
+            let msg = enqueue_message(&tracks, action == A::PlayNext);
+            let cmd = if action == A::PlayNext {
+                PlayerCommand::EnqueueNext(tracks)
+            } else {
+                PlayerCommand::EnqueueBack(tracks)
+            };
+            send(player, cmd);
+            // FR-U3: without this, `a` outside the queue pane gives no sign it
+            // worked — the queue is not on screen to show the new row.
+            state.push_toast(ToastKind::Success, &msg, state.elapsed_ms);
+            state.marked.clear();
         }
         // Queue edits. All three are queue-pane-only: `x` means
         // remove-from-playlist elsewhere (Task 32), and there is no server-side
@@ -607,14 +759,18 @@ pub async fn run(
     source: Arc<dyn MusicSource>,
     player: impl Player,
     mut player_events: mpsc::UnboundedReceiver<ytm_player::player::PlayerEvent>,
-    keymap: KeyMap,
-    theme: Theme,
+    mut keymap: KeyMap,
+    mut theme: Theme,
     tick_ms: u64,
     cookie_auth: bool,
     cache: Option<ytm_core::cache::Cache>,
     mut art: ytm_tui::widgets::art::ArtCache,
     mut media: Option<souvlaki::MediaControls>,
+    // `config_path` is where `,` opens an editor and what a reload re-reads;
+    // `theme_name` tracks where `t` is in the preset cycle.
     mut media_keys: mpsc::UnboundedReceiver<PlayerCommand>,
+    config_path: std::path::PathBuf,
+    mut theme_name: String,
 ) -> color_eyre::Result<()> {
     use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind};
     use futures::StreamExt;
@@ -642,8 +798,47 @@ pub async fn run(
                         // `input_focus`, not `focus`: an open prompt is a text field, so
                         // letters must resolve to Char(c) rather than commands.
                         if let Some(a) = keymap.resolve(k, state.input_focus()) {
-                            if let Some(task) = dispatch_input(a, &mut state, &source, &player) {
-                                spawn_task(task, source.clone(), app_tx.clone());
+                            // Both of these own resources `dispatch_input` cannot
+                            // reach: the live theme, and the terminal itself.
+                            match a {
+                                InputAction::CycleTheme if state.modal.is_none() => {
+                                    theme_name = ytm_tui::theme::Theme::next_preset(&theme_name).to_owned();
+                                    theme = ytm_tui::theme::Theme::preset(&theme_name)
+                                        .unwrap_or_default();
+                                    state.push_toast(
+                                        ToastKind::Info,
+                                        &format!("theme: {theme_name}"),
+                                        state.elapsed_ms,
+                                    );
+                                }
+                                InputAction::EditConfig if state.modal.is_none() => {
+                                    match edit_config_in_editor(terminal, &config_path) {
+                                        Ok(Some(reloaded)) => {
+                                            keymap = reloaded.keymap;
+                                            theme = reloaded.theme;
+                                            theme_name = reloaded.theme_name;
+                                            state.push_toast(
+                                                ToastKind::Success,
+                                                "config reloaded",
+                                                state.elapsed_ms,
+                                            );
+                                        }
+                                        // Unchanged file, or no editor to open.
+                                        Ok(None) => {}
+                                        Err(e) => state.push_toast(
+                                            ToastKind::Error,
+                                            &format!("config not reloaded: {e}"),
+                                            state.elapsed_ms,
+                                        ),
+                                    }
+                                    // The editor painted over the frame.
+                                    terminal.clear()?;
+                                }
+                                _ => {
+                                    if let Some(task) = dispatch_input(a, &mut state, &source, &player) {
+                                        spawn_task(task, source.clone(), app_tx.clone());
+                                    }
+                                }
                             }
                             // Restart the debounce timer, so the search fires
                             // from the tick arm once typing stops.
@@ -2030,5 +2225,312 @@ mod tests {
         let mut s = AppState::default();
         assert!(dispatch_input(InputAction::GoTo(6), &mut s, &src, &*player).is_none());
         assert_eq!(s.pane, Pane::Queue);
+    }
+
+    #[test]
+    fn marked_targets_come_out_in_row_order() {
+        // `marked` is a HashSet, so iterating it scrambles the order. The user
+        // selected a run of rows and expects them added in that order.
+        let mut s = AppState {
+            pane: Pane::Songs,
+            tracks: (0..12)
+                .map(|i| ytm_core::Track::stub(&format!("v{i:02}"), "T"))
+                .collect(),
+            ..Default::default()
+        };
+        for t in s.tracks.clone() {
+            s.marked.insert(t.video_id.clone());
+        }
+        let got: Vec<String> = targets_for_add(&s).iter().map(|v| v.0.clone()).collect();
+        let want: Vec<String> = s.tracks.iter().map(|t| t.video_id.0.clone()).collect();
+        assert_eq!(got, want, "targets must follow the on-screen order");
+    }
+
+    #[test]
+    fn a_visual_range_reaches_add_to_playlist_through_the_keymap() {
+        // End to end for `V`: the keymap must produce the action, the range must
+        // mark, and the picker must carry every row. Feeding actions in directly
+        // would prove the reducer works while nothing could reach it.
+        let (src, player) = deps();
+        let km = ytm_tui::keymap::KeyMap::default();
+        let mut s = AppState {
+            pane: Pane::Songs,
+            focus: ytm_tui::app::Focus::Main,
+            tracks: (0..5)
+                .map(|i| ytm_core::Track::stub(&format!("v{i}"), "T"))
+                .collect(),
+            playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
+            ..Default::default()
+        };
+        let press = |s: &mut AppState, c: char| {
+            use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+            let a = km
+                .resolve(
+                    KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                    s.input_focus(),
+                )
+                .unwrap_or_else(|| panic!("{c:?} is unbound"));
+            dispatch_input(a, s, &src, &*player)
+        };
+        press(&mut s, 'V');
+        press(&mut s, 'j');
+        press(&mut s, 'j');
+        assert_eq!(s.marked.len(), 3, "V then j j must mark three rows");
+        press(&mut s, 'A');
+        match dispatch_input(InputAction::Confirm, &mut s, &src, &*player) {
+            Some(Task::Mutate {
+                task: MutationTask::AddTracks { videos, .. },
+                ..
+            }) => {
+                let ids: Vec<String> = videos.iter().map(|v| v.0.clone()).collect();
+                assert_eq!(ids, vec!["v0", "v1", "v2"], "in order, all three");
+            }
+            other => panic!("expected AddTracks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hand_marks_and_a_visual_range_add_up_through_the_keymap() {
+        // The owner's question: does marking rows by hand still work alongside
+        // the new range selection? The union must reach the API.
+        let (src, player) = deps();
+        let km = ytm_tui::keymap::KeyMap::default();
+        let mut s = AppState {
+            pane: Pane::Songs,
+            focus: ytm_tui::app::Focus::Main,
+            tracks: (0..6)
+                .map(|i| ytm_core::Track::stub(&format!("v{i}"), "T"))
+                .collect(),
+            playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
+            ..Default::default()
+        };
+        let press = |s: &mut AppState, c: char| {
+            use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+            let a = km
+                .resolve(
+                    KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                    s.input_focus(),
+                )
+                .unwrap();
+            dispatch_input(a, s, &src, &*player)
+        };
+        press(&mut s, 'v'); // hand-mark v0
+        press(&mut s, 'j');
+        press(&mut s, 'j');
+        press(&mut s, 'V'); // range from v2
+        press(&mut s, 'j'); // ..v3
+        press(&mut s, 'A');
+        match dispatch_input(InputAction::Confirm, &mut s, &src, &*player) {
+            Some(Task::Mutate {
+                task: MutationTask::AddTracks { videos, .. },
+                ..
+            }) => {
+                let ids: Vec<String> = videos.iter().map(|v| v.0.clone()).collect();
+                assert_eq!(ids, vec!["v0", "v2", "v3"]);
+            }
+            other => panic!("expected AddTracks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_visual_range_removes_every_selected_track_from_a_playlist() {
+        // The other bulk action `V` feeds: the confirm must name all of them.
+        let mut s = open_playlist_with(vec![
+            playlist_track("v1", "sv1", "A"),
+            playlist_track("v2", "sv2", "B"),
+            playlist_track("v3", "sv3", "C"),
+            playlist_track("v4", "sv4", "D"),
+        ]);
+        s.apply(AppEvent::Input(InputAction::ToggleVisual));
+        s.apply(AppEvent::Input(InputAction::Down));
+        s.apply(AppEvent::Input(InputAction::Down));
+        open_remove_confirm(&mut s);
+        match &s.modal {
+            Some(Modal::Confirm {
+                action: ConfirmAction::RemoveTracks { entries, .. },
+                ..
+            }) => assert_eq!(entries.len(), 3, "all three rows of the range"),
+            other => panic!("expected a remove confirm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_on_an_album_row_does_not_play_an_invisible_song() {
+        let (src, player) = deps();
+        let mut s = AppState {
+            pane: Pane::Songs,
+            focus: ytm_tui::app::Focus::Main,
+            tracks: vec![ytm_core::Track::stub("v0", "Left over from Songs")],
+            ..Default::default()
+        };
+        // 3 = Albums. The songs stay in `tracks`; the pane now shows albums.
+        s.apply(AppEvent::Input(InputAction::GoTo(3)));
+        assert_eq!(s.pane, Pane::Albums);
+        dispatch_input(InputAction::Confirm, &mut s, &src, &*player);
+        let log = player.commands();
+        assert!(
+            log.is_empty(),
+            "Enter on an album row started audio: {log:?}"
+        );
+    }
+
+    #[test]
+    fn add_to_queue_on_an_album_row_queues_nothing() {
+        let (src, player) = deps();
+        let mut s = AppState {
+            pane: Pane::Songs,
+            focus: ytm_tui::app::Focus::Main,
+            tracks: vec![ytm_core::Track::stub("v0", "Left over from Songs")],
+            ..Default::default()
+        };
+        s.apply(AppEvent::Input(InputAction::GoTo(3)));
+        dispatch_input(InputAction::AddToQueue, &mut s, &src, &*player);
+        let log = player.commands();
+        assert!(log.is_empty(), "`a` on an album row queued a song: {log:?}");
+    }
+
+    #[test]
+    fn adding_to_the_queue_confirms_with_a_toast() {
+        // FR-U3: `a` is otherwise silent unless the queue pane happens to be
+        // open, so the user cannot tell it worked.
+        let (src, player) = deps();
+        let mut s = AppState {
+            pane: Pane::Songs,
+            tracks: vec![ytm_core::Track::stub("v1", "Roygbiv")],
+            ..Default::default()
+        };
+        dispatch_input(InputAction::AddToQueue, &mut s, &src, &*player);
+        assert_eq!(s.toasts.len(), 1, "adding must be acknowledged");
+        assert_eq!(s.toasts[0].kind, ToastKind::Success);
+        assert!(
+            s.toasts[0].text.contains("Roygbiv"),
+            "name what was added, got: {}",
+            s.toasts[0].text
+        );
+    }
+
+    #[test]
+    fn play_next_confirms_with_its_own_wording() {
+        // `e` and `a` do different things, so one shared message would mislead.
+        let (src, player) = deps();
+        let mut s = AppState {
+            pane: Pane::Songs,
+            tracks: vec![ytm_core::Track::stub("v1", "Roygbiv")],
+            ..Default::default()
+        };
+        dispatch_input(InputAction::PlayNext, &mut s, &src, &*player);
+        assert_eq!(s.toasts.len(), 1);
+        assert!(
+            s.toasts[0].text.to_lowercase().contains("next"),
+            "got: {}",
+            s.toasts[0].text
+        );
+    }
+
+    #[test]
+    fn adding_a_whole_marked_selection_reports_the_count() {
+        // A range of 12 tracks naming only the first would read as a bug.
+        let (src, player) = deps();
+        let mut s = AppState {
+            pane: Pane::Songs,
+            tracks: (0..3)
+                .map(|i| ytm_core::Track::stub(&format!("v{i}"), "T"))
+                .collect(),
+            ..Default::default()
+        };
+        for t in s.tracks.clone() {
+            s.marked.insert(t.video_id.clone());
+        }
+        dispatch_input(InputAction::AddToQueue, &mut s, &src, &*player);
+        assert!(s.toasts[0].text.contains('3'), "got: {}", s.toasts[0].text);
+        match player.commands().first() {
+            Some(PlayerCommand::EnqueueBack(ts)) => {
+                assert_eq!(ts.len(), 3, "all marked tracks must be queued")
+            }
+            other => panic!("expected EnqueueBack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adding_with_an_empty_list_says_nothing_rather_than_lying() {
+        let (src, player) = deps();
+        let mut s = AppState {
+            pane: Pane::Songs,
+            ..Default::default()
+        };
+        dispatch_input(InputAction::AddToQueue, &mut s, &src, &*player);
+        assert!(s.toasts.is_empty(), "nothing was added, so say nothing");
+        assert!(player.commands().is_empty());
+    }
+
+    #[test]
+    fn the_bundled_example_config_parses() {
+        // `,` writes this file when the user has no config yet, so an invalid
+        // example would hand them a config that refuses to load.
+        let c = crate::config::Config::from_toml_str(crate::config::EXAMPLE_TOML)
+            .expect("config.example.toml must parse");
+        // Every value in it is commented out or a real default, so it must be
+        // indistinguishable from no config at all.
+        let d = crate::config::Config::default();
+        assert_eq!(c.playback.volume, d.playback.volume);
+        assert_eq!(c.behaviour.seek_step_secs, d.behaviour.seek_step_secs);
+        assert_eq!(c.behaviour.volume_step, d.behaviour.volume_step);
+        assert_eq!(c.ui.tick_ms, d.ui.tick_ms);
+        assert_eq!(c.ui.theme, d.ui.theme);
+    }
+
+    #[test]
+    fn every_commented_keybinding_in_the_example_names_a_real_action() {
+        // A typo'd action name in the example is silently ignored by the keymap,
+        // so the user would rebind a key and see nothing happen.
+        let mut checked = 0;
+        for line in crate::config::EXAMPLE_TOML.lines() {
+            let l = line.trim().trim_start_matches('#').trim();
+            let Some((name, _)) = l.split_once(" = ") else {
+                continue;
+            };
+            // Only the [keys] block uses quoted single-char values.
+            if !l.contains('"') || name.contains('.') {
+                continue;
+            }
+            if KeyMap::action_names().contains(&name) {
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 25,
+            "expected the example to document the bindings, matched {checked}"
+        );
+    }
+
+    #[test]
+    fn reloading_applies_a_rebound_key_and_a_new_theme() {
+        let r = reload_config(
+            r#"
+            [ui]
+            theme = "gruvbox"
+            [keys]
+            toggle_visual = "z"
+            "#,
+        )
+        .expect("valid config must reload");
+        assert_eq!(r.theme_name, "gruvbox");
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        assert_eq!(
+            r.keymap.resolve(
+                KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
+                ytm_tui::app::Focus::Main
+            ),
+            Some(InputAction::ToggleVisual)
+        );
+    }
+
+    #[test]
+    fn reloading_a_broken_config_is_an_error_rather_than_a_reset() {
+        // The running keymap and theme must survive a typo: resetting to
+        // defaults mid-session would be worse than refusing.
+        assert!(reload_config("[ui]\ntheme = \"no-such-theme\"").is_err());
+        assert!(reload_config("this is not toml").is_err());
+        assert!(reload_config("[behaviour]\nvolume_step = 0").is_err());
     }
 }

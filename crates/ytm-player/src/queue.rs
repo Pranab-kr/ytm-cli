@@ -45,6 +45,12 @@ impl Queue {
         if new.is_empty() {
             return;
         }
+        // The saved order is the restore point for `set_shuffle(false)`, so it
+        // has to grow too — otherwise unshuffling silently drops whatever was
+        // enqueued while shuffle was on.
+        if let Some(v) = self.unshuffled.as_mut() {
+            v.extend(new.iter().cloned());
+        }
         self.items.append(&mut new);
         if self.current.is_none() {
             self.current = Some(0);
@@ -58,10 +64,24 @@ impl Queue {
         }
         match self.current {
             Some(i) => {
+                // Mirror into the saved order, next to the same track, so the
+                // insert survives unshuffling.
+                if let Some(v) = self.unshuffled.as_mut() {
+                    let at = self
+                        .items
+                        .get(i)
+                        .and_then(|cur| v.iter().position(|t| t.video_id == cur.video_id))
+                        .map(|p| p + 1)
+                        .unwrap_or(v.len());
+                    v.splice(at..at, new.iter().cloned());
+                }
                 let at = (i + 1).min(self.items.len());
                 self.items.splice(at..at, new);
             }
             None => {
+                if let Some(v) = self.unshuffled.as_mut() {
+                    v.extend(new.iter().cloned());
+                }
                 self.items = new;
                 self.current = Some(0);
             }
@@ -153,16 +173,14 @@ impl Queue {
         self.shuffle = on;
         if on {
             self.unshuffled = Some(self.items.clone());
-            let keep = self.current.and_then(|i| self.items.get(i).cloned());
-            let mut rest: Vec<Track> = match &keep {
-                Some(k) => self
-                    .items
-                    .iter()
-                    .filter(|t| t.video_id != k.video_id)
-                    .cloned()
-                    .collect(),
-                None => std::mem::take(&mut self.items),
-            };
+            // Split by index, not by id: a playlist may hold the same video
+            // twice, and filtering on `video_id` would delete every copy of the
+            // current track rather than lifting the one that is playing.
+            let mut rest = std::mem::take(&mut self.items);
+            let keep = self
+                .current
+                .filter(|i| *i < rest.len())
+                .map(|i| rest.remove(i));
             rest.shuffle(&mut rand::rng());
             self.items = match keep {
                 Some(k) => {
@@ -338,5 +356,66 @@ mod tests {
         assert_eq!(q.len(), 0);
         assert!(q.current().is_none());
         assert_eq!(q.current_index(), None);
+    }
+
+    #[test]
+    fn a_track_enqueued_while_shuffled_survives_unshuffling() {
+        // `unshuffled` is the restore point, so an append that skips it is
+        // silently dropped the moment the user presses `s` again.
+        let mut q = Queue::default();
+        q.push_back(tracks(3));
+        q.set_shuffle(true);
+        q.push_back(vec![Track::stub("late", "Added while shuffled")]);
+        assert_eq!(q.len(), 4);
+        q.set_shuffle(false);
+        assert_eq!(q.len(), 4, "unshuffling lost the enqueued track");
+        assert!(
+            q.tracks().iter().any(|t| t.video_id.as_str() == "late"),
+            "the enqueued track must still be there"
+        );
+    }
+
+    #[test]
+    fn a_play_next_insert_while_shuffled_survives_unshuffling() {
+        let mut q = Queue::default();
+        q.push_back(tracks(3));
+        q.set_shuffle(true);
+        q.push_next(vec![Track::stub("soon", "Play next")]);
+        q.set_shuffle(false);
+        assert!(
+            q.tracks().iter().any(|t| t.video_id.as_str() == "soon"),
+            "unshuffling lost the play-next track"
+        );
+    }
+
+    #[test]
+    fn shuffling_keeps_every_copy_of_a_repeated_track() {
+        // A playlist may legitimately hold the same video twice. Excluding the
+        // current track by id rather than by index deletes all of its copies.
+        let mut q = Queue::default();
+        q.push_back(vec![
+            Track::stub("dup", "Same"),
+            Track::stub("v1", "Other"),
+            Track::stub("dup", "Same"),
+        ]);
+        q.set_shuffle(true);
+        assert_eq!(q.len(), 3, "shuffle dropped a repeated entry");
+        assert_eq!(
+            q.tracks()
+                .iter()
+                .filter(|t| t.video_id.as_str() == "dup")
+                .count(),
+            2,
+            "both copies must survive"
+        );
+    }
+
+    #[test]
+    fn shuffling_an_empty_queue_is_harmless() {
+        let mut q = Queue::default();
+        q.set_shuffle(true);
+        assert_eq!(q.len(), 0);
+        q.set_shuffle(false);
+        assert_eq!(q.len(), 0);
     }
 }

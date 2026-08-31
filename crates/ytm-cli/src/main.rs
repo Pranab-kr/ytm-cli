@@ -115,18 +115,29 @@ async fn build_source(cfg: &config::Config) -> color_eyre::Result<Arc<dyn MusicS
 }
 
 /// Theme from config: an explicit file wins, otherwise just the accent override.
-fn build_theme(cfg: &config::Config) -> color_eyre::Result<Theme> {
+/// The theme to start with, plus the preset name so `t` knows where the cycle
+/// is. A `theme_file` is the most specific answer and wins over `ui.theme`.
+fn build_theme(cfg: &config::Config) -> color_eyre::Result<(Theme, String)> {
     if let Some(path) = cfg.ui.theme_file.as_deref().map(expand_tilde) {
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("could not read the theme file at {}", path.display()))?;
-        return Ok(Theme::from_toml_str(&text)?);
+        return Ok((Theme::from_toml_str(&text)?, "custom".to_owned()));
     }
-    let mut theme = Theme::default();
+    let name = match &cfg.ui.theme {
+        config::ThemeChoice::Auto => config::auto_theme_name(),
+        config::ThemeChoice::Named(n) => n.clone(),
+    };
+    let mut theme = Theme::preset(&name).ok_or_else(|| {
+        eyre!(
+            "ui.theme names no built-in theme: {name:?} (try one of: {})",
+            Theme::preset_names().join(", ")
+        )
+    })?;
     if let Some(hex) = &cfg.ui.accent {
         theme.accent = ytm_tui::theme::parse_hex(hex)
             .ok_or_else(|| eyre!("ui.accent is not a hex color like \"#7aa2f7\": {hex:?}"))?;
     }
-    Ok(theme)
+    Ok((theme, name))
 }
 
 /// How long `ytm login` waits for the browser authorization before giving up.
@@ -302,7 +313,7 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
     };
 
     let volume = cfg.playback.volume.min(100) as u8;
-    let theme = build_theme(&cfg)?;
+    let (theme, theme_name) = build_theme(&cfg)?;
 
     // Fails cleanly here rather than mid-frame if libmpv is missing.
     let (player, player_events) = ytm_player::actor::spawn_player(volume)?;
@@ -323,7 +334,13 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
     // `build_source` is an `.await` on a cookie-validation round trip — running
     // it first put a blank terminal on screen for ~2.4s. Keys typed during the
     // wait are buffered by the terminal and handled once the loop starts.
-    let keymap = KeyMap::default();
+    // Built from `[keys]` so a rebind applies on the first frame, not after a
+    // reload. An unparseable table is reported rather than silently ignored.
+    let keymap = if cfg.keys.is_empty() {
+        KeyMap::default()
+    } else {
+        KeyMap::from_toml_str(&toml::to_string(&cfg.keys)?)?
+    };
     // The pre-probe frame cannot draw art: the picker does not exist yet.
     let mut art_probe = ytm_tui::widgets::art::ArtCache::disabled();
     guard
@@ -372,6 +389,8 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
         art,
         media,
         media_keys,
+        cfg.config_path.clone(),
+        theme_name,
     )
     .await;
 

@@ -1,0 +1,85 @@
+# ytm-cli configuration
+#
+# Copy to the platform config dir and edit:
+#   Linux:   ~/.config/ytm-cli/config.toml
+#   macOS:   ~/Library/Application Support/ytm-cli/config.toml
+#
+# Every key below is shown with its built-in default, so a commented-out file
+# behaves exactly like no file at all. Press `,` in the app to open this file in
+# $EDITOR — keybindings and theme reload when you save and exit.
+
+[auth]
+# "oauth" or "cookie". Cookie auth is the working path today; see the README.
+kind = "oauth"
+
+# OAuth device-flow client, from Google Cloud Console. Not secret for this flow.
+# client_id = "…apps.googleusercontent.com"
+# client_secret = "…"
+
+# Cookie auth: a file holding the raw `Cookie:` request header value.
+# cookie_file = "~/.config/ytm-cli/cookies.txt"
+
+[playback]
+volume = 70        # 0-100, remembered across runs
+shuffle = false    # start shuffled
+
+[ui]
+vim_keys = true    # h/j/k/l navigation alongside the arrow keys
+tick_ms = 250      # redraw interval; lower is smoother and busier
+album_art = true   # art in graphics-capable terminals (kitty, iTerm2, sixel)
+
+# Built-in theme: "auto", "tokyonight", "gruvbox", "nord", "dracula",
+# "dawn" (light), or "paper" (light). "auto" reads the terminal background and
+# falls back to dark when it cannot tell. Press `t` to cycle at runtime.
+theme = "auto"
+
+# Override just the accent, whichever theme is active.
+# accent = "#7aa2f7"
+
+# A full custom theme file wins over `theme` above. Keys: accent, fg, fg_dim,
+# fg_bright, bg_sel, error, success, and `preset` to start from a built-in.
+# theme_file = "~/.config/ytm-cli/theme.toml"
+
+[behaviour]
+seek_step_secs = 5    # how far f/b jump
+volume_step = 5       # how much +/- move the volume
+confirm_on_quit = false
+
+# Rebind any action to a single character. Action names are the snake_case forms
+# below; a binding is exclusive, so setting one clears that action's default.
+[keys]
+# down = "j"
+# up = "k"
+# left = "h"
+# right = "l"
+# home = "g"
+# end = "G"
+# quit = "q"
+# open_help = "?"
+# open_search = "/"
+# open_queue = "u"
+# toggle_pause = " "
+# next_track = "n"
+# prev_track = "p"
+# seek_forward = "f"
+# seek_back = "b"
+# volume_up = "+"
+# volume_down = "-"
+# toggle_mute = "m"
+# toggle_shuffle = "s"
+# cycle_repeat = "r"
+# add_to_queue = "a"
+# play_next = "e"
+# add_to_playlist = "A"
+# create_playlist = "N"
+# rename_playlist = "R"
+# delete_playlist = "D"
+# remove_from_playlist = "x"
+# toggle_mark = "v"
+# toggle_visual = "V"
+# move_entry_down = "J"
+# move_entry_up = "K"
+# clear_queue = "C"
+# refresh = "L"
+# cycle_theme = "t"
+# edit_config = ","

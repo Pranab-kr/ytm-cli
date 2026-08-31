@@ -41,6 +41,9 @@ impl Default for KeyMap {
             ('D', InputAction::DeletePlaylist),
             ('x', InputAction::RemoveFromPlaylist),
             ('v', InputAction::ToggleMark),
+            ('V', InputAction::ToggleVisual),
+            ('t', InputAction::CycleTheme),
+            (',', InputAction::EditConfig),
             ('e', InputAction::PlayNext),
             ('J', InputAction::MoveEntryDown),
             ('K', InputAction::MoveEntryUp),
@@ -127,6 +130,54 @@ impl KeyMap {
     }
 }
 
+impl KeyMap {
+    /// Every action name `[keys]` accepts. Used to check the shipped example
+    /// config against the real table — a typo there is silently ignored, so the
+    /// user rebinds a key and nothing happens.
+    pub fn action_names() -> &'static [&'static str] {
+        ACTION_NAMES
+    }
+}
+
+/// Kept beside `action_from_name`; the test below pins the two together.
+const ACTION_NAMES: &[&str] = &[
+    "down",
+    "up",
+    "left",
+    "right",
+    "home",
+    "end",
+    "quit",
+    "toggle_pause",
+    "next_track",
+    "prev_track",
+    "toggle_shuffle",
+    "cycle_repeat",
+    "open_search",
+    "open_queue",
+    "open_help",
+    "move_entry_up",
+    "move_entry_down",
+    "clear_queue",
+    "toggle_mark",
+    "toggle_visual",
+    "cycle_theme",
+    "edit_config",
+    "add_to_queue",
+    "play_next",
+    "add_to_playlist",
+    "remove_from_playlist",
+    "create_playlist",
+    "rename_playlist",
+    "delete_playlist",
+    "seek_forward",
+    "seek_back",
+    "volume_up",
+    "volume_down",
+    "toggle_mute",
+    "refresh",
+];
+
 fn action_from_name(n: &str) -> Option<InputAction> {
     Some(match n {
         "down" => InputAction::Down,
@@ -145,6 +196,25 @@ fn action_from_name(n: &str) -> Option<InputAction> {
         "move_entry_up" => InputAction::MoveEntryUp,
         "move_entry_down" => InputAction::MoveEntryDown,
         "clear_queue" => InputAction::ClearQueue,
+        "toggle_mark" => InputAction::ToggleMark,
+        "toggle_visual" => InputAction::ToggleVisual,
+        "cycle_theme" => InputAction::CycleTheme,
+        "edit_config" => InputAction::EditConfig,
+        "add_to_queue" => InputAction::AddToQueue,
+        "play_next" => InputAction::PlayNext,
+        "add_to_playlist" => InputAction::AddToPlaylist,
+        "remove_from_playlist" => InputAction::RemoveFromPlaylist,
+        "create_playlist" => InputAction::CreatePlaylist,
+        "rename_playlist" => InputAction::RenamePlaylist,
+        "delete_playlist" => InputAction::DeletePlaylist,
+        "seek_forward" => InputAction::SeekForward,
+        "seek_back" => InputAction::SeekBack,
+        "volume_up" => InputAction::VolumeUp,
+        "volume_down" => InputAction::VolumeDown,
+        "toggle_mute" => InputAction::ToggleMute,
+        "refresh" => InputAction::Refresh,
+        "home" => InputAction::Home,
+        "end" => InputAction::End,
         _ => return None,
     })
 }
@@ -312,6 +382,45 @@ mod tests {
         assert_eq!(
             m.resolve(key('1'), Focus::SearchInput),
             Some(InputAction::Char('1'))
+        );
+    }
+
+    #[test]
+    fn shift_v_starts_a_visual_range_and_lowercase_v_still_marks_one_row() {
+        // The pair must stay distinct: if `V` resolved to ToggleMark the range
+        // key would silently be the old single-row mark.
+        let m = KeyMap::default();
+        assert_eq!(
+            m.resolve(key('V'), Focus::Main),
+            Some(InputAction::ToggleVisual)
+        );
+        assert_eq!(
+            m.resolve(key('v'), Focus::Main),
+            Some(InputAction::ToggleMark)
+        );
+    }
+
+    #[test]
+    fn a_capital_v_typed_into_a_prompt_is_a_letter() {
+        // A playlist named "Vinyl" must be typeable.
+        let m = KeyMap::default();
+        assert_eq!(
+            m.resolve(key('V'), Focus::SearchInput),
+            Some(InputAction::Char('V'))
+        );
+    }
+
+    #[test]
+    fn the_visual_binding_can_be_remapped_from_config() {
+        let m = KeyMap::from_toml_str(r#"toggle_visual = "z""#).unwrap();
+        assert_eq!(
+            m.resolve(key('z'), Focus::Main),
+            Some(InputAction::ToggleVisual)
+        );
+        assert_eq!(
+            m.resolve(key('V'), Focus::Main),
+            None,
+            "a remap is exclusive, so the default must be gone"
         );
     }
 }

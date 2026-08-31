@@ -64,6 +64,65 @@ pub fn tail_to_width(s: &str, width: usize) -> String {
     s[take_from..].to_owned()
 }
 
+/// Byte index of the start of the word before `cursor`, for Ctrl+Left / Ctrl+W.
+///
+/// Shell-style: skip any separators immediately behind the cursor, then skip
+/// back over the word itself. Returns `cursor` unchanged at the start of the
+/// line. Indices always land on char boundaries, so slicing with them is safe
+/// on multibyte input.
+pub fn prev_word_boundary(s: &str, cursor: usize) -> usize {
+    let cursor = cursor.min(s.len());
+    let head = &s[..cursor];
+    let mut it = head.char_indices().rev().peekable();
+    let mut at = cursor;
+    while let Some(&(i, c)) = it.peek() {
+        if is_word_char(c) {
+            break;
+        }
+        at = i;
+        it.next();
+    }
+    while let Some(&(i, c)) = it.peek() {
+        if !is_word_char(c) {
+            break;
+        }
+        at = i;
+        it.next();
+    }
+    at
+}
+
+/// Byte index of the start of the next word after `cursor`, for Ctrl+Right.
+///
+/// Skips the current word then any separators, landing on the next word's first
+/// character — or the end of the line when there is none.
+pub fn next_word_boundary(s: &str, cursor: usize) -> usize {
+    let cursor = cursor.min(s.len());
+    let mut it = s[cursor..].char_indices().peekable();
+    let mut at = cursor;
+    while let Some(&(i, c)) = it.peek() {
+        if !is_word_char(c) {
+            break;
+        }
+        at = cursor + i + c.len_utf8();
+        it.next();
+    }
+    while let Some(&(i, c)) = it.peek() {
+        if is_word_char(c) {
+            break;
+        }
+        at = cursor + i + c.len_utf8();
+        it.next();
+    }
+    at
+}
+
+/// A word is alphanumeric; everything else separates. Deliberately simple —
+/// "boards of canada" and "lo-fi beats" both behave the way a shell would.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,5 +172,64 @@ mod tests {
     fn pad_fills_to_the_column_width() {
         assert_eq!(pad_to_width("ab", 5), "ab   ");
         assert_eq!(display_width(&pad_to_width("日本", 6)), 6);
+    }
+
+    #[test]
+    fn ctrl_w_from_the_end_deletes_the_last_word() {
+        let s = "boards of canada";
+        assert_eq!(prev_word_boundary(s, s.len()), "boards of ".len());
+    }
+
+    #[test]
+    fn ctrl_w_skips_a_trailing_space_before_deleting() {
+        // Typing "boards " then Ctrl+W must remove "boards", not just the space.
+        let s = "boards of ";
+        assert_eq!(prev_word_boundary(s, s.len()), "boards ".len());
+    }
+
+    #[test]
+    fn ctrl_w_at_the_start_of_the_line_stays_put() {
+        assert_eq!(prev_word_boundary("boards", 0), 0);
+        assert_eq!(prev_word_boundary("", 0), 0);
+    }
+
+    #[test]
+    fn ctrl_w_treats_punctuation_as_a_separator() {
+        let s = "lo-fi";
+        assert_eq!(prev_word_boundary(s, s.len()), "lo-".len());
+    }
+
+    #[test]
+    fn word_motion_lands_on_char_boundaries_for_multibyte_text() {
+        // Slicing a byte index inside a codepoint panics, which would take the
+        // terminal down mid-keystroke.
+        let s = "日本語 music";
+        let back = prev_word_boundary(s, s.len());
+        assert!(s.is_char_boundary(back), "index {back} splits a character");
+        assert_eq!(&s[back..], "music");
+        let fwd = next_word_boundary(s, 0);
+        assert!(s.is_char_boundary(fwd));
+    }
+
+    #[test]
+    fn ctrl_right_moves_to_the_start_of_the_next_word() {
+        let s = "boards of canada";
+        let a = next_word_boundary(s, 0);
+        assert_eq!(&s[a..], "of canada");
+        let b = next_word_boundary(s, a);
+        assert_eq!(&s[b..], "canada");
+    }
+
+    #[test]
+    fn ctrl_right_at_the_end_of_the_line_stays_put() {
+        let s = "boards";
+        assert_eq!(next_word_boundary(s, s.len()), s.len());
+    }
+
+    #[test]
+    fn ctrl_left_then_ctrl_right_returns_to_the_same_place() {
+        let s = "one two three";
+        let back = prev_word_boundary(s, s.len());
+        assert_eq!(next_word_boundary(s, back), s.len());
     }
 }

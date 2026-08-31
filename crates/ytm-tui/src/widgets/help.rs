@@ -64,9 +64,22 @@ fn action_label(a: &InputAction) -> Option<&'static str> {
         A::AddToPlaylist => "add to playlist",
         A::Refresh => "reload",
         A::ToggleMark => "mark row",
+        A::ToggleVisual => "visual select",
+        A::CycleTheme => "next theme",
+        A::EditConfig => "edit config",
         // Not bindings a user presses on purpose.
         A::Confirm | A::Cancel | A::NextPane | A::PrevPane => return None,
         A::PageUp | A::PageDown | A::GoTo(_) | A::Char(_) | A::Backspace => return None,
+        // Text-field editing. Listed in FIXED_ROWS with their real chords
+        // instead: they are Ctrl combinations, not remappable single chars, and
+        // they only do anything while the search field has focus.
+        A::DeleteWordBack
+        | A::WordLeft
+        | A::WordRight
+        | A::CharLeft
+        | A::CharRight
+        | A::LineStart
+        | A::LineEnd => return None,
     })
 }
 
@@ -86,7 +99,14 @@ fn rows(km: &KeyMap) -> Vec<(String, &'static str)> {
 /// cannot report them — the digits are matched in `resolve`, and Tab is a
 /// non-char key. Listed explicitly because FR-U2 says the overlay shows what
 /// the user can actually press.
-const FIXED_ROWS: [(&str, &str); 2] = [("1-6", "jump to source"), ("tab", "next source")];
+const FIXED_ROWS: [(&str, &str); 6] = [
+    ("1-6", "jump to source"),
+    ("tab", "next source"),
+    ("^w", "delete word (search)"),
+    ("^\u{2190}\u{2192}", "word motion (search)"),
+    ("^a/^e", "line start/end (search)"),
+    (",", "edit config"),
+];
 
 /// Column count and column width for `n` bindings in a `w` x `h` inner area.
 ///
@@ -297,6 +317,16 @@ mod tests {
         assert!(
             text.contains("back") || text.contains("close"),
             "h should read as going back a level, got: {text}"
+        );
+    }
+
+    #[test]
+    fn the_overlay_lists_the_visual_select_binding() {
+        // FR-U2: a key the user can press must be discoverable from `?`.
+        let rows = super::rows(&KeyMap::default());
+        assert!(
+            rows.iter().any(|(k, l)| k == "V" && *l == "visual select"),
+            "V must be listed, got: {rows:?}"
         );
     }
 }

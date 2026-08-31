@@ -15,6 +15,14 @@ pub enum ConfigError {
     Parse(#[from] toml::de::Error),
     #[error("config key `playback.volume` must be 0-100, got {0}")]
     Volume(u16),
+    #[error("config key `{0}` must be greater than 0, got {1}")]
+    Step(&'static str, i64),
+    #[error("config key `ui.theme` names no built-in theme: {0:?}")]
+    UnknownTheme(String),
+    #[error("config key `ui.accent` is not a hex color like \"#7aa2f7\": {0:?}")]
+    BadAccent(String),
+    #[error("theme file is not valid: {0}")]
+    Theme(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -60,6 +68,29 @@ impl Default for PlaybackConfig {
     }
 }
 
+/// Which built-in theme to start with. `Auto` picks from the terminal's own
+/// background so a light terminal does not get dark-on-dark text.
+///
+/// Deserialized by hand: the TOML is a single string (`theme = "gruvbox"` or
+/// `theme = "auto"`), which no derived enum representation matches.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ThemeChoice {
+    #[default]
+    Auto,
+    Named(String),
+}
+
+impl<'de> serde::Deserialize<'de> for ThemeChoice {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(if s.eq_ignore_ascii_case("auto") {
+            Self::Auto
+        } else {
+            Self::Named(s)
+        })
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
@@ -68,6 +99,8 @@ pub struct UiConfig {
     pub accent: Option<String>,
     pub album_art: bool,
     pub theme_file: Option<PathBuf>,
+    /// `"auto"`, or the name of a built-in theme.
+    pub theme: ThemeChoice,
 }
 
 impl Default for UiConfig {
@@ -78,6 +111,28 @@ impl Default for UiConfig {
             accent: None,
             album_art: true,
             theme_file: None,
+            theme: ThemeChoice::Auto,
+        }
+    }
+}
+
+/// Tunables that change how existing keys behave, rather than which key does
+/// what. Separate from `[keys]` so a rebind and a step size do not share a table.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
+pub struct BehaviourConfig {
+    pub seek_step_secs: i64,
+    pub volume_step: i64,
+    /// Ask before quitting. Off by default — `q` has always quit immediately.
+    pub confirm_on_quit: bool,
+}
+
+impl Default for BehaviourConfig {
+    fn default() -> Self {
+        Self {
+            seek_step_secs: 5,
+            volume_step: 5,
+            confirm_on_quit: false,
         }
     }
 }
@@ -85,9 +140,17 @@ impl Default for UiConfig {
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Where this was loaded from, so `,` can reopen it. Not a TOML key.
+    #[serde(skip)]
+    pub config_path: PathBuf,
     pub auth: AuthConfig,
     pub playback: PlaybackConfig,
     pub ui: UiConfig,
+    pub behaviour: BehaviourConfig,
+    /// Raw `[keys]` table, handed to `KeyMap::from_toml_str` as-is so the keymap
+    /// owns action-name parsing rather than duplicating it here.
+    #[serde(default)]
+    pub keys: toml::Table,
 }
 
 impl Config {
@@ -96,21 +159,90 @@ impl Config {
         if c.playback.volume > 100 {
             return Err(ConfigError::Volume(c.playback.volume));
         }
+        // A zero or negative step makes the key do nothing, which reads as a
+        // bug rather than as configuration.
+        if c.behaviour.seek_step_secs <= 0 {
+            return Err(ConfigError::Step(
+                "behaviour.seek_step_secs",
+                c.behaviour.seek_step_secs,
+            ));
+        }
+        if c.behaviour.volume_step <= 0 {
+            return Err(ConfigError::Step(
+                "behaviour.volume_step",
+                c.behaviour.volume_step,
+            ));
+        }
         Ok(c)
     }
 
     /// Missing file is not an error — defaults are valid.
     pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
         let path = path.map(PathBuf::from).unwrap_or_else(Self::default_path);
-        match std::fs::read_to_string(&path) {
-            Ok(s) => Self::from_toml_str(&s),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(source) => Err(ConfigError::Io { path, source }),
-        }
+        let mut c = match std::fs::read_to_string(&path) {
+            Ok(s) => Self::from_toml_str(&s)?,
+            // A missing file is not an error: the defaults are valid, and `,`
+            // writes the documented example on first use.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(source) => return Err(ConfigError::Io { path, source }),
+        };
+        c.config_path = path;
+        Ok(c)
     }
 
     pub fn default_path() -> PathBuf {
         paths::config_dir().join("config.toml")
+    }
+}
+
+/// The documented default config, written on demand when `,` opens an editor on
+/// a machine that has no config.toml yet. Kept next to the structs it mirrors so
+/// the two do not drift.
+pub const EXAMPLE_TOML: &str = include_str!("../../../config.example.toml");
+
+/// The theme to start with, plus the preset name so `t` knows where the cycle
+/// is. A `theme_file` still wins over a preset — it is the more specific answer.
+pub fn resolve_theme(cfg: &Config) -> Result<(ytm_tui::theme::Theme, String), ConfigError> {
+    use ytm_tui::theme::Theme;
+
+    if let Some(path) = cfg.ui.theme_file.as_deref() {
+        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let t = Theme::from_toml_str(&text).map_err(|e| ConfigError::Theme(e.to_string()))?;
+        return Ok((t, "custom".to_owned()));
+    }
+
+    let name = match &cfg.ui.theme {
+        ThemeChoice::Auto => auto_theme_name(),
+        ThemeChoice::Named(n) => n.clone(),
+    };
+    let mut theme = Theme::preset(&name).ok_or_else(|| ConfigError::UnknownTheme(name.clone()))?;
+    // An explicit accent still overrides whichever theme was chosen.
+    if let Some(hex) = &cfg.ui.accent {
+        theme.accent =
+            ytm_tui::theme::parse_hex(hex).ok_or_else(|| ConfigError::BadAccent(hex.clone()))?;
+    }
+    Ok((theme, name))
+}
+
+/// Guess light or dark from the terminal itself.
+///
+/// `COLORFGBG` is the only widely-supported hint that needs no query round trip
+/// (rxvt/xterm set it, and some others follow); its last field is the background
+/// colour index, where 7 and 15 are the light ones. Everything else falls back
+/// to dark, which is both the common case and the safer guess — light text on a
+/// light background is unreadable, whereas the reverse merely looks off.
+pub fn auto_theme_name() -> String {
+    const DARK: &str = "tokyonight";
+    const LIGHT: &str = "dawn";
+    match std::env::var("COLORFGBG") {
+        Ok(v) => match v.rsplit(';').next().map(str::trim) {
+            Some("7") | Some("15") => LIGHT.to_owned(),
+            _ => DARK.to_owned(),
+        },
+        Err(_) => DARK.to_owned(),
     }
 }
 
@@ -193,5 +325,98 @@ mod tests {
         // Missing creds is a login-time error with a helpful message, not a parse error.
         let c = Config::from_toml_str("[auth]\nkind = \"oauth\"").unwrap();
         assert!(c.auth.client_id.is_none());
+    }
+
+    #[test]
+    fn behaviour_defaults_match_the_previous_hardcoded_steps() {
+        // These were consts in app_loop; making them configurable must not
+        // silently change what an unconfigured user gets.
+        let c = Config::default();
+        assert_eq!(c.behaviour.seek_step_secs, 5);
+        assert_eq!(c.behaviour.volume_step, 5);
+        assert!(!c.behaviour.confirm_on_quit);
+    }
+
+    #[test]
+    fn behaviour_values_are_read_from_toml() {
+        let c = Config::from_toml_str(
+            r#"
+            [behaviour]
+            seek_step_secs = 30
+            volume_step = 2
+            confirm_on_quit = true
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.behaviour.seek_step_secs, 30);
+        assert_eq!(c.behaviour.volume_step, 2);
+        assert!(c.behaviour.confirm_on_quit);
+    }
+
+    #[test]
+    fn a_zero_step_is_rejected_rather_than_making_a_key_do_nothing() {
+        let e = Config::from_toml_str("[behaviour]\nseek_step_secs = 0")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("seek_step_secs"), "got: {e}");
+    }
+
+    #[test]
+    fn the_keys_table_is_carried_through_verbatim() {
+        // The keymap owns action-name parsing; config just passes the table on.
+        let c = Config::from_toml_str("[keys]\ntoggle_visual = \"z\"").unwrap();
+        assert_eq!(
+            c.keys.get("toggle_visual").and_then(|v| v.as_str()),
+            Some("z")
+        );
+    }
+
+    #[test]
+    fn theme_defaults_to_auto_and_accepts_a_name() {
+        assert_eq!(Config::default().ui.theme, ThemeChoice::Auto);
+        let c = Config::from_toml_str(
+            r#"[ui]
+theme = "gruvbox""#,
+        )
+        .unwrap();
+        assert_eq!(c.ui.theme, ThemeChoice::Named("gruvbox".into()));
+    }
+
+    #[test]
+    fn an_unconfigured_file_still_loads_with_every_new_section_defaulted() {
+        // Existing users have a config.toml with none of these keys.
+        let c = Config::from_toml_str("[playback]\nvolume = 40").unwrap();
+        assert_eq!(c.playback.volume, 40);
+        assert_eq!(c.behaviour.seek_step_secs, 5);
+        assert_eq!(c.ui.theme, ThemeChoice::Auto);
+        assert!(c.keys.is_empty());
+    }
+
+    #[test]
+    fn auto_theme_reads_a_light_terminal_background_from_colorfgbg() {
+        // COLORFGBG's last field is the background index; 7 and 15 are light.
+        // Not a #[test] on the env var itself — tests share a process, so this
+        // checks the parse the way the function does.
+        for (v, want_light) in [
+            ("15;7", true),
+            ("0;15", true),
+            ("15;0", false),
+            ("default;default", false),
+        ] {
+            let last = v.rsplit(';').next().map(str::trim);
+            let is_light = matches!(last, Some("7") | Some("15"));
+            assert_eq!(is_light, want_light, "COLORFGBG={v}");
+        }
+    }
+
+    #[test]
+    fn auto_theme_falls_back_to_a_dark_preset_and_it_resolves() {
+        // The fallback must name a real preset, or startup fails on any
+        // terminal that does not set COLORFGBG.
+        let name = auto_theme_name();
+        assert!(
+            ytm_tui::theme::Theme::preset(&name).is_some(),
+            "auto picked {name:?}, which is not a built-in theme"
+        );
     }
 }

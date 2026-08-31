@@ -46,8 +46,25 @@ pub enum InputAction {
     AddToPlaylist,
     Refresh,
     ToggleMark,
+    /// Start/stop a range selection anchored at the current row (visual mode).
+    ToggleVisual,
+    /// Cycle to the next built-in theme.
+    CycleTheme,
+    /// Open config.toml in $EDITOR, reloading keys and theme on exit.
+    EditConfig,
     Char(char),
     Backspace,
+    /// Delete the word before the cursor (Ctrl+W).
+    DeleteWordBack,
+    /// Move the cursor a word at a time (Ctrl+Left / Ctrl+Right).
+    WordLeft,
+    WordRight,
+    /// Move the cursor one character (Left/Right inside a text field).
+    CharLeft,
+    CharRight,
+    /// Jump to the start/end of the line (Ctrl+A / Ctrl+E).
+    LineStart,
+    LineEnd,
 }
 
 #[derive(Debug)]

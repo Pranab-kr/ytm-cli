@@ -6,7 +6,7 @@ use crate::{
     app::{AppState, Modal, Pane},
     keymap::KeyMap,
     theme::Theme,
-    util::text::truncate_to_width,
+    util::text::{display_width, truncate_to_width},
     widgets::{art, help, modal, nowplaying, playlists, queue, search, sidebar, toast, tracklist},
 };
 use ratatui::{
@@ -125,16 +125,20 @@ fn draw_main(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(area);
 
-    let heading = truncate_to_width(&pane_title(s), w);
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            heading,
-            Style::default()
-                .fg(t.fg_bright)
-                .add_modifier(Modifier::BOLD),
-        ))),
-        rows[0],
-    );
+    let (heading, badge) = heading_parts(s, w);
+    let mut spans = vec![Span::styled(
+        heading,
+        Style::default()
+            .fg(t.fg_bright)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if let Some(b) = badge {
+        spans.push(Span::styled(
+            b,
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), rows[0]);
     // Top-right of the heading row: tied to the pane whose data is loading.
     toast::draw_spinner(f, rows[0], s, t);
 
@@ -168,6 +172,26 @@ fn draw_search(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
         search::draw_no_matches(f, rows[1], t);
     } else {
         tracklist::draw(f, rows[1], s, t);
+    }
+}
+
+/// The heading row: the pane name, plus a visual-mode badge when one fits.
+///
+/// Visual mode is otherwise invisible — its marks look exactly like the ones
+/// `v` makes, so nothing would tell the user that moving the cursor is now
+/// extending a range. Returned as two pieces so the badge can be styled apart
+/// from the name, and dropped rather than truncated when the frame is narrow: a
+/// heading reading "Songs — VIS" is worse than no badge at all.
+fn heading_parts(s: &AppState, w: usize) -> (String, Option<String>) {
+    let title = pane_title(s);
+    if !s.in_visual_mode() {
+        return (truncate_to_width(&title, w), None);
+    }
+    let badge = format!("  VISUAL {}", s.marked.len());
+    if display_width(&title) + display_width(&badge) <= w {
+        (title, Some(badge))
+    } else {
+        (truncate_to_width(&title, w), None)
     }
 }
 
@@ -302,5 +326,66 @@ mod tests {
 
         let enough = Rect::new(0, 0, MAIN_MIN_WIDTH + ART_WIDTH + ART_GAP, 20);
         assert!(split_for_art(enough, true, true).1.is_some());
+    }
+
+    #[test]
+    fn visual_mode_says_so_in_the_heading_with_a_count() {
+        // The mode is otherwise invisible: marks look identical to hand-made
+        // ones, so nothing on screen would say arrow keys are now extending a
+        // range.
+        let mut s = AppState {
+            pane: Pane::Songs,
+            focus: crate::app::Focus::Main,
+            tracks: (0..4).map(|i| Track::stub(&format!("v{i}"), "T")).collect(),
+            ..Default::default()
+        };
+        s.apply(crate::event::AppEvent::Input(
+            crate::event::InputAction::ToggleVisual,
+        ));
+        s.apply(crate::event::AppEvent::Input(
+            crate::event::InputAction::Down,
+        ));
+        let text = frame_text(&s, &mut ArtCache::disabled(), 80, 24);
+        assert!(
+            text.contains("VISUAL"),
+            "the mode must be named, got: {text}"
+        );
+        assert!(
+            text.contains('2'),
+            "the selected count must show, got: {text}"
+        );
+    }
+
+    #[test]
+    fn the_heading_is_clean_outside_visual_mode() {
+        // Without this the indicator could be painted unconditionally and the
+        // test above would still pass.
+        let s = AppState {
+            pane: Pane::Songs,
+            tracks: vec![Track::stub("v1", "Roygbiv")],
+            ..Default::default()
+        };
+        let text = frame_text(&s, &mut ArtCache::disabled(), 80, 24);
+        assert!(!text.contains("VISUAL"));
+    }
+
+    #[test]
+    fn a_narrow_frame_drops_the_indicator_rather_than_the_pane_name() {
+        // Truncation must not leave the user looking at a heading that says
+        // only "VIS".
+        let mut s = AppState {
+            pane: Pane::Songs,
+            focus: crate::app::Focus::Main,
+            tracks: vec![Track::stub("v1", "Roygbiv")],
+            ..Default::default()
+        };
+        s.apply(crate::event::AppEvent::Input(
+            crate::event::InputAction::ToggleVisual,
+        ));
+        let text = frame_text(&s, &mut ArtCache::disabled(), 30, 10);
+        assert!(
+            text.contains("Songs"),
+            "the pane name survives, got: {text}"
+        );
     }
 }
