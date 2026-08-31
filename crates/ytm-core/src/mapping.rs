@@ -130,6 +130,24 @@ pub fn track_from_search_song(s: &SearchResultSong) -> Track {
     })
 }
 
+/// An artist page's top-songs shelf (FR-B7).
+///
+/// `ArtistSong` carries no duration — the artist page shows play counts instead
+/// — so duration is 0 and the row renders without a time. Better than showing a
+/// fabricated one.
+pub fn track_from_artist_song(s: &ytmapi_rs::parse::ArtistSong) -> Track {
+    track_from_parts(TrackParts {
+        video_id: s.video_id.get_raw().to_owned(),
+        set_video_id: None,
+        title: s.title.clone(),
+        artists: s.artists.iter().map(|a| a.name.clone()).collect(),
+        album: Some(s.album.name.clone()),
+        duration_secs: 0,
+        thumbnail_url: None,
+        is_explicit: is_explicit(&s.explicit),
+    })
+}
+
 pub fn playlist_from_library(p: &LibraryPlaylist) -> Playlist {
     let id = p.playlist_id.get_raw().to_owned();
     Playlist {

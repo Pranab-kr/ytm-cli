@@ -194,6 +194,54 @@ pub struct Artist {
     pub thumbnail_url: Option<String>,
 }
 
+/// One row of YouTube Music's home feed — "Listen again", "Albums for you".
+///
+/// The feed is a list of carousels, so the shelf title is part of the data
+/// rather than something the UI invents. Which shelves come back is decided by
+/// YouTube and varies per account and per request.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HomeShelf {
+    pub title: String,
+    pub items: Vec<HomeItem>,
+}
+
+/// One card in a home shelf.
+///
+/// Kept deliberately flat: the feed mixes tracks, playlists, albums, and
+/// artists in a single carousel, and the UI needs to render them in one list
+/// while still knowing what Enter should do with each.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HomeItem {
+    pub title: String,
+    /// The card's second line: artist, owner, or track count, as YouTube sends it.
+    pub subtitle: String,
+    pub target: HomeTarget,
+    pub thumbnail_url: Option<String>,
+}
+
+/// What activating a home card does.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum HomeTarget {
+    /// Playable directly.
+    Track(VideoId),
+    /// Opens, like a playlist row in the Playlists pane.
+    Playlist(PlaylistId),
+    Album(AlbumId),
+    Artist(ArtistId),
+}
+
+impl HomeItem {
+    /// A one-word tag for the row, so a mixed carousel is legible in a list.
+    pub fn kind_label(&self) -> &'static str {
+        match self.target {
+            HomeTarget::Track(_) => "track",
+            HomeTarget::Playlist(_) => "playlist",
+            HomeTarget::Album(_) => "album",
+            HomeTarget::Artist(_) => "artist",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

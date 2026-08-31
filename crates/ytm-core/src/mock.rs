@@ -9,6 +9,8 @@ struct Inner {
     tracks: Vec<Track>,
     albums: Vec<Album>,
     artists: Vec<Artist>,
+    shelves: Vec<HomeShelf>,
+    artist_tracks: Vec<Track>,
     calls: Vec<String>,
     fail_next: Option<SourceError>,
     next_id: u32,
@@ -38,6 +40,15 @@ impl MockSource {
     }
     pub fn with_artists(self, a: Vec<Artist>) -> Self {
         self.inner.lock().unwrap().artists = a;
+        self
+    }
+    pub fn with_shelves(self, s: Vec<HomeShelf>) -> Self {
+        self.inner.lock().unwrap().shelves = s;
+        self
+    }
+    /// What `artist_tracks` returns for any artist.
+    pub fn with_artist_tracks(self, t: Vec<Track>) -> Self {
+        self.inner.lock().unwrap().artist_tracks = t;
         self
     }
 
@@ -77,6 +88,21 @@ impl MusicSource for MockSource {
     mock_read!(library_songs, Track, tracks);
     mock_read!(library_albums, Album, albums);
     mock_read!(library_artists, Artist, artists);
+    mock_read!(home_shelves, HomeShelf, shelves);
+
+    fn recommended_albums(&self) -> BoxFut<'_, Vec<Album>> {
+        Box::pin(async move {
+            self.record("recommended_albums")?;
+            Ok(self.inner.lock().unwrap().albums.clone())
+        })
+    }
+
+    fn artist_tracks(&self, id: ArtistId) -> BoxFut<'_, Vec<Track>> {
+        Box::pin(async move {
+            self.record(format!("artist_tracks({id})"))?;
+            Ok(self.inner.lock().unwrap().artist_tracks.clone())
+        })
+    }
 
     fn playlist_tracks(&self, id: PlaylistId) -> BoxFut<'_, Vec<Track>> {
         Box::pin(async move {

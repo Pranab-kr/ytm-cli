@@ -87,6 +87,129 @@ fn to_privacy_status(p: Privacy) -> PrivacyStatus {
     }
 }
 
+/// YouTube Music's home feed (FR-B6).
+///
+/// `ytmapi-rs` 0.3.3 exposes no home query, but `Query`/`PostQuery` are public
+/// and documented as user-implementable, so `browseId: FEmusic_home` is
+/// reachable without forking upstream. Verified live on 2026-08-31.
+///
+/// The output is deliberately raw: upstream's parsers cannot help with a feed it
+/// has no types for, so `home_feed::shelves_from_raw` does the work and this
+/// type exists only to satisfy the trait bound.
+#[derive(Debug)]
+pub struct HomeRaw;
+
+impl ytmapi_rs::parse::ParseFrom<GetHomeQuery> for HomeRaw {
+    fn parse_from(_: ytmapi_rs::parse::ProcessedResult<GetHomeQuery>) -> ytmapi_rs::Result<Self> {
+        // Never called: we always go through `raw_json_query`.
+        Ok(HomeRaw)
+    }
+}
+
+/// The `FEmusic_home` browse query.
+#[derive(Debug, Clone)]
+pub struct GetHomeQuery;
+
+impl<A: LoggedIn> ytmapi_rs::query::Query<A> for GetHomeQuery {
+    type Output = HomeRaw;
+    type Method = ytmapi_rs::query::PostMethod;
+}
+
+impl ytmapi_rs::query::PostQuery for GetHomeQuery {
+    fn header(&self) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::Map::from_iter([("browseId".to_string(), serde_json::json!("FEmusic_home"))])
+    }
+    fn params(&self) -> Vec<(&str, std::borrow::Cow<'_, str>)> {
+        vec![]
+    }
+    fn path(&self) -> &str {
+        "browse"
+    }
+}
+
+/// The next page of the home feed.
+///
+/// Needed because the first page is not the useful one: measured live, page 1 is
+/// "Listen again" / "From your library" / "Listen together", while page 2 holds
+/// "Quick picks", "Covers and remixes", and "Heard in Shorts" — the shelves the
+/// web player leads with.
+#[derive(Debug, Clone)]
+pub struct GetHomeContinuationQuery(pub String);
+
+impl ytmapi_rs::parse::ParseFrom<GetHomeContinuationQuery> for HomeRaw {
+    fn parse_from(
+        _: ytmapi_rs::parse::ProcessedResult<GetHomeContinuationQuery>,
+    ) -> ytmapi_rs::Result<Self> {
+        Ok(HomeRaw)
+    }
+}
+
+impl<A: LoggedIn> ytmapi_rs::query::Query<A> for GetHomeContinuationQuery {
+    type Output = HomeRaw;
+    type Method = ytmapi_rs::query::PostMethod;
+}
+
+impl ytmapi_rs::query::PostQuery for GetHomeContinuationQuery {
+    fn header(&self) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::Map::from_iter([("browseId".to_string(), serde_json::json!("FEmusic_home"))])
+    }
+    fn params(&self) -> Vec<(&str, std::borrow::Cow<'_, str>)> {
+        vec![
+            ("continuation", std::borrow::Cow::from(self.0.as_str())),
+            ("type", std::borrow::Cow::from("next")),
+        ]
+    }
+    fn path(&self) -> &str {
+        "browse"
+    }
+}
+
+/// How many home-feed pages to walk.
+///
+/// Page 1 carries none of the shelves the web player leads with, so one page is
+/// not enough; three pages is where the returns flatten and each page is a
+/// round trip the user waits on. Measured live 2026-08-31.
+const HOME_PAGES: usize = 3;
+
+macro_rules! impl_feed {
+    ($token:ty) => {
+        impl YtMusicSource<$token> {
+            /// Walk the home feed, following continuations (FR-B6).
+            ///
+            /// Errors on the *first* page propagate — that is a real failure to
+            /// reach YouTube. A later page failing is not worth losing the
+            /// shelves already in hand, so it just stops the walk.
+            async fn feed_shelves(&self) -> Result<Vec<HomeShelf>, SourceError> {
+                let first = self
+                    .api
+                    .raw_json_query::<GetHomeQuery>(&GetHomeQuery)
+                    .await
+                    .map_err(classify)?;
+                let mut shelves = crate::home_feed::shelves_from_raw(&first);
+                let mut token = crate::home_feed::continuation_token(&first);
+
+                for _ in 1..HOME_PAGES {
+                    let Some(t) = token.take() else { break };
+                    let q = GetHomeContinuationQuery(t);
+                    let Ok(page) = self
+                        .api
+                        .raw_json_query::<GetHomeContinuationQuery>(&q)
+                        .await
+                    else {
+                        break;
+                    };
+                    shelves.extend(crate::home_feed::shelves_from_raw(&page));
+                    token = crate::home_feed::continuation_token(&page);
+                }
+                Ok(shelves)
+            }
+        }
+    };
+}
+
+impl_feed!(BrowserToken);
+impl_feed!(OAuthToken);
+
 /// One `MusicSource` impl per concrete token type.
 ///
 /// This cannot be a single `impl<A: LoggedIn>`: upstream's
@@ -148,6 +271,43 @@ macro_rules! impl_music_source {
                     }
                     let raw: Vec<ytmapi_rs::parse::LibraryArtist> = parse_json(&query, json)?;
                     Ok(raw.iter().map(mapping::artist_from_library).collect())
+                })
+            }
+
+            fn home_shelves(&self) -> BoxFut<'_, Vec<HomeShelf>> {
+                Box::pin(async move { self.feed_shelves().await })
+            }
+
+            fn recommended_albums(&self) -> BoxFut<'_, Vec<Album>> {
+                Box::pin(async move {
+                    // Most accounts save no albums, so the library pane is a dead
+                    // end. The feed's album cards fill it instead.
+                    Ok(crate::home_feed::albums_from_shelves(
+                        &self.feed_shelves().await?,
+                    ))
+                })
+            }
+
+            fn artist_tracks(&self, id: ArtistId) -> BoxFut<'_, Vec<Track>> {
+                Box::pin(async move {
+                    let raw = self
+                        .api
+                        .get_artist(ytmapi_rs::common::ArtistChannelID::from_raw(id.as_str()))
+                        .await
+                        .map_err(classify)?;
+                    // `top_releases.songs` is the artist page's song shelf. An
+                    // artist with no shelf yields an empty list rather than an
+                    // error — nothing is broken, there is just nothing to play.
+                    Ok(raw
+                        .top_releases
+                        .songs
+                        .map(|s| {
+                            s.results
+                                .iter()
+                                .map(mapping::track_from_artist_song)
+                                .collect()
+                        })
+                        .unwrap_or_default())
                 })
             }
 

@@ -44,6 +44,24 @@ pub trait MusicSource: Send + Sync {
     fn library_albums(&self) -> BoxFut<'_, Vec<Album>>;
     fn library_artists(&self) -> BoxFut<'_, Vec<Artist>>;
 
+    /// YouTube Music's home feed — the recommendation carousels (FR-B6).
+    ///
+    /// `ytmapi-rs` has no home query; ours is hand-rolled on its public query
+    /// traits. Returns an empty list rather than an error when the feed cannot
+    /// be read: recommendations are a convenience, not something the user asked
+    /// for by name.
+    fn home_shelves(&self) -> BoxFut<'_, Vec<HomeShelf>>;
+
+    /// Albums YouTube recommends, for when the user has saved none (FR-B3).
+    ///
+    /// The library albums pane is empty for most accounts, and an empty pane is
+    /// a dead end. Sourced from the home feed's album cards.
+    fn recommended_albums(&self) -> BoxFut<'_, Vec<Album>>;
+
+    /// An artist's top tracks, so the Artists pane can do something on Enter
+    /// (FR-B7). Upstream's `GetArtistQuery` returns these as `top_releases`.
+    fn artist_tracks(&self, id: ArtistId) -> BoxFut<'_, Vec<Track>>;
+
     fn playlist_tracks(&self, id: PlaylistId) -> BoxFut<'_, Vec<Track>>;
     fn playlist_details(&self, id: PlaylistId) -> BoxFut<'_, Playlist>;
 
