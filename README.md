@@ -3,9 +3,47 @@
 YouTube Music in your terminal. A Rust TUI over YouTube Music's internal API,
 with playback through `mpv`.
 
-Browse your playlists, library songs, albums and artists; search; play; edit the
-queue; create, rename and delete playlists; add and remove tracks. Album art in
-graphics-capable terminals, media keys via MPRIS.
+## Features
+
+**Browse**
+
+- **Home** — YouTube Music's own recommendation shelves: Quick picks, Covers and
+  remixes, Heard in Shorts, Listen again. One carousel mixes tracks, playlists,
+  albums and artists, so each row is tagged with what `Enter` will do with it.
+- **Playlists** — yours, with track counts. `Enter` or `l` opens one.
+- **Fav** — your liked and saved songs.
+- **Albums** — the ones you saved, or recommendations when you saved none (most
+  accounts).
+- **Artists** — the artists you follow, and `S` searches YouTube Music for any
+  other. `Enter` on an artist plays their top tracks.
+- **Search** — songs, albums, artists and playlists, debounced so typing sends
+  one request per pause rather than one per keystroke.
+
+**Play**
+
+- Play/pause, next/previous, relative and absolute seek, volume and mute.
+- Shuffle that restores the original order when you turn it off, and repeat
+  off/one/all.
+- A queue you can reorder, append to, play-next into, remove from, and clear.
+- Album art in graphics-capable terminals; media keys and OS now-playing via
+  MPRIS.
+
+**Edit**
+
+- Create, rename, and delete playlists; add and remove tracks, single or
+  multi-selected.
+- Every edit is optimistic — the list changes under your hands and rolls back on
+  its own if the server refuses.
+
+**Get around**
+
+- Vim keys or arrows, `1`-`7` to jump straight to a source, `zz` to centre a row,
+  half-page and full-page motion, and a scroll wheel.
+- `/` filters the rows in front of you; `S` searches the server. Two different
+  things, deliberately on two different keys.
+- Six themes, light and dark, cycled with `t`.
+- Every keybinding is remappable, and `ytm-cli config` writes a file with all of
+  them already listed.
 
 ## Terms of service
 
@@ -39,21 +77,63 @@ The binary is `ytm-cli`. Symlink it to `ytm` if you want the shorter name:
 ln -s "$PWD/target/release/ytm-cli" ~/.local/bin/ytm
 ```
 
-## Configuration
-
-Copy `config.example.toml` to the platform config dir and edit it:
+### Getting running, in order
 
 ```bash
-mkdir -p ~/.config/ytm-cli
-cp config.example.toml ~/.config/ytm-cli/config.toml
+ytm-cli config          # 1. write config.toml, opens in $EDITOR
+                        # 2. set auth.kind and auth.cookie_file (see below)
+ytm-cli playlists       # 3. check auth without starting the TUI
+ytm-cli                 # 4. go
 ```
+
+Step 3 is worth doing: it prints your playlists and exits, so an auth problem
+shows up as a plain error message instead of an empty pane.
+
+## Configuration
+
+One command:
+
+```bash
+ytm-cli config
+```
+
+It writes `config.toml` and opens it in `$EDITOR`. The file lists **every
+setting and every keybinding at its default value, commented out** — so changing
+anything is uncommenting a line. Nothing has to be written from scratch and no
+schema has to be looked up.
 
 - Linux: `~/.config/ytm-cli/config.toml`
 - macOS: `~/Library/Application Support/ytm-cli/config.toml`
 
-Every key is documented in that file with its default, so a fully commented-out
-copy behaves the same as no config at all. Press `,` in the app to open it in
-`$EDITOR` — keybindings and theme reload when you save and exit.
+An existing file is never overwritten; it is opened as it is. `--no-edit` writes
+and prints the path without opening an editor. The file is validated when you
+close the editor, so a typo is reported rather than silently ignored.
+
+`,` inside the app does the same, and keybindings and the theme reload the moment
+you save and exit — no restart.
+
+### What you can change
+
+| Setting | Does |
+|---|---|
+| `ui.start_pane` | Which source the app opens on. `playlists` by default; `home` costs a moment more, since it fetches several pages of recommendations |
+| `ui.theme` | `auto` or a built-in name; `t` cycles at runtime |
+| `ui.mouse` | Wheel scrolling and click support |
+| `ui.album_art` | Art in graphics-capable terminals |
+| `ui.tick_ms` | Redraw interval — lower is smoother and busier |
+| `playback.volume` | Remembered across runs |
+| `behaviour.seek_step_secs` | How far `f`/`b` jump |
+| `behaviour.volume_step` | How much `+`/`-` move |
+| `behaviour.confirm_on_quit` | Ask before quitting |
+| `[keys]` | Rebind any of 39 actions to a single character |
+
+Rebinding looks like this — uncomment and change:
+
+```toml
+[keys]
+open_filter = "f"      # filter the list with `f` instead of `/`
+add_to_queue = "a"
+```
 
 ## Authentication
 
@@ -166,6 +246,8 @@ Press `?` in the app for the live list, which reflects your rebinds. Defaults:
 | `PageDown` / `PageUp` | half page down / up |
 | `zz` | centre the selected row |
 | scroll wheel | scroll the focused list |
+| left click | select a row, or switch source in the sidebar |
+| right click | add the row under the pointer to the queue |
 | `1`–`7` | jump to a source (home, playlists, fav, albums, artists, search, queue) |
 | `Tab` | next source |
 | `Enter` | play a track, or open a playlist / artist |
@@ -216,7 +298,7 @@ server, and `S` searches YouTube Music.
 | Key | Action |
 |---|---|
 | `/` | filter the current list (title, artist, album) |
-| `S` | search YouTube Music |
+| `S` | search YouTube Music — in the Artists pane, searches artists |
 | `Esc` | in a filter, abandon it and restore the full list |
 | `Enter` | in a filter, keep it and move to the rows |
 | `Ctrl+w` | delete the previous word |
@@ -230,6 +312,16 @@ server, and `S` searches YouTube Music.
 | `t` | cycle theme |
 | `,` | edit config in `$EDITOR`, reloading on exit |
 | `?` | help overlay |
+
+## Mouse
+
+The wheel scrolls the focused list. Left click selects a row (or a sidebar
+source); right click adds the row under the pointer to the queue.
+
+Clicking deliberately never *plays* — a misplaced click starting audio is worse
+than one that costs a keypress, and `Enter` is one key away once the row is
+selected. Set `ui.mouse = false` to turn capture off entirely if you would rather
+keep your terminal's own click-drag text selection inside the app.
 
 ## Themes
 

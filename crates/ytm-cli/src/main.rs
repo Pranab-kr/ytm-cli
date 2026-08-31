@@ -21,18 +21,19 @@ pub struct TerminalGuard {
 }
 
 impl TerminalGuard {
-    pub fn new() -> io::Result<Self> {
+    /// `mouse` follows `ui.mouse`.
+    ///
+    /// Off is a real preference, not a nicety: while capture is on, the terminal
+    /// hands us the clicks and drags it would otherwise use for its own text
+    /// selection, so anyone who selects text out of the app more than they scroll
+    /// wants it disabled.
+    pub fn new(mouse: bool) -> io::Result<Self> {
         enable_raw_mode()?;
         let mut out = io::stdout();
-        // Mouse capture is for the wheel only (FR-U8). Clicks are deliberately
-        // not bound: capturing them would take the terminal's own click-drag
-        // text selection away from the user, which costs more than it adds.
-        execute!(
-            out,
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            crossterm::cursor::Hide
-        )?;
+        execute!(out, EnterAlternateScreen, crossterm::cursor::Hide)?;
+        if mouse {
+            execute!(out, EnableMouseCapture)?;
+        }
         Ok(Self {
             terminal: Terminal::new(CrosstermBackend::new(out))?,
         })
@@ -424,7 +425,7 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
     }
 
     install_panic_hook();
-    let mut guard = TerminalGuard::new()?;
+    let mut guard = TerminalGuard::new(cfg.ui.mouse)?;
 
     // The cached frame goes up before anything touches the network (NFR-1).
     // `build_source` is an `.await` on a cookie-validation round trip — running
