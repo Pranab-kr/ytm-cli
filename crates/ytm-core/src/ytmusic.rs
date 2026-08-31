@@ -164,6 +164,28 @@ impl ytmapi_rs::query::PostQuery for GetHomeContinuationQuery {
 /// round trip the user waits on. Measured live 2026-08-31.
 const HOME_PAGES: usize = 3;
 
+/// Which song list to show for an artist: the full playlist, or the page preview.
+///
+/// The artist page's shelf is a ~5-row preview whose entries carry no thumbnail
+/// and no duration. Its `browse_id` playlist carries both, so the full list wins
+/// whenever it actually arrived with at least as many rows. A failed or shorter
+/// follow-up keeps the preview: five playable rows beat an error for something
+/// the user can already see on screen.
+fn better_artist_tracks(preview: Vec<Track>, full: Result<Vec<Track>, SourceError>) -> Vec<Track> {
+    match full {
+        // `>=` rather than `>`: at equal length the playlist rows are still the
+        // better ones, because they carry art and durations the shelf does not.
+        Ok(rows) if rows.len() >= preview.len() && !rows.is_empty() => rows,
+        Ok(_) => preview,
+        Err(e) => {
+            // Not a toast: the preview rows are on screen and playable, so this
+            // is a degraded result, not a failure the user must act on.
+            tracing::debug!(error = %e, "artist songs playlist unavailable; keeping the page preview");
+            preview
+        }
+    }
+}
+
 macro_rules! impl_feed {
     ($token:ty) => {
         impl YtMusicSource<$token> {
@@ -290,16 +312,27 @@ macro_rules! impl_music_source {
                     // `top_releases.songs` is the artist page's song shelf. An
                     // artist with no shelf yields an empty list rather than an
                     // error — nothing is broken, there is just nothing to play.
-                    Ok(raw
-                        .top_releases
-                        .songs
-                        .map(|s| {
-                            s.results
-                                .iter()
-                                .map(mapping::track_from_artist_song)
-                                .collect()
-                        })
-                        .unwrap_or_default())
+                    let Some(songs) = raw.top_releases.songs else {
+                        return Ok(Vec::new());
+                    };
+
+                    // That shelf is the *preview* the web UI shows above "Show
+                    // all" — about five rows — and `ArtistSong` carries neither a
+                    // thumbnail nor a duration, so those rows render with no art
+                    // and 0:00. Its `browse_id` is the artist's full songs
+                    // playlist, and playlist entries carry both. One extra
+                    // request buys the whole list, the art, and real times.
+                    let preview: Vec<Track> = songs
+                        .results
+                        .iter()
+                        .map(mapping::track_from_artist_song)
+                        .collect();
+                    let full = self
+                        .playlist_tracks(PlaylistId::from(songs.browse_id.get_raw()))
+                        .await;
+                    // A failed or empty follow-up keeps the preview: five playable
+                    // rows beat an error for something the user can already see.
+                    Ok(better_artist_tracks(preview, full))
                 })
             }
 
@@ -531,3 +564,62 @@ macro_rules! impl_music_source {
 }
 
 impl_music_source!(BrowserToken);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tracks(n: usize, art: bool) -> Vec<Track> {
+        (0..n)
+            .map(|i| Track {
+                thumbnail_url: art.then(|| "https://example/a.jpg".to_owned()),
+                duration: TrackDuration::from_secs(if art { 180 } else { 0 }),
+                ..Track::stub(&format!("v{i}"), "T")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_full_playlist_replaces_the_five_row_preview() {
+        // The owner saw only five songs per artist, each with no art and 0:00 —
+        // that shelf is the web UI's preview above "Show all".
+        let got = better_artist_tracks(tracks(5, false), Ok(tracks(40, true)));
+        assert_eq!(got.len(), 40, "the full list must win");
+        assert!(
+            got[0].thumbnail_url.is_some(),
+            "playlist entries carry the album art the shelf lacks"
+        );
+        assert_ne!(
+            got[0].duration,
+            TrackDuration::from_secs(0),
+            "and a real duration"
+        );
+    }
+
+    #[test]
+    fn a_failed_follow_up_keeps_the_preview() {
+        // Five playable rows beat an error for rows already on screen.
+        let got = better_artist_tracks(tracks(5, false), Err(SourceError::RateLimited));
+        assert_eq!(got.len(), 5);
+    }
+
+    #[test]
+    fn an_empty_follow_up_keeps_the_preview() {
+        // A playlist that parsed to nothing must not blank a shelf that had rows.
+        let got = better_artist_tracks(tracks(5, false), Ok(Vec::new()));
+        assert_eq!(got.len(), 5);
+    }
+
+    #[test]
+    fn a_shorter_follow_up_keeps_the_preview() {
+        // Fewer rows than the preview means the follow-up lost something; the
+        // longer list is the safer answer.
+        let got = better_artist_tracks(tracks(5, false), Ok(tracks(2, true)));
+        assert_eq!(got.len(), 5);
+    }
+
+    #[test]
+    fn an_artist_with_no_shelf_stays_empty() {
+        assert!(better_artist_tracks(Vec::new(), Ok(Vec::new())).is_empty());
+    }
+}

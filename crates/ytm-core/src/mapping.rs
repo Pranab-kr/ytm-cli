@@ -31,6 +31,39 @@ pub fn parse_duration(s: &str) -> u64 {
     secs
 }
 
+/// The same thumbnail, asked for at `px` square.
+///
+/// YouTube's image CDN takes the pixel size in the URL (`=w120-h120-l90-rj`) and
+/// the sizes it volunteers in API responses are thumbnail-sized — 120px for a
+/// track. `ratatui-image`'s `Resize::Fit` never upscales, so a 120px image fills
+/// only half of a 24-column art panel no matter how wide the panel is. Asking the
+/// CDN for a larger original is the only thing that makes the art fill it.
+///
+/// URLs without the size parameters (`i.ytimg.com/vi/<id>/hqdefault.jpg`) come
+/// back unchanged rather than guessed at.
+pub fn thumbnail_at_size(url: &str, px: u32) -> String {
+    let Some(eq) = url.rfind("=w") else {
+        return url.to_owned();
+    };
+    let rest = &url[eq + 2..];
+    // `w<digits>-h<digits>` then whatever follows, which is quality and format
+    // flags worth keeping — dropping `-l90-rj` changed what the CDN returned.
+    let Some(dash) = rest.find("-h") else {
+        return url.to_owned();
+    };
+    let (w, after_w) = (&rest[..dash], &rest[dash + 2..]);
+    let h_end = after_w.find('-').unwrap_or(after_w.len());
+    let h = &after_w[..h_end];
+    if w.is_empty()
+        || h.is_empty()
+        || !w.bytes().all(|b| b.is_ascii_digit())
+        || !h.bytes().all(|b| b.is_ascii_digit())
+    {
+        return url.to_owned();
+    }
+    format!("{}=w{px}-h{px}{}", &url[..eq], &after_w[h_end..])
+}
+
 /// Largest thumbnail, which is the one worth showing as album art.
 fn best_thumbnail(thumbs: &[Thumbnail]) -> Option<String> {
     thumbs
@@ -260,6 +293,45 @@ pub fn artist_from_subscription(a: &LibraryArtistSubscription) -> Artist {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real shape from the owner's cache, size params and all.
+    const REAL: &str = "https://yt3.googleusercontent.com/de6baYpledGf1-hk4Nu4bmf=w120-h120-l90-rj";
+
+    #[test]
+    fn a_thumbnail_can_be_asked_for_at_a_larger_size() {
+        // The art panel is 24 columns; a 120px source cannot fill it, because Fit
+        // never upscales. Verified live: the same URL at w600 returns 600x600.
+        assert_eq!(
+            thumbnail_at_size(REAL, 600),
+            "https://yt3.googleusercontent.com/de6baYpledGf1-hk4Nu4bmf=w600-h600-l90-rj"
+        );
+    }
+
+    #[test]
+    fn the_trailing_parameters_survive_the_rewrite() {
+        // `-l90-rj` is quality and format. Dropping it changed what the CDN sent.
+        assert!(thumbnail_at_size(REAL, 544).ends_with("-l90-rj"));
+    }
+
+    #[test]
+    fn a_url_without_size_parameters_is_left_alone() {
+        // Some thumbnails are plain paths; inventing parameters would 404 them.
+        let plain = "https://i.ytimg.com/vi/abc123/hqdefault.jpg";
+        assert_eq!(thumbnail_at_size(plain, 600), plain);
+    }
+
+    #[test]
+    fn a_malformed_size_parameter_is_left_alone() {
+        // Better an unchanged URL than a mangled one.
+        for odd in [
+            "https://x/y=w-h120-l90",
+            "https://x/y=wabc-h120",
+            "https://x/y=w120-habc",
+            "https://x/y=w120",
+        ] {
+            assert_eq!(thumbnail_at_size(odd, 600), odd, "{odd}");
+        }
+    }
 
     /// Mirrors the fields we read off an upstream playlist entry, so mapping is
     /// testable without constructing `ytmapi-rs` types (several have private
