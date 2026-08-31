@@ -1713,3 +1713,277 @@ invisible — FR-U2 says the overlay lists what the user can actually press. The
 Next: **Task 37** (README and setup docs), then **Task 38** (the requirement
 checklist — that one needs the owner pressing keys and filling in the FR/NFR
 table). Nothing is blocked.
+
+### 2026-08-31 — implementation agent (two queue multi-select bugs)
+
+**Owner report, with screenshots:** in the Queue pane, `v` and `V` select rows but
+nothing changes on screen — the playlist pane shows the selection, the queue does
+not. And multi-select `x` (remove) works there while `J`/`K` (move) only ever
+moves the cursor row. Two independent bugs, one in render and one in dispatch.
+Fixed test-first, both root causes traced before either fix.
+
+1. **Marks were invisible in the queue** (`widgets/queue.rs`). The widget never
+   read `s.marked` — its own header comment asserted "Nothing in the queue is
+   multi-selected", which stopped being true once `x` learned to act on a range.
+   The state side was already correct: `track_rows` covers `Pane::Queue`, so
+   `toggle_mark` and `refresh_visual_marks` were filling `marked` all along and
+   the selection existed with no way to see it. **The gutter is two columns and
+   holds one glyph, so the bullet now wins it over `\u{25b6}`** — a `V` range has
+   to read as a contiguous run, and a gap where the current track sits would look
+   like the range broke. Play position is not lost: the current entry keeps its
+   bold accent title, and its `\u{25b6}` returns the moment the mark clears. Two
+   tests, the second guarding the first — drawing the bullet unconditionally would
+   satisfy "a marked row has a bullet" while telling the user nothing.
+2. **`J`/`K` ignored the marks** (`app_loop.rs`). It moved `state.selected` and
+   nothing else, three lines below the `x` arm that does honour the marked set.
+   Now both read the same way: marked rows if any, else the cursor. Three things
+   this needed that the single-row version did not:
+   - **Order matters.** Each `MoveInQueue` is a remove-then-insert in the actor,
+     so every command shifts the indices the next one means. Highest index first
+     going down, lowest first going up; the other order drags the block apart one
+     entry at a time.
+   - **The edge check is per-block, not per-entry.** If any marked row is already
+     against the end, nothing moves. Sliding only the entries with room left
+     would squash the range together — a silent corruption of the user's order.
+   - **The marks survive the move.** They are video ids, so they ride along with
+     their entries and `J` can be held. Clearing them (as `x` does, correctly —
+     the rows are gone) would move the block once and then quietly start moving
+     the single cursor row instead. `visual_anchor` *is* cleared: the range has
+     become a block, and a later `j` would recompute marks from an anchor that no
+     longer points at the row it was set on.
+
+**The pair-assertions were not enough, so there are replay tests.** Asserting the
+`(from, to)` pairs only proves what was sent, not what the queue ends up looking
+like — and composed remove/insert sequences are exactly where off-by-one order
+bugs hide. Three tests now push the dispatched commands through the actor's real
+`ytm_player::queue::Queue` and assert the resulting order (`v1 v4 v2 v3`), so the
+block is proven contiguous and in-order end to end rather than by inspection.
+
+**Latent bug found and left alone, deliberately.** `J`/`K` pass `state.selected` —
+a *visible* row index — straight to the actor as a queue index, so under an active
+`/` filter they reorder the wrong entries. The marked path does not have this bug
+(it matches by video id against `state.queue`), so it only bites the unmarked
+single-row case while filtering. Out of scope for this report and it needs its own
+decision: reordering a filtered view is ambiguous ("down" past a hidden row means
+what?). **Worth fixing before Task 38 signs off FR-Q3.**
+
+467 tests pass, gate green.
+
+Next: unchanged — **Task 37** (README and setup docs), then **Task 38** (the
+requirement checklist, which needs the owner pressing keys). Nothing is blocked.
+
+### 2026-08-31 — implementation agent (the Artists pane: one root cause, four symptoms)
+
+**Owner report:** in Artists, `S` "works but doesn't show the input bar — it's the
+background search section taking input". After pressing it no other key did
+anything: shortcuts dead, Tab and the digits did not switch panes, `v` selected
+nothing, `a` raised a `tabbedSearchResultsRenderer` parse toast — but Enter still
+played. Esc first, and then visual mode and `a` both worked. Separately, `l`/`→`
+never opened an artist.
+
+**Almost all of that was one bug.** `apply`'s `OpenSearch` arm set
+`focus = SearchInput` for the Artists pane, but only `Pane::Search` ever drew a
+query row. So the field had focus and was invisible, and the text-field
+early-return at the top of `apply` swallowed every subsequent key into
+`search_query`. That single fault explains each symptom:
+
+- no visible bar — nothing drew one;
+- shortcuts, Tab and digits dead — they were being *typed*, not resolved;
+- `a` raising a **search_artists** parse error — the keystroke landed in the
+  shared query and the debounce fired `Task::SearchArtists`, so the toast came
+  from the mapper, not from adding to the queue;
+- Enter still working — `Confirm` is one of the two actions that early-return
+  handles, and it drops focus back to `Main`;
+- Esc "fixing" visual mode and `a` — same thing, it left the field.
+
+**The fix is one flag with one owner.** `AppState::search_row_visible()` now says
+whether a query row exists (Search always; Artists while `S` is open and no artist
+is open), and the row is drawn in `draw_main`'s shared layout instead of inside
+`draw_search`. `list_top_for`, `list_rows_for` and `click_target` take that flag
+rather than `(pane, has_search_input)` — deriving it from the pane in three places
+is exactly what let them disagree, and the old callers each recomputed
+"has_search_input" a different way (`typing || !query.is_empty()` in the click
+path, `!query.is_empty() || focus==SearchInput` in the viewport path), neither
+matching the renderer. Two panes needing the row makes that unfixable by patching;
+one method makes it unrepresentable.
+
+**Leaving Artists now closes its search** (`set_pane`). The two panes share one
+`search_query`, so the owner's "type sabrina, Esc, `S` in Search, and sabrina is
+already there" was the buffer travelling. Worse, `artist_search_active` stayed
+set, so a later search in *another* pane could still be routed to
+`search_artists`. `close_artist_search` already did the right cleanup — nothing
+called it on the way out.
+
+**`l`/`→` on an artist now opens their tracks** (`app_loop`). The reducer's Right
+arm already commented "the loop turns this into the fetch", and the loop only
+checked `selected_playlist()`. Enter had the artist branch; `Right` never got it,
+so half the h/l pair was missing in the one pane where `h` worked. Mirrors the
+playlist branch, with a test that an already-open artist does not refetch.
+
+**Not fixed, and not attempted:** the toast in the screenshot is a real
+`ytmapi-rs` mapping failure for some `search_artists` responses
+(`Expected /contents/tabbedSearchResultsRenderer/.../sectionListRenderer/contents`
+to contain a `musicShelfRenderer`). It surfaced here only because the stuck field
+fired searches nobody asked for; typing a real artist query can still hit it. That
+is a `ytm-core` mapping issue against the live API, needs a captured fixture, and
+is out of scope for this report.
+
+475 tests pass, gate green. Nothing committed yet — the queue fixes from the
+previous entry and these are both sitting in the working tree.
+
+Next: unchanged — **Task 37**, then **Task 38**.
+
+### 2026-08-31 — implementation agent (mouse seek, artist art, artist song count)
+
+**Owner asked for three things:** click-to-seek on the progress bar; album art
+missing for songs opened from the Artists pane; and only five songs showing per
+artist. The last two turned out to be one cause.
+
+1. **Click-to-seek on the now-playing bar.** `click_target` returned `Nothing` for
+   every row at or below `body_height`, so the bar was never hit-tested.
+   `ClickTarget::Progress(col)` is new, and only the *bar* row answers to it —
+   row 0 is the title, and a click there must not move playback.
+   **The geometry has exactly one owner.** `nowplaying::bar_span` returns where the
+   bar starts and how wide it is, derived from the same `chrome_parts` the drawing
+   uses; `render::body_and_nowplaying` is shared by the layout and the hit test.
+   A second copy of either would drift the moment the flags column changed and a
+   click would seek to a different second than the pointer. The click means the
+   cell's **left edge**, not its centre: clicking the first cell rewinds to 0
+   rather than a few seconds in.
+   `handle_click` now takes the player, because a seek is the one click that acts
+   rather than selects.
+2. **Artist rows had no art, no durations, and only ~5 of them** — all the same
+   cause. `artist_tracks` read `top_releases.songs.results`, which is the artist
+   page's *preview* shelf: the rows the web UI shows above "Show all". Worse,
+   upstream's `ArtistSong` (verified in the vendored source, `parse/artist.rs:145`)
+   carries **no thumbnail and no duration field at all** — so `mapping.rs` had
+   nothing to map and hardcoded `thumbnail_url: None` with `duration_secs: 0`.
+   That is why art worked everywhere else and 0:00 showed on every artist row.
+   The shelf's `browse_id` is the artist's full songs playlist, and playlist
+   entries carry both. `artist_tracks` now follows it through `playlist_tracks`:
+   one extra request buys the whole list, the art, and real times.
+   **Owner chose this tradeoff explicitly** (one extra call per artist opened).
+   `better_artist_tracks` is a pure function so the fallback is testable without
+   network: the full list wins only when it arrived non-empty and at least as long
+   as the preview; a failure, an empty parse, or a *shorter* list keeps the five
+   preview rows, because five playable rows beat an error for rows the user can
+   already see. The failure logs at debug, not as a toast — it is a degraded
+   result, not something the user must act on.
+
+**NOT VERIFIED LIVE — this needs the owner.** Everything above is verified by unit
+tests only. The `browse_id` → `playlist_tracks` hop is the part that can fail
+against the real API, and no test can prove it: it needs the owner's account.
+**Manual step:** open an artist and confirm (a) more than five songs, (b) album art
+in the panel while one plays, (c) real durations instead of 0:00. If it fails,
+`better_artist_tracks` degrades to today's five rows rather than erroring, so the
+pane stays usable — the log line at debug names the cause. Add the finding here.
+The mouse seek also wants a real terminal: tests use a `TestBackend`, which has no
+pointer.
+
+**Answered for the owner while investigating:** playback caches **no audio to
+disk**. `yt-dlp -g` only prints a URL (`resolver.rs:162`) and mpv streams it
+through a 32 MiB in-*memory* demuxer buffer (`mpv_backend.rs:24`). So
+`ytm-cli cache clear` removes `~/.cache/ytm-cli/cache.db` — track/playlist
+metadata, kilobytes — and there is no song data taking storage. Worth keeping in
+mind before anyone adds a "clear downloads" affordance: there are none.
+
+485 tests pass, gate green. Still nothing committed — the queue fixes, the Artists
+pane fixes, and these three are all in the working tree.
+
+Next: unchanged — **Task 37**, then **Task 38**.
+
+### 2026-08-31 — implementation agent (bottom separator, and album art that fills its panel)
+
+**Two owner requests from screenshots.**
+
+1. **A rule above the now-playing bar, with a little margin.** The bar is now four
+   rows: blank margin, rule, title, progress. `nowplaying` exports `RULE_ROW`,
+   `PROGRESS_ROW` and `HEIGHT`, and `render` derives both the reserved height and
+   the seek hit-test from them — the bar grew by a row, and the mouse-seek added
+   earlier targets the progress row, so a second copy of those offsets would have
+   made a click seek from the wrong row. `list_rows_for` on an 80x24 frame now
+   gives **19** list rows, not 20: the separator costs one row of list, which is
+   the price of the margin. Paging and `zz` follow it automatically.
+   The owner's follow-up: the sidebar's vertical divider stopped a row short of
+   the rule, leaving a visible gap. It now runs through the margin row and meets
+   the rule in a `\u{2534}` junction — two lines merely abutting read as two lines
+   at terminal resolution. A test pins the margin row's *list side* blank, so
+   "close the gap" cannot be satisfied by filling the row and silently undoing the
+   margin the owner asked for.
+
+2. **The art panel had an empty right-hand strip — and the cause was not layout.**
+   `ratatui-image`'s `Resize::Fit` computes `min(width, image.width())`: it never
+   upscales. Every thumbnail URL YouTube volunteers for a track ends
+   `=w120-h120-l90-rj`, so the source is 120px — about 12 columns at 10px/cell,
+   inside a 24-column panel. **Widening `ART_WIDTH` alone would have changed
+   nothing**, which is worth remembering: the strip was unused *pixels*, not
+   unused columns.
+   `mapping::thumbnail_at_size` rewrites the size parameters; `AppState::art_url`
+   is the one accessor both the fetch and the cache lookup go through, because
+   keyed on different URLs the image would be downloaded and then never found.
+   The trailing `-l90-rj` is preserved (quality and format — dropping it changed
+   what the CDN returned), and URLs without size parameters are returned untouched
+   rather than guessed at.
+   **Verified against the live CDN, not assumed:** the same URL at `=w600-h600`
+   returns a real 600x600 JPEG, 59KB against 3KB. `ART_PX = 600` is comfortably
+   over the ~240px the panel needs, so the art stays sharp if the panel or the
+   font grows. Costs ~56KB per track played.
+   The rewrite happens **on read, not on store**, so the `w120` URLs already in
+   `cache.db` produce `w600` requests with no cache migration.
+   `ART_WIDTH` is deliberately unchanged at 24. The image now fills it — twice its
+   previous width — and taking more columns would come out of the track list.
+
+495 tests pass, gate green. Nothing committed yet: five pieces in the working tree
+(queue multi-select, the Artists pane, seek + artist art/count, the README Windows
+section, and this).
+
+**Still needs the owner, carried forward from the previous entry:** artist art and
+song count against a real account, and the mouse seek in a real terminal —
+`TestBackend` has no pointer. Add the findings here.
+
+Next: unchanged — **Task 37**, then **Task 38**.
+
+### 2026-08-31 — implementation agent (the filtered-queue index bug)
+
+**Owner report:** filter the queue, press Enter on a match, and the wrong song
+plays — the queue's first track instead of the row under the cursor. Pressing Esc
+first and then Enter played the queue's first track too.
+
+**This is the latent bug recorded two entries above, now biting Enter.** It was
+written down there as affecting `J`/`K` only; it was in fact in three places, and
+Enter is the one the owner found. Two independent faults:
+
+1. **`selected` is a *visible* row index; `JumpTo` takes a *queue* index.**
+   Unfiltered the two are equal, which is why this survived until a filter was on.
+   With `blu` matching entries 1 and 3, visible row 0 sent `JumpTo(0)` and row 1
+   sent `JumpTo(1)` — the queue's first two tracks, exactly what the owner saw.
+   `AppState::queue_index_of_row` does the translation, and `Enter`, unmarked `x`,
+   and unmarked `J`/`K` all go through it. The *marked* paths were always correct:
+   they match by video id against `state.queue`, which is why multi-select remove
+   worked while the single-row keys did not. Positional rather than by id, because
+   the queue may legitimately hold the same track twice and an id lookup would send
+   both rows to the first copy — there is a test for that.
+   Out of range now sends **nothing** rather than a clamped index: past the last
+   filtered row there is no entry the user could have meant, and a command would
+   index past the queue in the actor.
+2. **Esc threw the cursor away.** Clearing the filter reset `selected = 0`, so
+   Esc-then-Enter played whatever was first in the pane. It now keeps the cursor on
+   the same *track*: `unfiltered_index_of_selected` maps the visible row back to its
+   position in the full list before the filter clears. Applies to every pane, not
+   just the queue — the row under the cursor is what the user was aiming at
+   wherever they are. A filter that matched nothing falls back to row 0, the only
+   index certain to be in range.
+
+**Worth remembering:** `selected` indexes what is *drawn*. Anything handing it to
+the player, or to any API that indexes real data, needs `queue_index_of_row` or an
+equivalent translation. The same class of bug has now appeared three times in this
+codebase (`list_len` vs the drawn rows, `selected_track` reporting off-screen rows,
+and this), always when a filtered view and a backing list were confused.
+
+508 tests pass, gate green. Nothing committed: seven pieces in the working tree.
+
+**Still needs the owner:** artist art and song count against a real account; the
+mouse seek in a real terminal; and the larger album art actually rendering well
+(sixel and kitty scale differently, and only the URL is provable here).
+
+Next: unchanged — **Task 37**, then **Task 38**.
