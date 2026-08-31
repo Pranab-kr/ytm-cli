@@ -6,3 +6,7 @@ cookies.txt
 *.cookie
 config.local.toml
 dist/
+docs/
+PROGRESS.md
+CLAUDE.md
+AGENTS.md 
