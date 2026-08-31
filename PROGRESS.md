@@ -3,9 +3,9 @@
 **Read this first. Update it before you stop.** It is the handoff between agents.
 
 Last updated: 2026-08-31 by the implementation agent
-Current phase: **Phase 8 code complete. Tasks 1-32 committed and green.**
-Next action: **two owner decisions below**, then **Task 33** — SQLite cache,
-start of Phase 9.
+Current phase: **Phase 8 complete, partly live-verified. Tasks 1-32 committed.**
+Next action: **Task 33** — SQLite cache, start of Phase 9. First, the owner
+should re-test **delete** and **add-to-playlist** (see "Live verification").
 
 **Every browse pane works against the live account, and the queue is editable.**
 10 real playlists with track counts, Enter opens one and renders its tracks, `/`
@@ -14,13 +14,12 @@ queue with the playing entry marked — reorder, remove, and clear all verified
 against real audio. `?` lists every binding. Playlist create, rename, and
 delete are wired with optimistic updates and per-edit rollback. 230 tests pass.
 
-**Blocked on the owner, two things** (details in "Owner decisions due"):
-1. **FR-C5 (remove track from playlist) cannot work** — open question 1 came due
-   at Task 32 exactly as predicted. The code refuses the action with an honest
-   toast rather than sending a request that cannot succeed. Needs a decision.
-2. **No playlist edit has touched the real account yet.** Tasks 30.5/31.5/32.5
-   are manual steps, and writing to the owner's live library was not something to
-   do unasked. Everything is tested against `MockSource`.
+**Both owner decisions from the last session are resolved.**
+1. **FR-C5 works.** Option A chosen and implemented: `playlist_raw` reads
+   `setVideoId` from the wire JSON. Live check: 83 tracks, 83 removable.
+2. **Live verification started, and it found three real bugs** that every
+   `MockSource` test had passed. Create and rename are confirmed working against
+   the account. Delete and add-to-playlist are fixed but not yet retested.
 
 **Both gates are GREEN.**
 
@@ -93,7 +92,7 @@ guessing, and re-verify against the vendored source if a call does not compile.
 | 5 — TUI shell | 17–21 | ✅ done | Keymap, theme, text helpers, sidebar, now-playing bar |
 | 6 — Browse | 22–25 | ✅ done | Event loop, lists, search with debounce |
 | 7 — Queue UI | 26–27 | ✅ done | Queue view, toasts, spinner, help overlay |
-| 8 — CRUD | 28–32 | 🟡 code done, live-unverified | Playlist create/rename/delete, add/remove tracks. FR-C5 blocked — see open question 1 |
+| 8 — CRUD | 28–32 | 🟡 create+rename live-verified | Playlist create/rename/delete, add/remove tracks. FR-C5 now works (option A). Delete + add need a retest |
 | 9 — Polish | 33–38 | ⬜ not started | Cache, album art, MPRIS, CLI, README |
 
 ⚠️ = risk phase. See below.
@@ -255,51 +254,85 @@ catch, so the signal has to be "library call succeeded but returned zero rows"
 
 ---
 
-## Owner decisions due
+## Live verification
 
-Both of these arrived with Task 32 and neither can be resolved without you.
+Create and rename are confirmed against the owner's real account. Two steps are
+left, both fixed in code but not yet re-tested by a human:
 
-### 1. FR-C5 (remove a track from a playlist) cannot work as specified
+```
+cargo run -p ytm-cli
+```
 
-This is open question 1 below, now due. Nothing changed about the diagnosis —
-`ytmapi-rs` 0.3.3 does not parse `setVideoId` out of playlist reads, and
-`remove_playlist_items` requires it. So a track read from a playlist carries
-`set_video_id: None` and the API cannot identify the row to delete.
+- `D` on `zz-throwaway`, then `n` — must leave it alone. Then `D`, `y` — it
+  should disappear from the app and from the web UI.
+- `v` on two tracks, `A`, pick a playlist, Enter — both should land.
 
-What the code does about it: `open_remove_confirm` refuses with
-"these tracks cannot be removed — try refreshing the playlist" instead of
-sending a request that cannot succeed. The plumbing behind it
-(`ConfirmAction::RemoveTracks`, `MutationTask::RemoveTracks`,
-`Mutation::RemoveTracks` with exact-index rollback) is written and tested, so
-whichever option you pick, only the *parsing* is missing.
+`zz-throwaway` still exists on the account for exactly this.
 
-- **A — parse `setVideoId` ourselves** via `raw_json_query`. The field is in the
-  wire JSON; upstream just drops it. Most work, no fork, and it makes FR-C5 work.
-- **B — fork or patch `ytmapi-rs`** to expose it.
-- **C — drop FR-C5.** The refusal toast becomes the permanent behaviour, and the
-  requirement checklist records C5 as out of scope.
+**Three bugs came out of the first attempt, and every one of them passed the
+whole test suite.** Worth reading before trusting a green gate on UI or API work:
 
-### 2. Nobody has verified a playlist edit against the real account
+1. **Modal keys resolved against the wrong focus.** `keymap.resolve` was passed
+   `state.focus`, which stays Sidebar/Main while a modal is open, and `Char(c)`
+   is only produced under `Focus::SearchInput`. So the create prompt could not be
+   typed into — `q` quit the app instead. Confirms were worse: `y` matched
+   nothing and `n` skipped the track behind the box. Fixed with
+   `AppState::input_focus()`. **The Task 29 tests missed it because they fed
+   `InputAction::Char` straight into `apply()`, skipping the keymap** — they
+   proved the reducer worked while nothing could reach it. New tests go through
+   `resolve`.
+2. **The prompt had no cursor**, so an empty field rendered as blank space and
+   read as a dead box. The value line now ends in a cursor block.
+3. **The wrong playlist id form went to every mutation endpoint** — see below.
 
-Tasks 30.5, 31.5, and 32.5 are manual steps, and every one of them **writes to
-the live library**. That was not something to do without asking, so all of
-Phase 8 is tested against `MockSource` only.
+### The playlist id has two forms, and the endpoints disagree
 
-To clear them, in the running app:
-- `N`, type a throwaway name, Enter — the row appears instantly, a success toast
-  follows, and it should exist in the YouTube Music web UI.
-- `R` on it, rename, Enter — the new title should appear in the web UI.
-- `v` on two tracks, `A`, pick the throwaway playlist, Enter — both should land.
-- `D` on it, `y` — it should disappear. Pressing `n` instead must leave it alone.
+This one cost the most time and is the most likely to bite again.
 
-Whether an agent should do this on your account, or you would rather drive it
-yourself, is your call.
+| Form | Looks like | Used by |
+|---|---|---|
+| browse | `VLPLa9OPirWkaJM` | `browse` endpoints; what a library listing reports |
+| playlist | `PLa9OPirWkaJM` | `playlist/edit`, `playlist/delete`, add/remove items; what `create_playlist` returns |
+
+We stored the browse form and sent it everywhere, so **every mutation on an
+existing playlist got `400 INVALID_ARGUMENT`**. Create was immune because it
+takes no existing id. `ytmapi-rs` 0.3.3 forwards whatever it is handed — its
+source carries four `TODO: Confirm if processing required to add/remove 'VL'`.
+
+`PlaylistId::browse_form()` / `mutation_form()` convert, both idempotent because
+ids genuinely arrive in both forms. **If a new endpoint is added, pick the form
+deliberately** — the default of passing `id.as_str()` is wrong half the time.
+
+The same investigation found `is_system_playlist` never matching: it was handed
+`VLLM`, not `LM`, so no system playlist was flagged read-only and the
+rename/delete guards never fired. It now strips the prefix.
+
+Verified live and reversibly with `examples/verify_edit`: renamed a real
+playlist, confirmed the title in the library, restored the original.
 
 ---
 
 ## Open questions
 
-**1. `set_video_id` is missing from `ytmapi-rs` 0.3.3's playlist reads — FR-C5 cannot work as specified.**
+**1. RESOLVED 2026-08-31 — `setVideoId` is parsed from the raw JSON (option A). FR-C5 works.**
+
+The owner chose option A. `ytm-core/src/playlist_raw.rs` extracts the field from
+the wire response; `playlist_tracks` runs upstream's typed parse and our own pass
+over **one** request, because `ProcessedResult`'s fields are public and
+`parse_into` accepts JSON we already hold. Live check: 83 tracks, 83 removable.
+
+Three things were measured against the live account rather than assumed, and each
+one changed the code — do not "simplify" any of them back:
+- **Ids are read per row.** An 83-track playlist carried 85 `setVideoId`
+  occurrences, so a document-wide scan misaligns.
+- **The menu index is not fixed.** The id sat at `items/6`, but nothing
+  guarantees it, so each row's menu is searched.
+- **Pairing is by `videoId` with a forward cursor, never by position.** The shelf
+  returned 85 rows where upstream parsed 83 — it drops rows internally — so a
+  positional zip produced *zero* removable tracks on the first attempt. The
+  cursor is what lets a video appearing twice get its two distinct entry ids.
+
+The original diagnosis, kept for context:
 
 Verified by reading the vendored source, not inferred. `PlaylistSong`
 (`src/parse/playlist.rs:74`) has no `setVideoId` field; the only place it exists
@@ -961,3 +994,42 @@ exhaustive `Pane` match. If `PickPlaylist` had been added with a `_` arm the
 picker would have rendered nothing at all.
 
 Next: the two owner decisions, then **Task 33** (SQLite cache, Phase 9).
+
+### 2026-08-31 — implementation agent (FR-C5, then three live bugs)
+
+**The owner drove the app against their real account, and it broke three ways.**
+Every one had passed the full suite. That is the headline of this session: Phase
+8 was "code complete and green" and still could not create a playlist.
+
+**FR-C5 now works** (option A, owner's choice). `playlist_raw.rs`, one request,
+83/83 removable live. Details under open question 1 — especially why pairing is
+by `videoId` with a cursor and not by position, which took two attempts and a
+live measurement to get right.
+
+**Bug 1 — the create prompt could not be typed into.** `keymap.resolve` got
+`state.focus`, which is not `SearchInput` while a modal is open, so letters
+resolved as commands and `q` quit the app. Confirms were worse: `y` matched
+nothing, `n` skipped the playing track. `AppState::input_focus()` fixes both.
+**The Task 29 tests fed `InputAction::Char` directly into `apply()`**, so they
+tested the reducer and never the path to it. New tests go through `resolve`.
+
+**Bug 2 — no cursor in the prompt.** An empty field was blank space.
+
+**Bug 3 — the wrong playlist id form on every mutation.** Full table under
+"Live verification". Short version: the library reports `VLPL…`, the mutation
+endpoints want `PL…`, and create only worked because it takes no id.
+`is_system_playlist` was broken the same way and had been since Task 5.
+
+**What to take from this.** `MockSource` cannot catch a wrong id format, and a
+reducer test cannot catch a keymap that never calls the reducer. Both gaps were
+at a **boundary the tests stubbed out**. The remaining manual steps are not
+paperwork — they are the only thing exercising those boundaries.
+
+Two read-only diagnostic examples were added on the way and left in the tree
+(`dump_playlist_tracks`, `check_removable`), plus `verify_edit`, which is
+reversible: it renames a playlist and restores the title. Not in the plan; kept
+because each one would otherwise have to be rewritten next time this breaks.
+Flagged to the owner.
+
+Next: the owner retests delete and add-to-playlist, then **Task 33** (SQLite
+cache, Phase 9).
