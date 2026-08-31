@@ -60,6 +60,10 @@ fn the_config_path_override_is_where_config_writes() {
         "the documented example was not what landed"
     );
     assert!(
+        text.contains("# focus_current = \"c\""),
+        "new configs must document the current-song binding"
+    );
+    assert!(
         String::from_utf8_lossy(&out.stdout).contains(path.to_str().unwrap()),
         "the path printed was not the path asked for"
     );

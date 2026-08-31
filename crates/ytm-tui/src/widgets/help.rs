@@ -52,6 +52,7 @@ fn action_label(a: &InputAction) -> Option<&'static str> {
         A::OpenSearch => "search online",
         A::OpenFilter => "filter this list",
         A::CenterOnCursor => "centre this row",
+        A::FocusCurrent => "focus playing song",
         A::OpenQueue => "queue",
         A::OpenHelp => "this help",
         A::AddToQueue => "add to queue",
@@ -99,10 +100,7 @@ fn rows(km: &KeyMap) -> Vec<(String, &'static str)> {
     v
 }
 
-/// Bindings that are not single remappable characters, so `KeyMap::bindings`
-/// cannot report them — the digits are matched in `resolve`, and Tab is a
-/// non-char key. Listed explicitly because FR-U2 says the overlay shows what
-/// the user can actually press.
+/// Fixed bindings that `KeyMap::bindings` cannot report (FR-U2).
 const FIXED_ROWS: [(&str, &str); 7] = [
     ("1-7", "jump to source"),
     ("tab", "next source"),
@@ -113,12 +111,7 @@ const FIXED_ROWS: [(&str, &str); 7] = [
     (",", "edit config"),
 ];
 
-/// Column count and column width for `n` bindings in a `w` x `h` inner area.
-///
-/// Sized to the content rather than to a fixed percentage: with every binding
-/// listed, a box picked by percentage is either mostly blank or too narrow to
-/// spell the actions out, and a truncated binding might as well not exist
-/// (FR-U2). Fewest columns that fit the height, widest that fit the width.
+/// Fewest readable columns that fit all bindings in the available area.
 fn layout(n: usize, w: usize, h: usize) -> (usize, usize) {
     let min_col_w = KEY_WIDTH + MIN_LABEL_WIDTH;
     let max_cols = (w / min_col_w).clamp(1, MAX_COLS);

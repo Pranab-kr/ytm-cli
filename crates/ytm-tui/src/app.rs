@@ -38,12 +38,7 @@ pub const PANE_ORDER: [Pane; 7] = [
     Pane::Queue,
 ];
 
-/// One line of the Home pane.
-///
-/// The feed is carousels, but a terminal list is one column, so the shelves are
-/// flattened with their titles as headings. Headings are rows so they scroll
-/// with the content; `select_next`/`select_prev` skip them, because landing on
-/// one and pressing Enter would do nothing and read as a broken key.
+/// Home row; headings are displayed but skipped by selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HomeRow {
     Heading(String),
@@ -104,9 +99,7 @@ pub enum Modal {
     Help,
     /// Which playlist to add the pending tracks to (FR-C4).
     ///
-    /// `choices` is carried in the modal rather than read from `playlists` at
-    /// draw time so the row the user picks cannot change under them if a
-    /// refresh lands mid-decision.
+    /// Stored here so a refresh cannot change choices mid-decision.
     PickPlaylist {
         targets: Vec<VideoId>,
         choices: Vec<(PlaylistId, String)>,
@@ -133,9 +126,7 @@ pub struct AppState {
     pub scroll_offset: usize,
     /// Rows the list area can show, set by the loop from the frame size.
     ///
-    /// Paging and centring are meaningless without it, and a widget cannot tell
-    /// the reducer — `render` takes `&AppState`. Zero until the first frame, so
-    /// every use goes through `page_height`, which floors it.
+    /// Zero until the first frame; `page_height` supplies a safe floor.
     pub viewport_rows: usize,
 
     pub playlists: Vec<Playlist>,
@@ -147,11 +138,7 @@ pub struct AppState {
     /// The home feed's shelves, flattened to rows with their headings (FR-B6).
     pub home_rows: Vec<HomeRow>,
 
-    /// The artist whose tracks are on screen, and their name for the heading
-    /// (FR-B7). `None` means the Artists pane is showing the list of artists.
-    ///
-    /// The name is stored rather than looked up: an artist opened from search is
-    /// not in `artists`, so there would be nothing to look up.
+    /// Open artist id and heading; searched artists may not exist in `artists`.
     pub open_artist: Option<(ArtistId, String)>,
     /// The open artist's tracks. Kept apart from `tracks` so opening an artist
     /// cannot clobber the library songs or an open playlist's rows — the class
@@ -164,10 +151,7 @@ pub struct AppState {
 
     /// True while the Artists pane's own search field is showing results.
     ///
-    /// The library list only holds artists you follow, so there was no way to
-    /// reach anyone else. `S` in that pane searches YouTube Music and puts the
-    /// results in the same list; this flag is what the heading and the "back to
-    /// your library" path key off.
+    /// Distinguishes online artist results from the followed-artist list.
     pub artist_search_active: bool,
 
     pub search_query: String,
@@ -316,10 +300,7 @@ impl AppState {
                 (Modal::Prompt { value, .. }, InputAction::Backspace) => {
                     value.pop();
                 }
-                // Ctrl+W. A prompt appends at the end and draws no caret, so
-                // "delete the previous word" is the whole of line editing that
-                // is well defined here — the motions need a caret to move, and
-                // are deliberately not claimed for prompts.
+                // Prompts have no caret, so only end-of-line word deletion applies.
                 (Modal::Prompt { value, .. }, InputAction::DeleteWordBack) => {
                     let at = crate::util::text::prev_word_boundary(value, value.len());
                     value.truncate(at);
@@ -329,44 +310,34 @@ impl AppState {
             }
             return;
         }
-        // While the search field has focus, printable keys are text. The keymap
-        // already resolves them to `Char`/`Backspace` rather than commands, so
-        // this arm only has to edit the buffer.
-        // The filter field: same editing keys as search, but it never issues a
-        // request and Esc *clears* rather than just leaving — a filter the user
-        // cannot see the end of is worse than no filter.
+        // Filter edits are local and preserve the selected source row.
         if self.focus == Focus::FilterInput {
             match a {
                 InputAction::Char(c) => {
+                    let keep = self.unfiltered_index_of_selected();
                     self.filter.push(c);
-                    self.selected = 0;
+                    self.selected = self.visible_index_of_unfiltered(keep).unwrap_or(0);
                     self.scroll_offset = 0;
                     return;
                 }
                 InputAction::Backspace => {
+                    let keep = self.unfiltered_index_of_selected();
                     self.filter.pop();
-                    self.selected = 0;
+                    self.selected = self.visible_index_of_unfiltered(keep).unwrap_or(0);
                     self.scroll_offset = 0;
                     return;
                 }
                 InputAction::DeleteWordBack => {
+                    let keep = self.unfiltered_index_of_selected();
                     let at = crate::util::text::prev_word_boundary(&self.filter, self.filter.len());
                     self.filter.truncate(at);
-                    self.selected = 0;
+                    self.selected = self.visible_index_of_unfiltered(keep).unwrap_or(0);
+                    self.scroll_offset = 0;
                     return;
                 }
-                // Esc and Enter both just leave the field, keeping the filter.
-                //
-                // Esc used to clear it, which is what made `a` unusable: the user
-                // pressed Esc expecting to be back in the list, the field kept
-                // focus in their mind but the filter was gone, and the next
-                // letter went somewhere they did not expect. Leaving the field
-                // with the filter intact means the rows under the cursor are the
-                // ones they filtered for, and `a` acts on them. A second Esc,
-                // handled below in navigation focus, clears the filter.
+                // First Esc/Enter leaves the field; a later Esc clears the filter.
                 InputAction::Cancel | InputAction::Confirm => {
                     self.focus = Focus::Main;
-                    self.selected = 0;
                     return;
                 }
                 // Arrows walk the filtered rows without leaving the field.
@@ -490,16 +461,14 @@ impl AppState {
                 self.skip_headings(a == InputAction::PageDown);
                 self.refresh_visual_marks();
             }
-            // The wheel scrolls the view and only drags the cursor when the view
-            // would otherwise leave it behind — how a list behaves everywhere
-            // else. Moving the cursor a row per notch instead would fight the
-            // selection.
+            // Wheel motion moves the viewport and only clamps an off-screen cursor.
             InputAction::ScrollDown | InputAction::ScrollUp => {
                 self.scroll_by(a == InputAction::ScrollDown);
                 self.refresh_visual_marks();
             }
             // `zz`, from vim: centre the selected row.
             InputAction::CenterOnCursor => self.center_on_cursor(),
+            InputAction::FocusCurrent => self.focus_current(),
             // Tab / Shift+Tab cycle sources. These resolved in the keymap from
             // the very first version but no reducer ever handled them, so both
             // keys silently did nothing — the owner reported Tab as useless.
@@ -557,10 +526,7 @@ impl AppState {
             // Guarded so it only claims the key during visual mode; outside it,
             // Esc keeps whatever meaning it had.
             InputAction::Cancel if self.visual_anchor.is_some() => self.cancel_visual(),
-            // `h` is "go up a level" first and "focus the sidebar" second, so
-            // the pair reads like opening and closing a folder. Only the
-            // playlist pane has a level to leave; everywhere else `h` keeps its
-            // old meaning rather than swallowing the key.
+            // `h` leaves a nested list before moving focus to the sidebar.
             InputAction::Left => {
                 // An open playlist or an open artist is a level to leave. Without
                 // the artist branch `h` focused the sidebar while the artist's
@@ -612,18 +578,8 @@ impl AppState {
         }
     }
 
-    /// The focus the *keymap* should resolve against, which is not always the
-    /// focus the user is navigating with.
-    ///
-    /// `Focus::SearchInput` means "letters are literal, not commands". Two
-    /// modals need that: a prompt, whose letters are the name being typed, and a
-    /// confirm, whose `y`/`n` are answers. Resolving against `self.focus`
-    /// instead left it as Sidebar/Main while the modal was open, so in a prompt
-    /// `q` arrived as Quit, and in a confirm `y` matched nothing at all while
-    /// `n` skipped the track behind the box.
-    ///
-    /// The picker keeps command focus on purpose: it is a list, so `j`/`k` and
-    /// the arrows should move through it.
+    /// Focus used for key resolution. Prompts and confirms require literal text;
+    /// the playlist picker remains a navigable list.
     pub fn input_focus(&self) -> Focus {
         match self.modal {
             Some(Modal::Prompt { .. }) | Some(Modal::Confirm { .. }) => Focus::SearchInput,
@@ -655,10 +611,7 @@ impl AppState {
 
     /// What to show when the current pane has no rows.
     ///
-    /// One owner for every empty state, so the message fits the reason the pane
-    /// is empty rather than a single flat "Nothing here yet". A filter that
-    /// matched nothing, a list still loading, and a genuinely empty library are
-    /// three different situations and read as three different hints.
+    /// Distinguishes no filter matches, loading, and genuinely empty panes.
     pub fn empty_message(&self) -> &'static str {
         // A filter with no hits is the same story in every pane, and it is the
         // reason most likely to look like a bug — so it wins over the rest.
@@ -671,7 +624,7 @@ impl AppState {
         match self.pane {
             Pane::Home => "No recommendations yet",
             Pane::Playlists if self.open_playlist.is_some() => "This playlist is empty",
-            Pane::Playlists => "No playlists — press c to create one",
+            Pane::Playlists => "No playlists — press N to create one",
             Pane::Songs => "No liked songs yet",
             Pane::Albums => "No saved albums",
             Pane::Artists if self.open_artist.is_some() => "No tracks for this artist",
@@ -683,21 +636,9 @@ impl AppState {
         }
     }
 
-    /// Whether the filter row is on screen.
-    ///
-    /// Shown while typing *and* while a filter is still narrowing rows after the
-    /// field lost focus — otherwise a filtered list looks like a short list, with
-    /// nothing to say why rows are missing or how to get them back.
     /// The art URL for what is playing, at a size that can fill the panel.
-    ///
-    /// One accessor because the fetch and the cache lookup must agree: keyed on
-    /// different URLs, the image would be downloaded and then never found.
-    ///
-    /// The upsize is the whole point. YouTube volunteers 120px thumbnails and
-    /// `ratatui-image`'s `Resize::Fit` never upscales, so the art filled only
-    /// half the 24-column panel however wide the panel was — the empty right-hand
-    /// strip the owner reported. Verified live: the same URL at `=w600-h600`
-    /// returns a real 600x600 JPEG.
+    /// Fetch and cache must use this same upsized URL because image rendering
+    /// does not upscale YouTube's default 120px thumbnail.
     pub fn art_url(&self) -> Option<String> {
         Some(ytm_core::mapping::thumbnail_at_size(
             self.now_playing.as_ref()?.thumbnail_url.as_deref()?,
@@ -706,14 +647,8 @@ impl AppState {
     }
 
     /// Queue index of a visible row, or `None` when this is not the queue.
-    ///
-    /// `selected` counts *visible* rows; `JumpTo`, `RemoveFromQueue` and
-    /// `MoveInQueue` all take real queue indices. Unfiltered the two are equal,
-    /// which is why passing `selected` straight through worked until a filter was
-    /// on — then Enter played whatever sat at that position in the full queue.
-    ///
-    /// Positional rather than by video id, because the queue may legitimately hold
-    /// the same track twice and an id lookup would pick the first copy.
+    /// Maps filtered rows to real queue positions. Position is required because
+    /// duplicate video ids are valid in the queue.
     pub fn queue_index_of_row(&self, row: usize) -> Option<usize> {
         if self.pane != Pane::Queue {
             return None;
@@ -779,17 +714,46 @@ impl AppState {
         found.unwrap_or(0)
     }
 
+    /// Visible row for an index in the unfiltered source.
+    fn visible_index_of_unfiltered(&self, target: usize) -> Option<usize> {
+        if !self.is_filtering() {
+            return (target < self.list_len()).then_some(target);
+        }
+        match self.pane {
+            Pane::Home => (target < self.home_rows.len()).then_some(target),
+            Pane::Playlists if self.open_playlist.is_none() => self
+                .playlists
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| self.matches_filter(&p.title))
+                .position(|(i, _)| i == target),
+            Pane::Albums => self
+                .albums
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| self.album_matches(a))
+                .position(|(i, _)| i == target),
+            Pane::Artists if self.open_artist.is_none() => self
+                .artists
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| self.matches_filter(&a.name))
+                .position(|(i, _)| i == target),
+            _ => self
+                .unfiltered_tracks()
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| self.track_matches_filter(t))
+                .position(|(i, _)| i == target),
+        }
+    }
+
+    /// Whether the filter row is visible, including after input loses focus.
     pub fn filter_row_visible(&self) -> bool {
         self.focus == Focus::FilterInput || self.is_filtering()
     }
 
-    /// Whether a `Title / Artist / Time` header row is drawn above the list.
-    ///
-    /// Only the track-shaped panes have those columns, and only when they hold
-    /// rows — a header over "No liked songs yet" would label an empty grid. One
-    /// method, like `search_row_visible`, because the layout, the click math,
-    /// and the viewport count must all agree the row is there or a click lands a
-    /// row off.
+    /// Whether the track header is drawn; shared by layout and click geometry.
     pub fn column_header_visible(&self) -> bool {
         let track_shaped = match self.pane {
             Pane::Songs | Pane::Queue | Pane::Search => true,
@@ -800,13 +764,7 @@ impl AppState {
         track_shaped && self.list_len() > 0
     }
 
-    /// Whether a query row is drawn above the list.
-    ///
-    /// The Artists pane borrows the same field for `S` (FR-B7), so it grows the
-    /// row too. One method rather than a condition repeated in the layout, the
-    /// click math, and the viewport count: when those disagreed, `S` in Artists
-    /// focused a field that was never drawn, so every key went into an invisible
-    /// query and the pane looked frozen.
+    /// Whether a query row is drawn; Artists uses it only for online search.
     pub fn search_row_visible(&self) -> bool {
         match self.pane {
             Pane::Search => true,
@@ -822,12 +780,7 @@ impl AppState {
         self.filter.is_empty() || text.to_lowercase().contains(&self.filter.to_lowercase())
     }
 
-    /// How many track rows survive the filter, without building the list.
-    ///
-    /// `list_len` is called several times per frame and on every cursor move, so
-    /// going through `visible_tracks` cloned a 400-track playlist each time for
-    /// nothing but its length. Counting shares `track_matches_filter` with the
-    /// list itself, so the two cannot disagree about which rows are visible.
+    /// Count filtered tracks without cloning the list on every frame.
     fn visible_track_count(&self) -> usize {
         let source = self.unfiltered_tracks();
         if self.filter.is_empty() {
@@ -846,12 +799,7 @@ impl AppState {
             || t.album.as_deref().is_some_and(|a| self.matches_filter(a))
     }
 
-    /// The track rows the filter leaves on screen.
-    ///
-    /// Owned rather than borrowed: a filtered view is a new list, and returning
-    /// a slice would mean either storing the filtered copy or lying about
-    /// lifetimes. Callers that need indices use this, so what is on screen and
-    /// what `Enter` acts on cannot disagree.
+    /// Visible tracks, owned because a filtered view is not a source slice.
     pub fn visible_tracks(&self) -> Vec<Track> {
         let source = self.unfiltered_tracks();
         if self.filter.is_empty() {
@@ -944,15 +892,8 @@ impl AppState {
         }
     }
 
-    /// Leave an open artist and show the artist list again.
-    ///
-    /// Clears the tracks with the id for the same reason `close_open_playlist`
-    /// does: rows left behind would make `list_len` and `selected_track`
-    /// disagree with the screen.
-    /// Leave artist search, so the next load restores the followed artists.
-    ///
-    /// Returns false when no search was active, letting `h` fall through to its
-    /// other meanings rather than swallowing the key.
+    /// Leave artist search so the next load restores followed artists.
+    /// Returns false when no search was active.
     pub fn close_artist_search(&mut self) -> bool {
         if !self.artist_search_active {
             return false;
@@ -1025,14 +966,42 @@ impl AppState {
         (self.page_height() / 2).max(1)
     }
 
-    /// Centre the selected row in the viewport (`zz`).
-    ///
-    /// Clamped at both ends: near the top or bottom there is nothing to scroll
-    /// into view, and forcing it would pad the list with blank rows.
+    /// Centre the selected row, clamped to avoid padding at either end.
     pub fn center_on_cursor(&mut self) {
         let height = self.page_height();
         let max_start = self.list_len().saturating_sub(height);
         self.scroll_offset = self.selected.saturating_sub(height / 2).min(max_start);
+    }
+
+    /// Select and reveal the playing row without changing playback.
+    pub fn focus_current(&mut self) {
+        let track_pane = matches!(self.pane, Pane::Songs | Pane::Search | Pane::Queue)
+            || self.pane == Pane::Playlists && self.open_playlist.is_some()
+            || self.pane == Pane::Artists && self.open_artist.is_some();
+        if !track_pane {
+            return;
+        }
+        let target = if self.pane == Pane::Queue {
+            self.queue_current.filter(|i| *i < self.queue.len())
+        } else {
+            let Some(playing) = self.now_playing.as_ref() else {
+                return;
+            };
+            self.unfiltered_tracks()
+                .iter()
+                .position(|t| t.video_id == playing.video_id)
+        };
+        let Some(target) = target else { return };
+
+        let visible = self.visible_index_of_unfiltered(target).or_else(|| {
+            self.filter.clear();
+            self.visible_index_of_unfiltered(target)
+        });
+        if let Some(row) = visible {
+            self.selected = row;
+            self.focus = Focus::Main;
+            self.center_on_cursor();
+        }
     }
 
     /// Scroll the view a wheel notch, keeping the cursor inside it.
@@ -1055,10 +1024,7 @@ impl AppState {
         self.skip_headings(true);
     }
 
-    /// Step off a heading onto a real row (Home pane only).
-    ///
-    /// A heading has no `Enter` behaviour, so a cursor parked on one makes the
-    /// next key look broken. Reverses direction at the ends of the list.
+    /// Step off a Home heading, reversing direction at the list boundary.
     fn skip_headings(&mut self, forward: bool) {
         if self.pane != Pane::Home {
             return;
@@ -1084,13 +1050,8 @@ impl AppState {
         self.skip_headings(false);
     }
 
-    /// Always reset the selection — a stale index points at the wrong row.
-    /// Leave an open playlist and show the playlist list again. Returns false
-    /// when there was no level to leave, so the caller can fall back.
-    ///
-    /// Clears `tracks` as well as the id: they are the open playlist's rows, and
-    /// leaving them would make `list_len` and `selected_track` disagree with
-    /// what is on screen.
+    /// Leave an open playlist, clearing its rows and stale selection.
+    /// Returns false when there was no level to leave.
     pub fn close_open_playlist(&mut self) -> bool {
         if self.pane != Pane::Playlists || self.open_playlist.is_none() {
             return false;
@@ -1105,10 +1066,7 @@ impl AppState {
         true
     }
 
-    /// Jump straight to the nth source, counting from 1 in sidebar order.
-    ///
-    /// Out of range is ignored rather than clamped: clamping would make `9` mean
-    /// "Queue", which is not what the user pressed.
+    /// Jump to the nth source; out-of-range numbers are ignored, not clamped.
     pub fn goto_source(&mut self, n: u8) {
         let Some(idx) = (n as usize).checked_sub(1) else {
             return;
@@ -1129,11 +1087,7 @@ impl AppState {
     }
 
     pub fn set_pane(&mut self, p: Pane) {
-        // The Artists pane borrows the Search pane's query buffer for `S`, so
-        // leaving it has to put that buffer back. Without this, typing an artist
-        // name here and then opening Search showed the name already in the field,
-        // as if the user had searched for it there — and `artist_search_active`
-        // stayed set, so the next search fired at `search_artists`.
+        // Artists borrows Search's query buffer, so restore it when leaving.
         if self.pane == Pane::Artists && p != Pane::Artists {
             self.close_artist_search();
         }
@@ -1163,10 +1117,7 @@ impl AppState {
             .retain(|t| now_ms.saturating_sub(t.born_ms) < TOAST_TTL_MS);
     }
 
-    /// Apply the edit to local state right now and return its token.
-    ///
-    /// The point of FR-C6 is that the list changes under the user's hands
-    /// instead of after a round trip, so this never waits for the network.
+    /// Apply an optimistic edit locally and return its token (FR-C6).
     pub fn begin_mutation(&mut self, m: Mutation) -> u64 {
         let token = self.pending.next_token();
         match &m {
@@ -1199,11 +1150,7 @@ impl AppState {
         }
     }
 
-    /// The server rejected it. Undo exactly this edit.
-    ///
-    /// Keyed by token, not "the last change": with two edits in flight the
-    /// responses can arrive in either order, and reverting the newest would
-    /// discard an edit that actually succeeded.
+    /// Undo a rejected edit by token; responses may arrive out of order.
     pub fn rollback(&mut self, token: u64) {
         let Some(m) = self.pending.take(token) else {
             return;
@@ -1232,11 +1179,7 @@ impl AppState {
         }
     }
 
-    /// The caret, guaranteed in range and on a char boundary.
-    ///
-    /// The query can be replaced from outside the field (a cleared pane, a
-    /// restored session), so a stored offset may be stale — and slicing a stale
-    /// one panics rather than misbehaving.
+    /// Caret clamped to a valid char boundary after external query changes.
     fn clamped_cursor(&self) -> usize {
         let mut at = self.search_cursor.min(self.search_query.len());
         while at > 0 && !self.search_query.is_char_boundary(at) {
@@ -1245,10 +1188,7 @@ impl AppState {
         at
     }
 
-    /// Video ids of the rows the main pane is showing, in display order.
-    ///
-    /// Mirrors `selected_track`'s pane mapping so a range and a hand-made mark
-    /// can never disagree about which list they are indexing.
+    /// Visible video ids in display order, matching `selected_track`'s panes.
     fn row_ids(&self) -> Vec<VideoId> {
         self.track_rows()
             .iter()
@@ -1256,10 +1196,7 @@ impl AppState {
             .collect()
     }
 
-    /// The pane's rows when they are tracks, empty when they are not.
-    ///
-    /// One place so `selected_track`, a visual range, and the bulk-action
-    /// targets can never disagree about which list is on screen.
+    /// Visible track rows, shared by selection and bulk actions.
     pub fn track_rows(&self) -> Vec<Track> {
         match self.pane {
             // The home feed's playable cards, in the order they are drawn, so a
@@ -1295,11 +1232,7 @@ impl AppState {
         }
     }
 
-    /// Start or end a range selection anchored at the current row (`V`).
-    ///
-    /// Ending it keeps the marks: the selection exists so `A` or `x` can act on
-    /// it, so dropping them here would make the mode useless. `Esc` is the way
-    /// out that undoes it.
+    /// Toggle an anchored range; closing keeps marks, while Esc restores them.
     pub fn toggle_visual(&mut self) {
         if self.visual_anchor.is_some() {
             self.visual_anchor = None;
@@ -1325,10 +1258,7 @@ impl AppState {
         }
     }
 
-    /// Redraw the range after the cursor moved.
-    ///
-    /// Recomputed from the anchor rather than accumulated, so walking back over
-    /// rows unmarks them instead of leaving the overshoot behind.
+    /// Recompute the range so walking back unmarks overshot rows.
     pub fn refresh_visual_marks(&mut self) {
         let Some(anchor) = self.visual_anchor else {
             return;
@@ -1361,13 +1291,7 @@ impl AppState {
         }
     }
 
-    /// The track under the cursor, or `None` when this pane's rows are not
-    /// tracks.
-    ///
-    /// Exhaustive on `Pane` rather than falling through to `tracks`: Albums,
-    /// Artists, and the playlist list keep whatever `tracks` was last loaded
-    /// with, so the old `_` arm reported a song that was not on screen. `Enter`
-    /// then played it and `a` queued it, and `v` marked it invisibly.
+    /// Track under the cursor; pane matching excludes stale hidden tracks.
     pub fn selected_track(&self) -> Option<Track> {
         match self.pane {
             // A heading is not a track, and a card that opens a page is not one
@@ -1440,6 +1364,145 @@ mod tests {
         assert_eq!(s.pane, Pane::Home);
         assert!(s.playlists.is_empty());
         assert!(!s.should_quit);
+    }
+
+    #[test]
+    fn focus_current_selects_and_centres_the_playing_playlist_track() {
+        let playing = Track::stub("playing", "Playing");
+        let mut s = AppState {
+            pane: Pane::Playlists,
+            focus: Focus::Sidebar,
+            open_playlist: Some(PlaylistId::from("playlist")),
+            tracks: vec![
+                Track::stub("a", "A"),
+                playing.clone(),
+                Track::stub("b", "B"),
+            ],
+            now_playing: Some(playing),
+            filter: "no match".into(),
+            viewport_rows: 1,
+            ..Default::default()
+        };
+
+        s.apply_input(InputAction::FocusCurrent);
+
+        assert_eq!(s.selected, 1);
+        assert_eq!(s.scroll_offset, 1);
+        assert_eq!(s.focus, Focus::Main);
+        assert!(s.filter.is_empty());
+    }
+
+    #[test]
+    fn focus_current_uses_the_exact_queue_occurrence() {
+        let duplicate = Track::stub("same", "Same");
+        let mut s = AppState {
+            pane: Pane::Queue,
+            queue: vec![duplicate.clone(), Track::stub("x", "X"), duplicate],
+            queue_current: Some(2),
+            selected: 0,
+            ..Default::default()
+        };
+
+        s.apply_input(InputAction::FocusCurrent);
+
+        assert_eq!(s.selected, 2);
+    }
+
+    #[test]
+    fn focus_current_does_nothing_on_a_non_track_pane() {
+        let mut s = AppState {
+            pane: Pane::Albums,
+            tracks: vec![Track::stub("playing", "Playing")],
+            now_playing: Some(Track::stub("playing", "Playing")),
+            selected: 4,
+            focus: Focus::Sidebar,
+            ..Default::default()
+        };
+
+        s.apply_input(InputAction::FocusCurrent);
+
+        assert_eq!(s.selected, 4);
+        assert_eq!(s.focus, Focus::Sidebar);
+    }
+
+    #[test]
+    fn editing_a_filter_keeps_the_same_playlist_track_selected() {
+        let mut s = AppState {
+            pane: Pane::Playlists,
+            focus: Focus::FilterInput,
+            open_playlist: Some(PlaylistId::from("playlist")),
+            tracks: vec![
+                Track::stub("a", "Alpha"),
+                Track::stub("b", "Blue"),
+                Track::stub("c", "Black"),
+            ],
+            filter: "B".into(),
+            selected: 1,
+            ..Default::default()
+        };
+
+        s.apply_input(InputAction::Backspace);
+
+        assert_eq!(
+            s.selected_track().map(|t| t.video_id),
+            Some(VideoId::from("c"))
+        );
+    }
+
+    #[test]
+    fn editing_a_filter_keeps_the_same_queue_entry_selected() {
+        let mut s = AppState {
+            pane: Pane::Queue,
+            focus: Focus::FilterInput,
+            queue: vec![
+                Track::stub("a", "Alpha"),
+                Track::stub("b", "Blue"),
+                Track::stub("c", "Black"),
+            ],
+            filter: "B".into(),
+            selected: 1,
+            ..Default::default()
+        };
+
+        s.apply_input(InputAction::Backspace);
+
+        assert_eq!(s.queue_index_of_selected(), Some(2));
+    }
+
+    #[test]
+    fn enter_leaves_filter_input_on_the_same_playlist_track() {
+        let mut s = AppState {
+            pane: Pane::Playlists,
+            focus: Focus::FilterInput,
+            open_playlist: Some(PlaylistId::from("playlist")),
+            tracks: vec![Track::stub("a", "Alpha"), Track::stub("b", "Blue")],
+            filter: "B".into(),
+            ..Default::default()
+        };
+
+        s.apply_input(InputAction::Confirm);
+
+        assert_eq!(s.focus, Focus::Main);
+        assert_eq!(
+            s.selected_track().map(|t| t.video_id),
+            Some(VideoId::from("b"))
+        );
+    }
+
+    #[test]
+    fn enter_leaves_filter_input_on_the_same_queue_entry() {
+        let mut s = AppState {
+            pane: Pane::Queue,
+            focus: Focus::FilterInput,
+            queue: vec![Track::stub("a", "Alpha"), Track::stub("b", "Blue")],
+            filter: "B".into(),
+            ..Default::default()
+        };
+
+        s.apply_input(InputAction::Confirm);
+
+        assert_eq!(s.focus, Focus::Main);
+        assert_eq!(s.queue_index_of_selected(), Some(1));
     }
 
     #[test]
@@ -2333,10 +2396,7 @@ mod tests {
 
     #[test]
     fn ctrl_w_deletes_a_word_in_a_playlist_name_prompt() {
-        // A prompt reports SearchInput focus, so the chords resolve there. If the
-        // reducer ignores them, Ctrl+W silently does nothing while naming a
-        // playlist — the field would accept text but not editing. Only Ctrl+W:
-        // a prompt has no caret, so the motions have nothing to move.
+        // Prompts accept Ctrl+W but have no caret for motion commands.
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let km = crate::keymap::KeyMap::default();
         let mut s = AppState {
@@ -2478,10 +2538,7 @@ mod tests {
 
     #[test]
     fn escaping_the_filter_field_keeps_the_filter_and_a_second_esc_clears_it() {
-        // Esc used to clear the filter the moment it left the field, which is
-        // what made `a` unusable: the user pressed Esc to get back to the rows
-        // they had filtered for, the rows changed under them, and the next letter
-        // went somewhere unexpected. One Esc leaves the field; a second clears.
+        // One Esc leaves filter input; a second clears the filter.
         let mut s = AppState {
             pane: Pane::Songs,
             focus: Focus::Main,

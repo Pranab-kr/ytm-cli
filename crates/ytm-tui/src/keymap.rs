@@ -10,12 +10,7 @@ pub struct KeyMap {
     chars: HashMap<char, InputAction>,
 }
 
-/// Multi-key chords in progress.
-///
-/// `zz` is the only one, but it cannot be a plain char binding: `z` alone must
-/// do nothing and wait. Kept beside the keymap rather than inside it so
-/// `resolve` stays a pure function of (key, focus) — the pending prefix is
-/// session state, not configuration.
+/// Multi-key chord state, kept outside the configured keymap.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Pending {
     #[default]
@@ -51,6 +46,7 @@ impl Default for KeyMap {
             ('m', InputAction::ToggleMute),
             ('s', InputAction::ToggleShuffle),
             ('r', InputAction::CycleRepeat),
+            ('c', InputAction::FocusCurrent),
             ('a', InputAction::AddToQueue),
             ('A', InputAction::AddToPlaylist),
             ('N', InputAction::CreatePlaylist),
@@ -74,10 +70,7 @@ impl Default for KeyMap {
 }
 
 impl KeyMap {
-    /// Resolve a key that may be part of a multi-key chord.
-    ///
-    /// Returns the action and the new pending state. Only navigation focus takes
-    /// chords: in a text field `z` is a letter.
+    /// Resolve a chord; text fields treat `z` as text rather than a prefix.
     pub fn resolve_chord(
         &self,
         key: KeyEvent,
@@ -165,10 +158,7 @@ impl KeyMap {
         }
 
         match key.code {
-            // 1-7 jump to a source, checked before the char table so a digit
-            // cannot be rebound to something else by accident. Only the digits
-            // that name a source are bound; 8-9 and 0 fall through to `None`
-            // rather than being swallowed.
+            // Source digits are fixed; 8-9 and 0 remain unbound.
             KeyCode::Char(c @ '1'..='7') => Some(InputAction::GoTo(c as u8 - b'0')),
             KeyCode::Char(c) => self.chars.get(&c).cloned(),
             KeyCode::Down => Some(InputAction::Down),
@@ -262,6 +252,7 @@ const ACTION_NAMES: &[&str] = &[
     "refresh",
     "open_filter",
     "center_on_cursor",
+    "focus_current",
     "page_down",
     "page_up",
 ];
@@ -303,6 +294,7 @@ fn action_from_name(n: &str) -> Option<InputAction> {
         "refresh" => InputAction::Refresh,
         "open_filter" => InputAction::OpenFilter,
         "center_on_cursor" => InputAction::CenterOnCursor,
+        "focus_current" => InputAction::FocusCurrent,
         "page_down" => InputAction::PageDown,
         "page_up" => InputAction::PageUp,
         "home" => InputAction::Home,
@@ -359,6 +351,15 @@ mod tests {
         assert_eq!(
             m.resolve(key('r'), Focus::Main),
             Some(InputAction::CycleRepeat)
+        );
+    }
+
+    #[test]
+    fn c_focuses_the_current_song() {
+        let m = KeyMap::default();
+        assert_eq!(
+            m.resolve(key('c'), Focus::Main),
+            Some(InputAction::FocusCurrent)
         );
     }
 

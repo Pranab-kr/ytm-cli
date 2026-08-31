@@ -38,6 +38,8 @@ pub enum InputAction {
     ScrollDown,
     /// Centre the selected row in the viewport (`zz`, from vim).
     CenterOnCursor,
+    /// Select and reveal the currently playing row.
+    FocusCurrent,
     OpenQueue,
     OpenHelp,
     AddToQueue,

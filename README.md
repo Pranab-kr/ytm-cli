@@ -220,7 +220,7 @@ you save and exit — no restart.
 | `behaviour.seek_step_secs` | How far `f`/`b` jump |
 | `behaviour.volume_step` | How much `+`/`-` move |
 | `behaviour.confirm_on_quit` | Ask before quitting |
-| `[keys]` | Rebind any of 39 actions to a single character |
+| `[keys]` | Rebind any of 40 actions to a single character |
 
 Rebinding looks like this — uncomment and change:
 
@@ -342,6 +342,7 @@ Press `?` in the app for the live list, which reflects your rebinds. Defaults:
 | `Ctrl+d` / `Ctrl+u` | half page down / up |
 | `PageDown` / `PageUp` | half page down / up |
 | `zz` | centre the selected row |
+| `c` | focus and centre the currently playing song |
 | scroll wheel | scroll the focused list |
 | left click | select a row, or switch source in the sidebar |
 | right click | add the row under the pointer to the queue |
@@ -396,8 +397,8 @@ server, and `S` searches YouTube Music.
 |---|---|
 | `/` | filter the current list (title, artist, album) |
 | `S` | search YouTube Music — in the Artists pane, searches artists |
-| `Esc` | in a filter, abandon it and restore the full list |
-| `Enter` | in a filter, keep it and move to the rows |
+| `Esc` | leave filter input; press again to clear the filter |
+| `Enter` | keep the filter and selected song, then move to the rows |
 | `Ctrl+w` | delete the previous word |
 | `Ctrl+←` / `Ctrl+→` | move a word at a time |
 | `Ctrl+a` / `Ctrl+e` | start / end of line |

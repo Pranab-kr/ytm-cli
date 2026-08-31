@@ -101,6 +101,7 @@ confirm_on_quit = false
 # clear_queue = "C"
 # refresh = "L"
 # center_on_cursor = "z" # `zz` centres the selected row (press twice)
+# focus_current = "c"     # select and reveal the playing song
 # page_down = "d"        # also Ctrl+D / PageDown
 # page_up = "u"          # also Ctrl+U / PageUp
 # cycle_theme = "t"
