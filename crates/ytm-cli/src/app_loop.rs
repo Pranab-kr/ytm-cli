@@ -582,6 +582,7 @@ pub async fn run(
     theme: Theme,
     tick_ms: u64,
     cookie_auth: bool,
+    cache: Option<ytm_core::cache::Cache>,
 ) -> color_eyre::Result<()> {
     use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind};
     use futures::StreamExt;
@@ -593,7 +594,9 @@ pub async fn run(
     let started = std::time::Instant::now();
     let mut debounce = SearchDebounce::default();
 
-    // Paint immediately, then load — NFR-1 depends on not awaiting first.
+    // `main` has already drawn the cached frame — building the source needs a
+    // network round trip, and NFR-1 will not survive doing that first. Redrawing
+    // here is cheap and keeps `run` correct when called with a cold cache.
     terminal.draw(|f| ytm_tui::render::render(f, &state, &theme, &keymap))?;
     state.loading = true;
     spawn_task(Task::LoadPlaylists, source.clone(), app_tx.clone());
@@ -628,6 +631,9 @@ pub async fn run(
             Some(ae) = app_rx.recv() => {
                 if let Some(hint) = empty_library_hint(cookie_auth, &ae) {
                     state.push_toast(ToastKind::Info, &hint, state.elapsed_ms);
+                }
+                if let Some(c) = cache.as_ref() {
+                    cache_write_through(c, &ae);
                 }
                 state.apply(ae);
             }
@@ -750,6 +756,51 @@ pub fn empty_library_hint(cookie_auth: bool, ev: &AppEvent) -> Option<String> {
     empty.then(|| {
         "library came back empty — if that is wrong, the cookie expired; re-export it".to_owned()
     })
+}
+
+/// Fill state from the cache before the first frame (NFR-1).
+///
+/// A cache read is a local SQLite query, so it is cheap enough to do before the
+/// draw; the network refresh follows and overwrites. Failures are logged and
+/// ignored — the cache is disposable, and a bad one must never block startup.
+pub fn preload_from_cache(cache: &ytm_core::cache::Cache, state: &mut AppState) {
+    match cache.load_playlists() {
+        Ok(v) if !v.is_empty() => state.playlists = v,
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "could not read cached playlists"),
+    }
+    match cache.load_library_songs() {
+        Ok(v) if !v.is_empty() => state.tracks = v,
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "could not read cached songs"),
+    }
+}
+
+/// Persist a fresh library response so the next cold start has content.
+///
+/// Two deliberate exclusions:
+/// - **An empty library list is not written.** Under cookie auth an expired
+///   cookie answers HTTP 200 with zero rows, and writing that through would turn
+///   a one-off auth lapse into a wiped cache — the next launch would come up
+///   blank. An account that really is empty just keeps a stale cache, which is
+///   the cheaper mistake.
+/// - **Search results are not cached.** They belong to a query, not to the
+///   library, and the schema has no place to key them.
+///
+/// Albums and artists have no tables (the schema caches playlists and tracks),
+/// so they pass through untouched.
+fn cache_write_through(cache: &ytm_core::cache::Cache, ev: &AppEvent) {
+    let result = match ev {
+        AppEvent::PlaylistsLoaded(v) if !v.is_empty() => cache.save_playlists(v),
+        AppEvent::LibrarySongsLoaded(v) if !v.is_empty() => cache.save_library_songs(v),
+        // A playlist genuinely can be empty, and its rows are keyed by id, so
+        // there is no wipe-the-library risk in writing that through.
+        AppEvent::PlaylistTracksLoaded { id, tracks } => cache.save_playlist_tracks(id, tracks),
+        _ => return,
+    };
+    if let Err(e) = result {
+        tracing::warn!(error = %e, event = event_name(ev), "could not write to the cache");
+    }
 }
 
 /// Mark the spinner before handing work off, so FR-U4 holds for the whole
@@ -1661,5 +1712,87 @@ mod tests {
         dispatch_input(InputAction::Down, &mut s, &src, &*player);
         assert!(player.commands().is_empty());
         assert_eq!(s.selected, 1, "state handles navigation");
+    }
+
+    #[test]
+    fn a_warm_cache_fills_state_before_any_network_call() {
+        // NFR-1: the first frame must have content without awaiting the network.
+        let cache = ytm_core::cache::Cache::open_in_memory().unwrap();
+        cache
+            .save_playlists(&[ytm_core::Playlist::stub("p1", "Focus")])
+            .unwrap();
+        cache
+            .save_library_songs(&[ytm_core::Track::stub("v1", "Song")])
+            .unwrap();
+        let mut s = AppState::default();
+        preload_from_cache(&cache, &mut s);
+        assert_eq!(s.playlists.len(), 1);
+        assert_eq!(s.playlists[0].title, "Focus");
+        assert_eq!(s.tracks.len(), 1);
+    }
+
+    #[test]
+    fn a_cold_cache_leaves_state_untouched_and_does_not_fail() {
+        let cache = ytm_core::cache::Cache::open_in_memory().unwrap();
+        let mut s = AppState::default();
+        preload_from_cache(&cache, &mut s);
+        assert!(s.playlists.is_empty());
+        assert!(s.tracks.is_empty());
+    }
+
+    #[test]
+    fn a_playlists_event_is_written_through_to_the_cache() {
+        let cache = ytm_core::cache::Cache::open_in_memory().unwrap();
+        cache_write_through(
+            &cache,
+            &AppEvent::PlaylistsLoaded(vec![ytm_core::Playlist::stub("p1", "Focus")]),
+        );
+        assert_eq!(cache.load_playlists().unwrap()[0].title, "Focus");
+    }
+
+    #[test]
+    fn playlist_tracks_are_written_through_under_their_playlist_id() {
+        let cache = ytm_core::cache::Cache::open_in_memory().unwrap();
+        let id = ytm_core::PlaylistId::from("p1");
+        cache_write_through(
+            &cache,
+            &AppEvent::PlaylistTracksLoaded {
+                id: id.clone(),
+                tracks: vec![ytm_core::Track::stub("v1", "First")],
+            },
+        );
+        assert_eq!(cache.load_playlist_tracks(&id).unwrap()[0].title, "First");
+        assert!(
+            cache.load_library_songs().unwrap().is_empty(),
+            "playlist rows must not leak into the library songs"
+        );
+    }
+
+    #[test]
+    fn an_empty_library_response_does_not_wipe_a_good_cache() {
+        // An expired cookie answers HTTP 200 with zero rows. Writing that
+        // through would turn a one-off auth lapse into a lost cache, so the
+        // next cold start would have nothing to show.
+        let cache = ytm_core::cache::Cache::open_in_memory().unwrap();
+        cache
+            .save_playlists(&[ytm_core::Playlist::stub("p1", "Focus")])
+            .unwrap();
+        cache_write_through(&cache, &AppEvent::PlaylistsLoaded(vec![]));
+        assert_eq!(cache.load_playlists().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn search_results_are_not_cached() {
+        // Search is not library state; caching it would show stale matches for
+        // a query the user has not typed yet.
+        let cache = ytm_core::cache::Cache::open_in_memory().unwrap();
+        cache_write_through(
+            &cache,
+            &AppEvent::SearchResults {
+                query: "q".into(),
+                tracks: vec![ytm_core::Track::stub("v1", "Hit")],
+            },
+        );
+        assert!(cache.load_library_songs().unwrap().is_empty());
     }
 }

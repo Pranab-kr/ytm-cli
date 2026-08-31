@@ -141,31 +141,70 @@ async fn main() -> color_eyre::Result<()> {
         "config loaded"
     );
 
+    // Opened before the source so the first frame can be drawn from it. A
+    // corrupt file rebuilds itself; an unopenable one degrades to no cache
+    // rather than blocking startup, because none of this is authoritative data.
+    let cache_path = config::paths::cache_dir().join("cache.db");
+    let cache = match ytm_core::cache::Cache::open(&cache_path) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!(error = %e, path = %cache_path.display(), "running without a cache");
+            None
+        }
+    };
+
     let volume = cfg.playback.volume.min(100) as u8;
-    let source = build_source(&cfg).await?;
     let theme = build_theme(&cfg)?;
 
     // Fails cleanly here rather than mid-frame if libmpv is missing.
     let (player, player_events) = ytm_player::actor::spawn_player(volume)?;
 
-    let state = AppState {
+    let mut state = AppState {
         volume,
         shuffle: cfg.playback.shuffle,
         ..Default::default()
     };
+    if let Some(c) = cache.as_ref() {
+        app_loop::preload_from_cache(c, &mut state);
+    }
 
     install_panic_hook();
     let mut guard = TerminalGuard::new()?;
+
+    // The cached frame goes up before anything touches the network (NFR-1).
+    // `build_source` is an `.await` on a cookie-validation round trip — running
+    // it first put a blank terminal on screen for ~2.4s. Keys typed during the
+    // wait are buffered by the terminal and handled once the loop starts.
+    let keymap = KeyMap::default();
+    guard
+        .terminal
+        .draw(|f| ytm_tui::render::render(f, &state, &theme, &keymap))?;
+    tracing::info!(
+        cached_playlists = state.playlists.len(),
+        cached_tracks = state.tracks.len(),
+        "first frame drawn"
+    );
+
+    let source = match build_source(&cfg).await {
+        Ok(s) => s,
+        Err(e) => {
+            // The terminal is already in the alternate screen, so restore it
+            // before the report goes out or the error lands where it cannot be read.
+            drop(guard);
+            return Err(e);
+        }
+    };
     let result = app_loop::run(
         &mut guard.terminal,
         state,
         source,
         player,
         player_events,
-        KeyMap::default(),
+        keymap,
         theme,
         cfg.ui.tick_ms,
         cfg.auth.kind == config::AuthKind::Cookie,
+        cache,
     )
     .await;
 

@@ -27,7 +27,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .find(|p| p.title == target)
         .ok_or_else(|| format!("no playlist titled {target:?}"))?;
     println!("target: {:?} id={}", p.title, p.id.as_str());
-    println!("  browse_form={}  mutation_form={}", p.id.browse_form(), p.id.mutation_form());
+    println!(
+        "  browse_form={}  mutation_form={}",
+        p.id.browse_form(),
+        p.id.mutation_form()
+    );
 
     let probe = format!("{target}-verify");
     println!("renaming -> {probe:?}");
