@@ -89,6 +89,11 @@ pub enum AppEvent {
         id: PlaylistId,
         tracks: Vec<Track>,
     },
+    /// Artists found by searching, replacing the library list (FR-B7).
+    ArtistSearchResults {
+        query: String,
+        artists: Vec<Artist>,
+    },
     /// The home feed's shelves (FR-B6).
     HomeLoaded(Vec<ytm_core::HomeShelf>),
     /// An artist's top tracks, with the name for the heading (FR-B7).

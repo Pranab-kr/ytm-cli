@@ -158,6 +158,14 @@ pub struct AppState {
     /// Search pane's server-side query. Empty means no filter.
     pub filter: String,
 
+    /// True while the Artists pane's own search field is showing results.
+    ///
+    /// The library list only holds artists you follow, so there was no way to
+    /// reach anyone else. `S` in that pane searches YouTube Music and puts the
+    /// results in the same list; this flag is what the heading and the "back to
+    /// your library" path key off.
+    pub artist_search_active: bool,
+
     pub search_query: String,
     /// Byte offset of the caret within `search_query`. Bytes, not chars, so it
     /// can index the string directly — always kept on a char boundary.
@@ -216,6 +224,16 @@ impl AppState {
             AppEvent::ArtistsLoaded(v) => {
                 self.artists = v;
                 self.loading = false;
+            }
+            AppEvent::ArtistSearchResults { query, artists } => {
+                // Ignore results for a query the user has already moved past —
+                // the same rule the song search follows.
+                if query == self.search_query {
+                    self.artists = artists;
+                    self.selected = 0;
+                    self.scroll_offset = 0;
+                    self.loading = false;
+                }
             }
             AppEvent::HomeLoaded(shelves) => {
                 self.set_home_shelves(shelves);
@@ -481,6 +499,16 @@ impl AppState {
             InputAction::ToggleVisual => self.toggle_visual(),
             InputAction::OpenHelp => self.modal = Some(Modal::Help),
             InputAction::OpenSearch => {
+                // In the Artists pane, `S` searches *artists* and keeps the
+                // results in that pane — the library list holds only the artists
+                // you follow, so without this there is no way to reach any other.
+                if self.pane == Pane::Artists {
+                    self.close_open_artist();
+                    self.artist_search_active = true;
+                    self.focus = Focus::SearchInput;
+                    self.search_cursor = self.search_query.len();
+                    return;
+                }
                 self.set_pane(Pane::Search);
                 self.focus = Focus::SearchInput;
                 // Reopening lands the caret after whatever query is still there.
@@ -506,7 +534,10 @@ impl AppState {
                 // An open playlist or an open artist is a level to leave. Without
                 // the artist branch `h` focused the sidebar while the artist's
                 // tracks stayed on screen, so there was no way back to the list.
-                if self.close_open_playlist() || self.close_open_artist() {
+                if self.close_open_playlist()
+                    || self.close_open_artist()
+                    || self.close_artist_search()
+                {
                     // Stay in the list: the user is navigating it, not leaving it.
                 } else {
                     self.focus = Focus::Sidebar;
@@ -673,6 +704,24 @@ impl AppState {
     /// Clears the tracks with the id for the same reason `close_open_playlist`
     /// does: rows left behind would make `list_len` and `selected_track`
     /// disagree with the screen.
+    /// Leave artist search, so the next load restores the followed artists.
+    ///
+    /// Returns false when no search was active, letting `h` fall through to its
+    /// other meanings rather than swallowing the key.
+    pub fn close_artist_search(&mut self) -> bool {
+        if !self.artist_search_active {
+            return false;
+        }
+        self.artist_search_active = false;
+        self.artists.clear();
+        self.search_query.clear();
+        self.search_cursor = 0;
+        self.selected = 0;
+        self.scroll_offset = 0;
+        self.focus = Focus::Main;
+        true
+    }
+
     pub fn close_open_artist(&mut self) -> bool {
         if self.pane != Pane::Artists || self.open_artist.is_none() {
             return false;

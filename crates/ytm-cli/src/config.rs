@@ -101,6 +101,46 @@ pub struct UiConfig {
     pub theme_file: Option<PathBuf>,
     /// `"auto"`, or the name of a built-in theme.
     pub theme: ThemeChoice,
+    /// Which source the app opens on. Defaults to Playlists — your own
+    /// playlists are what most sessions start from, and Home costs a
+    /// multi-page fetch before the first useful frame.
+    pub start_pane: StartPane,
+    /// Scroll wheel and click support.
+    pub mouse: bool,
+}
+
+/// The source the app opens on (`ui.start_pane`).
+///
+/// A small enum rather than a free string so a typo is a load error the user
+/// sees, not a silent fallback to some default they did not choose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartPane {
+    Home,
+    #[default]
+    Playlists,
+    /// The liked/saved songs. Named `fav` in config to match the sidebar label.
+    #[serde(alias = "songs")]
+    Fav,
+    Albums,
+    Artists,
+    Search,
+    Queue,
+}
+
+impl StartPane {
+    pub fn pane(self) -> ytm_tui::app::Pane {
+        use ytm_tui::app::Pane;
+        match self {
+            Self::Home => Pane::Home,
+            Self::Playlists => Pane::Playlists,
+            Self::Fav => Pane::Songs,
+            Self::Albums => Pane::Albums,
+            Self::Artists => Pane::Artists,
+            Self::Search => Pane::Search,
+            Self::Queue => Pane::Queue,
+        }
+    }
 }
 
 impl Default for UiConfig {
@@ -112,6 +152,8 @@ impl Default for UiConfig {
             album_art: true,
             theme_file: None,
             theme: ThemeChoice::Auto,
+            start_pane: StartPane::default(),
+            mouse: true,
         }
     }
 }

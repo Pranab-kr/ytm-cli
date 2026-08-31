@@ -29,7 +29,12 @@ shuffle = false    # start shuffled
 
 [ui]
 vim_keys = true    # h/j/k/l navigation alongside the arrow keys
-mouse = true       # scroll wheel scrolls the focused list
+mouse = true       # scroll wheel scrolls; left click selects, right click queues
+
+# Which source the app opens on: "playlists" (default), "home", "fav",
+# "albums", "artists", "search", or "queue". "home" fetches several pages of
+# recommendations, so it costs a moment more before the first useful frame.
+start_pane = "playlists"
 tick_ms = 250      # redraw interval; lower is smoother and busier
 album_art = true   # art in graphics-capable terminals (kitty, iTerm2, sixel)
 
@@ -61,7 +66,7 @@ confirm_on_quit = false
 # end = "G"
 # quit = "q"
 # open_help = "?"
-# open_search = "S"      # search YouTube Music (asks the server)
+# open_search = "S"      # search YouTube Music (in Artists, searches artists)
 # open_filter = "/"      # filter the rows already on screen
 # open_queue = "u"
 # toggle_pause = " "
@@ -103,3 +108,5 @@ confirm_on_quit = false
 #   ^left/right  move a word, in a text field
 #   ^a / ^e      start / end of line, in a text field
 #   wheel        scroll the focused list
+#   left click   select a row, or switch source in the sidebar
+#   right click  add the row under the pointer to the queue

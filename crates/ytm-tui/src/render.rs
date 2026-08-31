@@ -18,7 +18,7 @@ use ratatui::{
 };
 
 /// Spec §6: sidebar ~22 columns, now-playing bar 3 rows.
-const SIDEBAR_WIDTH: u16 = 22;
+pub const SIDEBAR_WIDTH: u16 = 22;
 const NOWPLAYING_HEIGHT: u16 = 3;
 /// Columns the art panel takes when it appears.
 const ART_WIDTH: u16 = 24;
@@ -36,6 +36,64 @@ const MAIN_MIN_WIDTH: u16 = 48;
 /// cannot write it back, so the loop sets it from the frame size before each
 /// draw. Kept here beside the layout constants it derives from — a copy in the
 /// loop would drift the moment the chrome changed.
+/// What sits under a mouse click.
+///
+/// Hit-testing lives here because it has to derive from the same layout
+/// constants `render` uses — computed anywhere else it would drift the moment
+/// the chrome changed, and a click would select a different row than the one
+/// under the pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClickTarget {
+    /// The nth sidebar source.
+    Source(usize),
+    /// The nth row of the list, counting from the top of the visible window.
+    Row(usize),
+    /// Chrome: the heading, the now-playing bar, the rule.
+    Nothing,
+}
+
+/// Resolve a click at `(col, row)` in a terminal of size `area`.
+pub fn click_target(
+    area: Rect,
+    col: u16,
+    row: u16,
+    pane: Pane,
+    has_search_input: bool,
+) -> ClickTarget {
+    // The now-playing bar is not clickable; neither is anything below the frame.
+    let body_height = area.height.saturating_sub(NOWPLAYING_HEIGHT);
+    if row >= body_height {
+        return ClickTarget::Nothing;
+    }
+    if col < SIDEBAR_WIDTH {
+        return ClickTarget::Source(row as usize);
+    }
+    // The rule column between sidebar and list.
+    if col == SIDEBAR_WIDTH {
+        return ClickTarget::Nothing;
+    }
+    let top = list_top_for(pane, has_search_input);
+    match row.checked_sub(top) {
+        Some(offset) => ClickTarget::Row(offset as usize),
+        // The heading row.
+        None => ClickTarget::Nothing,
+    }
+}
+
+/// Screen row the list's first entry is drawn on.
+///
+/// The click handler needs it to turn a mouse position into a row index, and it
+/// has to be derived from the same constants the layout uses or a click lands on
+/// a different row than the one under the pointer.
+pub fn list_top_for(pane: Pane, has_search_input: bool) -> u16 {
+    // Row 0 is the pane heading; the search pane spends row 1 on its query line.
+    if pane == Pane::Search && has_search_input {
+        2
+    } else {
+        1
+    }
+}
+
 pub fn list_rows_for(area: Rect, pane: Pane, has_search_input: bool) -> usize {
     // Now-playing bar, then the pane heading inside the main area.
     let body = area.height.saturating_sub(NOWPLAYING_HEIGHT);
@@ -433,5 +491,70 @@ mod tests {
         let area = Rect::new(0, 0, 80, 2);
         assert_eq!(list_rows_for(area, Pane::Songs, false), 0);
         assert_eq!(list_rows_for(Rect::new(0, 0, 80, 0), Pane::Songs, false), 0);
+    }
+
+    #[test]
+    fn the_list_starts_below_the_heading() {
+        // A click handler that assumed row 0 would select one row too high in
+        // every pane, and two too high in Search.
+        assert_eq!(list_top_for(Pane::Songs, false), 1);
+        assert_eq!(list_top_for(Pane::Search, true), 2);
+    }
+
+    #[test]
+    fn a_click_in_the_sidebar_names_its_source() {
+        let area = Rect::new(0, 0, 80, 24);
+        assert_eq!(
+            click_target(area, 3, 0, Pane::Songs, false),
+            ClickTarget::Source(0)
+        );
+        assert_eq!(
+            click_target(area, 3, 4, Pane::Songs, false),
+            ClickTarget::Source(4)
+        );
+    }
+
+    #[test]
+    fn a_click_in_the_list_names_a_row_offset_not_a_screen_row() {
+        // Row 0 of the main area is the heading, so the first list row is screen
+        // row 1. Off by one here selects the wrong track on every click.
+        let area = Rect::new(0, 0, 80, 24);
+        assert_eq!(
+            click_target(area, 40, 1, Pane::Songs, false),
+            ClickTarget::Row(0)
+        );
+        assert_eq!(
+            click_target(area, 40, 5, Pane::Songs, false),
+            ClickTarget::Row(4)
+        );
+        // Search spends another row on the query line.
+        assert_eq!(
+            click_target(area, 40, 2, Pane::Search, true),
+            ClickTarget::Row(0)
+        );
+    }
+
+    #[test]
+    fn clicks_on_chrome_select_nothing() {
+        let area = Rect::new(0, 0, 80, 24);
+        // The pane heading.
+        assert_eq!(
+            click_target(area, 40, 0, Pane::Songs, false),
+            ClickTarget::Nothing
+        );
+        // The rule between sidebar and list.
+        assert_eq!(
+            click_target(area, SIDEBAR_WIDTH, 3, Pane::Songs, false),
+            ClickTarget::Nothing
+        );
+        // The now-playing bar, and anything past the frame.
+        assert_eq!(
+            click_target(area, 40, 21, Pane::Songs, false),
+            ClickTarget::Nothing
+        );
+        assert_eq!(
+            click_target(area, 40, 200, Pane::Songs, false),
+            ClickTarget::Nothing
+        );
     }
 }

@@ -409,6 +409,14 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
     let mut state = AppState {
         volume,
         shuffle: cfg.playback.shuffle,
+        // Playlists by default rather than Home: your own playlists are what
+        // most sessions start from, and Home costs a multi-page fetch before the
+        // first useful frame. `ui.start_pane` changes it.
+        pane: cfg.ui.start_pane.pane(),
+        sidebar_selected: ytm_tui::app::PANE_ORDER
+            .iter()
+            .position(|p| *p == cfg.ui.start_pane.pane())
+            .unwrap_or(0),
         ..Default::default()
     };
     if let Some(c) = cache.as_ref() {

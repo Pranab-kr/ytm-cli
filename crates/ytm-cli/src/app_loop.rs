@@ -146,6 +146,10 @@ pub enum Task {
         name: String,
     },
     Search(String),
+    /// Artists matching a query (FR-B7). The Artists pane's own search, kept
+    /// separate from `Search` so its results replace the artist list rather than
+    /// the song results.
+    SearchArtists(String),
     /// A server-side edit, carrying the token of the optimistic change it
     /// settles. Same spawn path as a read so the loop keeps one.
     Mutate {
@@ -749,6 +753,55 @@ pub fn dispatch_input(
     None
 }
 
+/// Move the selection to whatever was clicked, returning a fetch if the click
+/// changed pane.
+///
+/// Selection only: clicking never plays. A misplaced click that starts audio is
+/// a worse failure than one that costs a keypress, and Enter or `a` is one key
+/// away once the row is selected.
+fn handle_click(
+    col: u16,
+    row: u16,
+    area: ratatui::layout::Rect,
+    state: &mut AppState,
+) -> Option<Task> {
+    use ytm_tui::render::{ClickTarget, click_target};
+
+    let typing = state.focus == ytm_tui::app::Focus::SearchInput;
+    match click_target(
+        area,
+        col,
+        row,
+        state.pane,
+        typing || !state.search_query.is_empty(),
+    ) {
+        ClickTarget::Source(i) => {
+            // The sidebar draws PANE_ORDER from its first row, so the index maps
+            // straight onto a source. Out of range is a click below the last
+            // entry: ignored rather than clamped to whatever sits at the end.
+            let n = u8::try_from(i + 1).ok()?;
+            if usize::from(n) > ytm_tui::app::PANE_ORDER.len() {
+                return None;
+            }
+            state.apply(AppEvent::Input(InputAction::GoTo(n)));
+            pane_task(state.pane)
+        }
+        ClickTarget::Row(offset) => {
+            // The offset is from the top of the *visible window*, so the scroll
+            // position has to be added back or every click after scrolling would
+            // select a row near the top of the list.
+            let idx = state.scroll_offset + offset;
+            if idx < state.list_len() {
+                state.selected = idx;
+                state.focus = ytm_tui::app::Focus::Main;
+                state.refresh_visual_marks();
+            }
+            None
+        }
+        ClickTarget::Nothing => None,
+    }
+}
+
 /// The fetch a pane needs to fill itself, or `None` when it has nothing to load.
 ///
 /// Queue is local state owned by the actor, and Search waits for a query — a
@@ -771,7 +824,9 @@ fn pane_task(pane: Pane) -> Option<Task> {
 /// Keystrokes outside the search pane are ignored — nothing else edits the
 /// query, and noting them would schedule a search the user never asked for.
 pub fn note_search_input(d: &mut SearchDebounce, state: &AppState, now_ms: u64) {
-    if state.pane == Pane::Search {
+    // The Artists pane has its own search field, so typing there must debounce
+    // too — otherwise the query built up and nothing was ever sent.
+    if state.pane == Pane::Search || (state.pane == Pane::Artists && state.artist_search_active) {
         d.note_input(&state.search_query, now_ms);
     }
 }
@@ -779,7 +834,15 @@ pub fn note_search_input(d: &mut SearchDebounce, state: &AppState, now_ms: u64) 
 /// Call on every tick. Returns a search to run once typing has settled.
 pub fn search_tick(d: &mut SearchDebounce, state: &mut AppState, now_ms: u64) -> Option<Task> {
     let q = d.should_fire(now_ms)?;
-    start(state, Task::Search(q))
+    // Which search fired depends on where the field is: the Artists pane's own
+    // field looks for artists, and sending its query to `search_songs` would
+    // fill the artist list with tracks.
+    let task = if state.pane == Pane::Artists && state.artist_search_active {
+        Task::SearchArtists(q)
+    } else {
+        Task::Search(q)
+    };
+    start(state, task)
 }
 
 /// A dropped command means the actor thread is gone. There is nothing useful to
@@ -832,8 +895,13 @@ pub async fn run(
     // network round trip, and NFR-1 will not survive doing that first. Redrawing
     // here is cheap and keeps `run` correct when called with a cold cache.
     terminal.draw(|f| ytm_tui::render::render(f, &state, &theme, &keymap, &mut art))?;
-    state.loading = true;
-    spawn_task(Task::LoadPlaylists, source.clone(), app_tx.clone());
+    // The fetch the *starting* pane needs, not always playlists: with
+    // `ui.start_pane` set to anything else, loading playlists left the visible
+    // pane empty until the user pressed a key.
+    if let Some(task) = pane_task(state.pane) {
+        state.loading = true;
+        spawn_task(task, source.clone(), app_tx.clone());
+    }
 
     loop {
         tokio::select! {
@@ -844,13 +912,49 @@ pub async fn run(
                     // bound on purpose — capturing them would cost the user the
                     // terminal's own text selection.
                     CtEvent::Mouse(m) => {
-                        let scroll = match m.kind {
-                            MouseEventKind::ScrollDown => Some(InputAction::ScrollDown),
-                            MouseEventKind::ScrollUp => Some(InputAction::ScrollUp),
-                            _ => None,
-                        };
-                        if let Some(a) = scroll {
-                            state.apply(AppEvent::Input(a));
+                        use crossterm::event::MouseButton;
+                        match m.kind {
+                            MouseEventKind::ScrollDown => {
+                                state.apply(AppEvent::Input(InputAction::ScrollDown));
+                            }
+                            MouseEventKind::ScrollUp => {
+                                state.apply(AppEvent::Input(InputAction::ScrollUp));
+                            }
+                            // Left click selects: a sidebar entry switches source,
+                            // a list row moves the cursor there. Deliberately does
+                            // not play — a stray click starting audio is worse than
+                            // one that costs a keypress, and `a`/Enter are one key
+                            // away once the row is selected.
+                            MouseEventKind::Down(MouseButton::Left) if state.modal.is_none() => {
+                                if let Some(task) = handle_click(
+                                    m.column,
+                                    m.row,
+                                    terminal.size()?.into(),
+                                    &mut state,
+                                )
+                                    && let Some(t) = start(&mut state, task)
+                                {
+                                    spawn_task(t, source.clone(), app_tx.clone());
+                                }
+                            }
+                            // Right click queues the row under the pointer, which is
+                            // the one action worth a mouse shortcut.
+                            MouseEventKind::Down(MouseButton::Right) if state.modal.is_none() => {
+                                if handle_click(
+                                    m.column,
+                                    m.row,
+                                    terminal.size()?.into(),
+                                    &mut state,
+                                )
+                                .is_none()
+                                    && let Some(t) = state.selected_track()
+                                {
+                                    let msg = enqueue_message(std::slice::from_ref(&t), false);
+                                    send(&player, PlayerCommand::EnqueueBack(vec![t]));
+                                    state.push_toast(ToastKind::Success, &msg, state.elapsed_ms);
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     CtEvent::Key(k) if k.kind == KeyEventKind::Press => {
@@ -1028,6 +1132,10 @@ fn spawn_task(task: Task, source: Arc<dyn MusicSource>, tx: mpsc::UnboundedSende
                 Ok(tracks) => AppEvent::SearchResults { query: q, tracks },
                 Err(e) => AppEvent::Error(e.to_string()),
             },
+            Task::SearchArtists(q) => match source.search_artists(q.clone()).await {
+                Ok(artists) => AppEvent::ArtistSearchResults { query: q, artists },
+                Err(e) => AppEvent::Error(e.to_string()),
+            },
             // Failures come back as MutationFailed, not Error: the token has to
             // survive so `rollback` reverts the right edit.
             Task::Mutate { token, task } => run_mutation(token, task, source.clone()).await,
@@ -1060,6 +1168,7 @@ fn event_name(ev: &AppEvent) -> &'static str {
         // entry is the one you most want to identify in a log.
         AppEvent::HomeLoaded(_) => "home",
         AppEvent::ArtistTracksLoaded { .. } => "artist_tracks",
+        AppEvent::ArtistSearchResults { .. } => "artist_search",
         _ => "other",
     }
 }
@@ -1076,6 +1185,7 @@ fn event_rows(ev: &AppEvent) -> usize {
         // multi-page walk actually reached page 2.
         AppEvent::HomeLoaded(v) => v.len(),
         AppEvent::ArtistTracksLoaded { tracks, .. } => tracks.len(),
+        AppEvent::ArtistSearchResults { artists, .. } => artists.len(),
         _ => 0,
     }
 }
