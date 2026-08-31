@@ -13,15 +13,23 @@
 # Keybindings and the theme reload when you save and exit — no restart.
 
 [auth]
-# "oauth" or "cookie". Cookie auth is the working path today; see the README.
-kind = "oauth"
+# Browser cookies are the only auth path. (The OAuth device flow was removed:
+# Google stopped honouring device-flow tokens on the endpoints this app uses, so
+# it could never reach your library.)
+kind = "cookie"
 
-# OAuth device-flow client, from Google Cloud Console. Not secret for this flow.
-# client_id = "…apps.googleusercontent.com"
-# client_secret = "…"
-
-# Cookie auth: a file holding the raw `Cookie:` request header value.
-# cookie_file = "~/.config/ytm-cli/cookies.txt"
+# A file holding the raw `Cookie:` request header value from a signed-in
+# music.youtube.com request — one line, and it must contain `SAPISID=`. This is
+# NOT Netscape cookies.txt format; the contents are sent verbatim as the header.
+#
+# Export it from a PRIVATE / INCOGNITO window: a normal session rotates its
+# cookies and the export stops working within hours. Full steps, including the
+# two easy-to-miss ones (Shift+click reload, and close the window WITHOUT
+# signing out), are in the README's "Authentication" section.
+#
+# The same file is used for playback — yt-dlp needs cookies too, and the app
+# converts the header into the format it wants automatically.
+cookie_file = "~/.config/ytm-cli/cookies.txt"
 
 [playback]
 volume = 70        # 0-100, remembered across runs

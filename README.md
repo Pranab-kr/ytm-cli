@@ -54,11 +54,35 @@ leaves your machine. Use it knowing that, or don't use it.
 
 ## Requirements
 
-| What | Version verified | Install |
+| What | Version verified | Why |
 |---|---|---|
-| Rust | 1.96+ (tested 1.96.1) | [rustup](https://rustup.rs) |
-| libmpv | 2.5.0 | Arch `mpv` · Debian/Ubuntu `libmpv-dev` · macOS `brew install mpv` |
-| yt-dlp | 2026.08.19 | Arch `yt-dlp` · `pipx install yt-dlp` · `brew install yt-dlp` |
+| Rust | 1.96+ (tested 1.96.1) | building it |
+| libmpv | 2.5.0 | audio playback |
+| yt-dlp | 2026.08.19 | resolving stream URLs |
+
+**Arch / Manjaro / EndeavourOS:**
+
+```bash
+sudo pacman -S --needed rust mpv yt-dlp git base-devel
+```
+
+`mpv` brings `libmpv.so` with it, so there is no separate `-dev` package to
+install. If you would rather manage Rust through rustup than pacman, use
+[rustup](https://rustup.rs) and drop `rust` from that line.
+
+**Debian / Ubuntu:**
+
+```bash
+sudo apt install libmpv-dev yt-dlp git build-essential
+# Rust via https://rustup.rs — the packaged rustc is usually too old
+```
+
+**macOS:**
+
+```bash
+brew install mpv yt-dlp
+# Rust via https://rustup.rs
+```
 
 `yt-dlp` is called as a subprocess and needs to stay current — YouTube breaks
 stream extraction regularly. If playback stops working, update it first.
@@ -78,7 +102,8 @@ media keys. Nothing else changes.
 ## Install
 
 ```bash
-git clone <this repo> && cd kiro
+git clone https://github.com/Pranab-kr/ytm-cli.git
+cd ytm-cli
 cargo build --release
 ./target/release/ytm-cli
 ```
