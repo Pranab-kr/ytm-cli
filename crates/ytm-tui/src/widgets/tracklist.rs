@@ -37,6 +37,35 @@ pub fn visible_window(selected: usize, offset: usize, height: usize, len: usize)
     (start, end)
 }
 
+/// A dim `Title / Artist / Time` header, aligned to the same columns the rows
+/// use so it labels the grid rather than floating over it.
+///
+/// The widths are computed exactly as `draw` computes them, from the same
+/// constants — a second copy would drift and the labels would sit off their
+/// columns.
+pub fn draw_column_header(f: &mut Frame, area: Rect, t: &Theme) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let w = area.width as usize;
+    let text_w = w.saturating_sub(DURATION_WIDTH + MARK_WIDTH);
+    let title_w = (text_w * TITLE_SHARE) / 10;
+    let artist_w = text_w.saturating_sub(title_w);
+
+    let style = Style::default().fg(t.fg_dim).add_modifier(Modifier::BOLD);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            // The mark gutter is empty in the header; the labels start at the
+            // title column so they line up with the row text below.
+            Span::styled(" ".repeat(MARK_WIDTH), style),
+            Span::styled(pad_to_width("Title", title_w), style),
+            Span::styled(pad_to_width("Artist", artist_w), style),
+            Span::styled(format!("{:>DURATION_WIDTH$}", "Time"), style),
+        ])),
+        area,
+    );
+}
+
 pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -54,7 +83,7 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     if rows.is_empty() {
         f.render_widget(
             Paragraph::new(Span::styled(
-                "Nothing here yet",
+                s.empty_message(),
                 Style::default().fg(t.fg_dim),
             )),
             area,
@@ -206,15 +235,45 @@ mod tests {
     }
 
     #[test]
+    fn a_populated_track_pane_draws_a_column_header() {
+        use crate::app::{AppState, Pane};
+        use ytm_core::Track;
+        let s = AppState {
+            pane: Pane::Songs,
+            tracks: vec![Track::stub("v1", "Roygbiv")],
+            ..Default::default()
+        };
+        let text = buffer_text(&s);
+        assert!(text.contains("Title"), "header labels the title column");
+        assert!(text.contains("Artist"), "header labels the artist column");
+        assert!(text.contains("Time"), "header labels the duration column");
+        // The row still renders below the header.
+        assert!(text.contains("Roygbiv"));
+    }
+
+    #[test]
+    fn an_empty_track_pane_has_no_column_header() {
+        // A header over "No liked songs yet" would label an empty grid.
+        use crate::app::{AppState, Pane};
+        let s = AppState {
+            pane: Pane::Songs,
+            ..Default::default()
+        };
+        assert!(!buffer_text(&s).contains("Title"));
+    }
+
+    #[test]
     fn an_empty_pane_shows_a_message_not_a_blank_area() {
         use crate::app::{AppState, Pane};
         let s = AppState {
             pane: Pane::Songs,
             ..Default::default()
         };
+        // The Fav pane names its own empty state rather than a flat "Nothing
+        // here yet" — the message comes from `AppState::empty_message`.
         assert!(
-            buffer_text(&s).contains("Nothing here"),
-            "empty states must say something"
+            buffer_text(&s).contains("No liked songs"),
+            "empty states must say something specific to the pane"
         );
     }
 }

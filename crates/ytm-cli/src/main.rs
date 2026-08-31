@@ -210,6 +210,276 @@ async fn run_playlists(cfg: &config::Config) -> color_eyre::Result<()> {
     Ok(())
 }
 
+/// One top-level section of the bundled example, with the comments that
+/// document it, ready to append to a file that lacks it.
+struct ExampleSection {
+    name: String,
+    text: String,
+}
+
+/// Split `EXAMPLE_TOML` into its top-level sections.
+///
+/// Comment lines directly above a header travel with it — that is where the
+/// example says what the section is for, and appending bare keys without their
+/// documented defaults would defeat the point of the command. A blank line ends
+/// the run, which is what keeps the file's own header comment out of `[auth]`.
+fn example_sections() -> Vec<ExampleSection> {
+    let lines: Vec<&str> = config::EXAMPLE_TOML.lines().collect();
+
+    // (header line, first line to copy) — the second walks back over comments.
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        if is_section_header(l) {
+            let mut start = i;
+            while start > 0 && lines[start - 1].trim_start().starts_with('#') {
+                start -= 1;
+            }
+            spans.push((i, start));
+        }
+    }
+
+    let mut out = Vec::with_capacity(spans.len());
+    for (n, &(header, start)) in spans.iter().enumerate() {
+        let end = spans.get(n + 1).map_or(lines.len(), |&(_, next)| next);
+        out.push(ExampleSection {
+            name: lines[header].trim().trim_matches(['[', ']']).to_owned(),
+            text: lines[start..end].join("\n"),
+        });
+    }
+    out
+}
+
+fn is_section_header(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('[') && t.ends_with(']') && !t.starts_with("[[")
+}
+
+/// The key a line defines, commented out or not — which is what separates a
+/// documented default from prose.
+fn toml_key_of(line: &str) -> Option<&str> {
+    let t = line.trim();
+    let t = t.strip_prefix('#').map_or(t, str::trim_start);
+    let k = t.split('=').next()?.trim();
+    (!k.is_empty() && k.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(k)
+}
+
+/// The raw lines inside one section of a file, header excluded.
+fn section_body<'a>(text: &'a str, section: &str) -> Vec<&'a str> {
+    let header = format!("[{section}]");
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(start) = lines.iter().position(|l| l.trim() == header) else {
+        return Vec::new();
+    };
+    let end = lines[start + 1..]
+        .iter()
+        .position(|l| is_section_header(l))
+        .map_or(lines.len(), |i| start + 1 + i);
+    lines[start + 1..end].to_vec()
+}
+
+/// One setting from the example, with the comments that document it.
+struct ExampleEntry {
+    key: String,
+    /// Those comments plus the definition, the definition commented out.
+    text: String,
+}
+
+/// The settings of one example section, in the order the example lists them.
+///
+/// The definition is commented out because this text goes into a section the
+/// user has already written: their omissions look deliberate, so the default is
+/// documented where they can see and uncomment it rather than pinned into their
+/// file. A whole absent section is different — it is appended verbatim, in the
+/// example's own form.
+fn example_entries(section: &ExampleSection) -> Vec<ExampleEntry> {
+    let header = format!("[{}]", section.name);
+    let mut body = section.text.lines().skip_while(|l| l.trim() != header);
+    body.next(); // the header itself
+
+    let mut comments: Vec<&str> = Vec::new();
+    let mut out = Vec::new();
+    for line in body {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            comments.clear();
+            continue;
+        }
+        match toml_key_of(line) {
+            Some(key) => {
+                let mut text = comments.join("\n");
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                if !trimmed.starts_with('#') {
+                    text.push_str("# ");
+                }
+                text.push_str(line.trim_end());
+                out.push(ExampleEntry {
+                    key: key.to_owned(),
+                    text,
+                });
+                comments.clear();
+            }
+            None if trimmed.starts_with('#') => comments.push(line.trim_end()),
+            None => comments.clear(),
+        }
+    }
+    out
+}
+
+/// Put `entries` at the end of `section`'s existing block.
+///
+/// They have to land under the header they belong to: TOML forbids a second
+/// `[ui]`, so appending them to the file would attach them to whichever section
+/// happens to be last.
+fn insert_into_section(text: &str, section: &str, entries: &[ExampleEntry]) -> Option<String> {
+    let header = format!("[{section}]");
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.iter().position(|l| l.trim() == header)?;
+    let mut end = lines[start + 1..]
+        .iter()
+        .position(|l| is_section_header(l))
+        .map_or(lines.len(), |i| start + 1 + i);
+    // Trailing blank lines sit between the sections, not inside this one.
+    while end > start + 1 && lines[end - 1].trim().is_empty() {
+        end -= 1;
+    }
+
+    let mut out: Vec<String> = lines[..end].iter().map(|l| (*l).to_owned()).collect();
+    for entry in entries {
+        out.push(String::new());
+        out.push(entry.text.clone());
+    }
+    out.extend(lines[end..].iter().map(|l| (*l).to_owned()));
+    let mut joined = out.join("\n");
+    if text.ends_with('\n') {
+        joined.push('\n');
+    }
+    Some(joined)
+}
+
+/// What an existing config does not mention.
+struct Gaps {
+    /// Sections it has no header for at all.
+    absent: Vec<ExampleSection>,
+    /// Settings absent from a section it does have, by section name.
+    partial: Vec<(String, Vec<ExampleEntry>)>,
+}
+
+/// Compare an existing config against the bundled example.
+///
+/// `None` means the file does not parse, which is a different report — nothing
+/// in it is in effect at all. Both halves are derived from `EXAMPLE_TOML` rather
+/// than a hand-written list, so neither can drift from it the way the README
+/// drifted from the code.
+fn gaps(text: &str) -> Option<Gaps> {
+    let have: toml::Table = text.parse().ok()?;
+    let want: toml::Table = config::EXAMPLE_TOML
+        .parse()
+        .expect("the bundled example parses; a test covers this");
+
+    let mut g = Gaps {
+        absent: Vec::new(),
+        partial: Vec::new(),
+    };
+    for section in example_sections() {
+        let Some(mine) = have.get(&section.name).and_then(toml::Value::as_table) else {
+            if !have.contains_key(&section.name) {
+                g.absent.push(section);
+            }
+            continue;
+        };
+        let Some(theirs) = want.get(&section.name).and_then(toml::Value::as_table) else {
+            continue;
+        };
+        // A key this command already wrote is commented out, so it is absent
+        // from `mine` — matching on the parsed table alone would append it again
+        // on every run until the file no longer parsed. The raw lines are what
+        // say whether the default is already there to uncomment.
+        let mentioned: Vec<&str> = section_body(text, &section.name)
+            .into_iter()
+            .filter_map(toml_key_of)
+            .collect();
+        let missing: Vec<ExampleEntry> = example_entries(&section)
+            .into_iter()
+            .filter(|e| {
+                theirs.contains_key(&e.key)
+                    && !mine.contains_key(&e.key)
+                    && !mentioned.contains(&e.key.as_str())
+            })
+            .collect();
+        if !missing.is_empty() {
+            g.partial.push((section.name.clone(), missing));
+        }
+    }
+    Some(g)
+}
+
+/// Bring an existing config up to the documented example.
+///
+/// The promise `ytm config` makes is that the file carries every setting and
+/// every binding at its default, so changing one is uncommenting a line. That
+/// held only for a file that did not exist yet: an existing one was opened as it
+/// was, so a config written before a setting existed stayed permanently without
+/// it — no `[keys]` section at all, every binding at a default the user could
+/// not see in the file they had just been handed.
+///
+/// Their own lines are never touched. Absent sections are appended in the
+/// example's own form; settings absent from a section they wrote go into it
+/// commented out, so what the file *does* is unchanged either way. The result is
+/// parsed before it is written — handing back a config that no longer loads
+/// would be worse than the gap it closed.
+fn top_up(path: &std::path::Path) -> color_eyre::Result<()> {
+    let text = std::fs::read_to_string(path)?;
+    let Some(g) = gaps(&text) else {
+        println!("\nThis file is not valid TOML, so the app is running entirely on");
+        println!("defaults. Repairing it is what this command is for.");
+        return Ok(());
+    };
+    if g.absent.is_empty() && g.partial.is_empty() {
+        return Ok(());
+    }
+
+    let mut topped = text;
+    for (name, entries) in &g.partial {
+        if let Some(t) = insert_into_section(&topped, name, entries) {
+            topped = t;
+        }
+    }
+    if !g.absent.is_empty() {
+        if !topped.ends_with('\n') {
+            topped.push('\n');
+        }
+        for section in &g.absent {
+            topped.push('\n');
+            topped.push_str(section.text.trim_end());
+            topped.push('\n');
+        }
+    }
+
+    // Should not fail — the example parses and these were the parts missing from
+    // it — so say so rather than writing a file that will not load.
+    if config::Config::from_toml_str(&topped).is_err() {
+        println!("\nsome settings are missing from this file, but adding them would not");
+        println!("parse. config.example.toml in the repo lists them all.");
+        return Ok(());
+    }
+    std::fs::write(path, &topped)?;
+
+    if !g.absent.is_empty() {
+        let names: Vec<&str> = g.absent.iter().map(|s| s.name.as_str()).collect();
+        println!(
+            "\nadded at their documented defaults: [{}]",
+            names.join("], [")
+        );
+    }
+    for (name, entries) in &g.partial {
+        let keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
+        println!("\nadded to [{name}], commented out: {}", keys.join(", "));
+    }
+    Ok(())
+}
+
 /// Write the documented config and open it in `$EDITOR` (FR-U9).
 ///
 /// The point is that nothing has to be written by hand: the file that lands
@@ -220,8 +490,10 @@ async fn run_playlists(cfg: &config::Config) -> color_eyre::Result<()> {
 ///
 /// An existing file is never overwritten — that would discard the user's own
 /// settings, which is the opposite of helpful. It is opened as it is.
-fn run_config(no_edit: bool) -> color_eyre::Result<()> {
-    let path = config::Config::default_path();
+fn run_config(path_override: Option<&std::path::Path>, no_edit: bool) -> color_eyre::Result<()> {
+    let path = path_override
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(config::Config::default_path);
     let existed = path.exists();
     if !existed {
         if let Some(dir) = path.parent() {
@@ -239,6 +511,14 @@ fn run_config(no_edit: bool) -> color_eyre::Result<()> {
         },
         path.display()
     );
+
+    // An existing file is never overwritten, but it can be older than the
+    // settings it does not mention, so it is topped up rather than merely
+    // reported on. Done before the editor opens so what was added is on screen
+    // to edit.
+    if existed {
+        top_up(&path)?;
+    }
 
     if no_edit {
         println!("\nEvery setting and keybinding is in that file, commented out at its");
@@ -287,13 +567,21 @@ async fn main() -> color_eyre::Result<()> {
     // Held for the process lifetime; dropping it loses buffered log lines.
     let _log_guard = logging::init(&config::paths::log_dir())?;
     let cli = Cli::parse();
+
+    // `config` is dispatched before the file is read, deliberately. It is the
+    // command that repairs a broken config.toml, so making it depend on a
+    // loadable one locked the user out of the only tool for the job.
+    if let Some(Command::Config { no_edit }) = &cli.command {
+        return run_config(cli.config.as_deref(), *no_edit);
+    }
+
     let cfg = config::Config::load(cli.config.as_deref())?;
 
     // Every subcommand returns an Err on failure, which `main` turns into a
     // non-zero exit — that is what makes these usable from a script.
     match &cli.command {
         Some(Command::Playlists) => return run_playlists(&cfg).await,
-        Some(Command::Config { no_edit }) => return run_config(*no_edit),
+        Some(Command::Config { .. }) => unreachable!("handled above"),
         Some(Command::Cache { action }) => {
             return match action {
                 CacheAction::Clear => run_cache_clear(),

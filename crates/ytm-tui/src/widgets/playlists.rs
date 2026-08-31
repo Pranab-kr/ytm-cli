@@ -35,7 +35,7 @@ where
     if len == 0 {
         f.render_widget(
             Paragraph::new(Span::styled(
-                "Nothing here yet",
+                s.empty_message(),
                 Style::default().fg(t.fg_dim),
             )),
             area,
@@ -303,14 +303,21 @@ mod tests {
 
     #[test]
     fn empty_panes_say_something_rather_than_going_blank() {
-        for pane in [Pane::Playlists, Pane::Albums, Pane::Artists] {
+        // Each pane names its own empty state now (via AppState::empty_message),
+        // so assert on a word from the pane's specific hint rather than a shared
+        // "Nothing here".
+        for (pane, needle) in [
+            (Pane::Playlists, "No playlists"),
+            (Pane::Albums, "No saved albums"),
+            (Pane::Artists, "No followed artists"),
+        ] {
             let s = AppState {
                 pane,
                 ..Default::default()
             };
             assert!(
-                text_of(&s).contains("Nothing here"),
-                "empty {pane:?} pane is blank"
+                text_of(&s).contains(needle),
+                "empty {pane:?} pane should show {needle:?}"
             );
         }
     }

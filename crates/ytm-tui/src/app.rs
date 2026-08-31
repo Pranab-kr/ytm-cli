@@ -653,6 +653,36 @@ impl AppState {
         !self.filter.is_empty()
     }
 
+    /// What to show when the current pane has no rows.
+    ///
+    /// One owner for every empty state, so the message fits the reason the pane
+    /// is empty rather than a single flat "Nothing here yet". A filter that
+    /// matched nothing, a list still loading, and a genuinely empty library are
+    /// three different situations and read as three different hints.
+    pub fn empty_message(&self) -> &'static str {
+        // A filter with no hits is the same story in every pane, and it is the
+        // reason most likely to look like a bug — so it wins over the rest.
+        if self.is_filtering() {
+            return "No matches — Esc clears the filter";
+        }
+        if self.loading {
+            return "Loading…";
+        }
+        match self.pane {
+            Pane::Home => "No recommendations yet",
+            Pane::Playlists if self.open_playlist.is_some() => "This playlist is empty",
+            Pane::Playlists => "No playlists — press c to create one",
+            Pane::Songs => "No liked songs yet",
+            Pane::Albums => "No saved albums",
+            Pane::Artists if self.open_artist.is_some() => "No tracks for this artist",
+            Pane::Artists if self.artist_search_active => "No artists found",
+            Pane::Artists => "No followed artists — press S to search",
+            Pane::Search if self.search_query.trim().is_empty() => "Type to search YouTube Music",
+            Pane::Search => "No matches",
+            Pane::Queue => "Queue is empty — press a on a track to add it",
+        }
+    }
+
     /// Whether the filter row is on screen.
     ///
     /// Shown while typing *and* while a filter is still narrowing rows after the
@@ -751,6 +781,23 @@ impl AppState {
 
     pub fn filter_row_visible(&self) -> bool {
         self.focus == Focus::FilterInput || self.is_filtering()
+    }
+
+    /// Whether a `Title / Artist / Time` header row is drawn above the list.
+    ///
+    /// Only the track-shaped panes have those columns, and only when they hold
+    /// rows — a header over "No liked songs yet" would label an empty grid. One
+    /// method, like `search_row_visible`, because the layout, the click math,
+    /// and the viewport count must all agree the row is there or a click lands a
+    /// row off.
+    pub fn column_header_visible(&self) -> bool {
+        let track_shaped = match self.pane {
+            Pane::Songs | Pane::Queue | Pane::Search => true,
+            Pane::Playlists => self.open_playlist.is_some(),
+            Pane::Artists => self.open_artist.is_some(),
+            Pane::Home | Pane::Albums => false,
+        };
+        track_shaped && self.list_len() > 0
     }
 
     /// Whether a query row is drawn above the list.
@@ -2480,6 +2527,42 @@ mod tests {
         );
         s.apply_input(InputAction::Cancel);
         assert!(!s.filter_row_visible(), "gone once the filter is cleared");
+    }
+
+    #[test]
+    fn empty_messages_fit_the_reason_the_pane_is_empty() {
+        // Each pane names its own empty state; a filter with no hits and a
+        // loading list are different situations and read differently.
+        let base = AppState {
+            pane: Pane::Playlists,
+            ..Default::default()
+        };
+        assert!(base.empty_message().contains("No playlists"));
+
+        // A filter that matched nothing wins over the pane-specific message —
+        // it is the reason most likely to look like a bug.
+        let filtering = AppState {
+            pane: Pane::Playlists,
+            filter: "zzz".into(),
+            ..Default::default()
+        };
+        assert!(filtering.empty_message().contains("filter"));
+
+        // Loading wins over the pane message but not over an active filter.
+        let loading = AppState {
+            pane: Pane::Songs,
+            loading: true,
+            ..Default::default()
+        };
+        assert_eq!(loading.empty_message(), "Loading…");
+
+        // An open playlist reads differently from the list of playlists.
+        let open = AppState {
+            pane: Pane::Playlists,
+            open_playlist: Some(ytm_core::PlaylistId::from("p1")),
+            ..Default::default()
+        };
+        assert!(open.empty_message().contains("empty"));
     }
 
     #[test]

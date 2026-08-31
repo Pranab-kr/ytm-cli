@@ -35,11 +35,7 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     if rows.is_empty() {
         f.render_widget(
             Paragraph::new(Span::styled(
-                if s.is_filtering() {
-                    "No matches"
-                } else {
-                    "Queue is empty"
-                },
+                s.empty_message(),
                 Style::default().fg(t.fg_dim),
             )),
             area,

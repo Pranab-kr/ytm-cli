@@ -195,17 +195,54 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
         pos as f64 / dur as f64
     };
 
-    let (times, tail, flags) = chrome_parts(s);
+    let (times, tail, _) = chrome_parts(s);
     let bar_w = bar_width(w, s);
+    let mut spans = vec![
+        Span::styled(times, Style::default().fg(t.fg_dim)),
+        Span::styled(progress_bar(ratio, bar_w), Style::default().fg(t.accent)),
+        Span::styled(tail, Style::default().fg(t.fg_dim)),
+    ];
+    spans.extend(flag_spans(s, t));
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(times, Style::default().fg(t.fg_dim)),
-            Span::styled(progress_bar(ratio, bar_w), Style::default().fg(t.accent)),
-            Span::styled(tail, Style::default().fg(t.fg_dim)),
-            Span::styled(flags, Style::default().fg(t.fg_dim)),
-        ])),
+        Paragraph::new(Line::from(spans)),
         rows[PROGRESS_ROW as usize],
     );
+}
+
+/// The mode flags as separately styled spans: shuffle, repeat, and volume.
+///
+/// The concatenated text matches `chrome_parts`'s third field exactly — the
+/// seek geometry measures that, so the widths must not drift — but each flag is
+/// coloured by its state instead of a uniform dim. An active mode takes the
+/// accent so the user can tell shuffle is *on* at a glance; a uniform dim made
+/// the on and off states differ only by a glyph nobody could read at a distance.
+fn flag_spans(s: &AppState, t: &Theme) -> Vec<Span<'static>> {
+    let dim = Style::default().fg(t.fg_dim);
+    let on = Style::default().fg(t.accent).add_modifier(Modifier::BOLD);
+    let (repeat_glyph, repeat_on) = match s.repeat {
+        RepeatMode::Off => (" ", false),
+        RepeatMode::One => ("\u{2460}", true),
+        RepeatMode::All => ("\u{21BB}", true),
+    };
+    vec![
+        Span::styled("  ", dim),
+        Span::styled(
+            if s.shuffle { "\u{21C4}" } else { " " },
+            if s.shuffle { on } else { dim },
+        ),
+        Span::styled(repeat_glyph, if repeat_on { on } else { dim }),
+        Span::styled("  ", dim),
+        // Muted reads as an alert, not a mode: the error colour and a 0 say the
+        // sound is off rather than merely quiet.
+        Span::styled(
+            format!("{:>3}%", if s.muted { 0 } else { s.volume }),
+            if s.muted {
+                Style::default().fg(t.error)
+            } else {
+                dim
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -453,6 +490,84 @@ mod tests {
     fn idle_state_shows_a_placeholder_not_an_empty_bar() {
         let s = AppState::default();
         assert!(buffer_text(&s).contains("Nothing playing"));
+    }
+
+    /// The colour of the first cell showing `sym`, searched from the right so
+    /// the flags at the end of the row are found rather than a stray match in a
+    /// title.
+    fn last_cell_color(state: &AppState, sym: &str) -> Option<ratatui::style::Color> {
+        let mut t = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        let theme = Theme::default();
+        t.draw(|f| {
+            crate::render::render(
+                f,
+                state,
+                &theme,
+                &crate::keymap::KeyMap::default(),
+                &mut crate::widgets::art::ArtCache::disabled(),
+            )
+        })
+        .unwrap();
+        let buf = t.backend().buffer().clone();
+        buf.content()
+            .iter()
+            .rev()
+            .find(|c| c.symbol() == sym)
+            .map(|c| c.fg)
+    }
+
+    #[test]
+    fn the_flags_geometry_matches_chrome_parts_so_seeking_stays_exact() {
+        // The styled flag spans must concatenate to exactly the third field of
+        // chrome_parts — the seek hit-test measures that string, so any drift
+        // would make a click land on the wrong second.
+        let s = AppState {
+            shuffle: true,
+            repeat: RepeatMode::All,
+            volume: 80,
+            ..playing_two_minutes()
+        };
+        let theme = Theme::default();
+        let joined: String = super::flag_spans(&s, &theme)
+            .iter()
+            .map(|sp| sp.content.as_ref())
+            .collect();
+        let (_, _, flags) = super::chrome_parts(&s);
+        assert_eq!(joined, flags, "styled flags must not change the widths");
+    }
+
+    #[test]
+    fn an_active_mode_is_drawn_in_the_accent_not_a_uniform_dim() {
+        // FR-U: the user must be able to tell shuffle is on at a glance, not by
+        // reading a glyph. On uses the accent; off stays dim.
+        let theme = Theme::default();
+        let on = last_cell_color(
+            &AppState {
+                shuffle: true,
+                ..playing_two_minutes()
+            },
+            "\u{21C4}",
+        );
+        assert_eq!(on, Some(theme.accent), "shuffle-on should take the accent");
+    }
+
+    #[test]
+    fn muting_shows_zero_in_the_error_colour() {
+        // Muted is an alert, not just a low volume: the error colour and a 0
+        // together say the sound is off.
+        let theme = Theme::default();
+        let s = AppState {
+            muted: true,
+            volume: 60,
+            ..playing_two_minutes()
+        };
+        let text = buffer_text(&s);
+        assert!(text.contains("0%"), "muted reads as 0%, got: {text}");
+        assert_eq!(
+            last_cell_color(&s, "0"),
+            Some(theme.error),
+            "the muted volume should be drawn in the error colour"
+        );
     }
 
     #[test]

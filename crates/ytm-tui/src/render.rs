@@ -65,6 +65,7 @@ pub fn click_target(
     row: u16,
     search_row: bool,
     filter_row: bool,
+    header_row: bool,
 ) -> ClickTarget {
     let (body, np) = body_and_nowplaying(area);
     // The progress row is the one clickable part of the now-playing bar. The
@@ -78,16 +79,22 @@ pub fn click_target(
         };
     }
     if col < SIDEBAR_WIDTH {
-        return ClickTarget::Source(row as usize);
+        // The sidebar draws grouped rows with blank spacers between them, so a
+        // screen row maps to a source through `source_at_row` rather than
+        // directly — a click on a spacer selects nothing.
+        return match sidebar::source_at_row(row as usize) {
+            Some(i) => ClickTarget::Source(i),
+            None => ClickTarget::Nothing,
+        };
     }
     // The rule column between sidebar and list.
     if col == SIDEBAR_WIDTH {
         return ClickTarget::Nothing;
     }
-    let top = list_top_for(search_row, filter_row);
+    let top = list_top_for(search_row, filter_row, header_row);
     match row.checked_sub(top) {
         Some(offset) => ClickTarget::Row(offset as usize),
-        // The heading row.
+        // The heading row, and any query/filter/column-header rows above the list.
         None => ClickTarget::Nothing,
     }
 }
@@ -100,19 +107,21 @@ pub fn click_target(
 /// Both take the flags rather than the pane, because two panes now grow a query
 /// row: Search always, and Artists while `S` is open. Deriving it from the pane
 /// here is what let the layout and the click math disagree.
-pub fn list_top_for(search_row: bool, filter_row: bool) -> u16 {
+pub fn list_top_for(search_row: bool, filter_row: bool, header_row: bool) -> u16 {
     // Row 0 is the pane heading; a query row takes the next; a visible filter row
-    // takes one more. Miss any of these and a click lands on a different row than
-    // the pointer.
-    1 + u16::from(search_row) + u16::from(filter_row)
+    // takes one more; the column-header row takes one more still, and it sits
+    // directly above the list. Miss any of these and a click lands on a
+    // different row than the pointer.
+    1 + u16::from(search_row) + u16::from(filter_row) + u16::from(header_row)
 }
 
-pub fn list_rows_for(area: Rect, search_row: bool, filter_row: bool) -> usize {
+pub fn list_rows_for(area: Rect, search_row: bool, filter_row: bool, header_row: bool) -> usize {
     // Now-playing bar, then the pane heading inside the main area.
     let body = area.height.saturating_sub(NOWPLAYING_HEIGHT);
     body.saturating_sub(1)
         .saturating_sub(u16::from(search_row))
-        .saturating_sub(u16::from(filter_row)) as usize
+        .saturating_sub(u16::from(filter_row))
+        .saturating_sub(u16::from(header_row)) as usize
 }
 
 /// The body area and the now-playing bar below it.
@@ -221,16 +230,21 @@ fn draw_main(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     // Artists borrows the same field for `S`. Owning it in one place is what
     // keeps the layout, the click math, and `list_top_for` in agreement.
     let show_search = s.search_row_visible();
+    // A dim column header sits directly above the list on the track-shaped
+    // panes. It is the last row before the list, so its constraint follows the
+    // query and filter rows and `list_top_for` counts it the same way.
+    let show_header = s.column_header_visible();
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Length(u16::from(show_search)),
             Constraint::Length(u16::from(show_filter)),
+            Constraint::Length(u16::from(show_header)),
             Constraint::Min(0),
         ])
         .split(area);
-    let (search_row, filter_row, list_row) = (rows[1], rows[2], rows[3]);
+    let (search_row, filter_row, header_row, list_row) = (rows[1], rows[2], rows[3], rows[4]);
 
     let (heading, badge) = heading_parts(s, w);
     let mut spans = vec![Span::styled(
@@ -254,6 +268,9 @@ fn draw_main(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     }
     if show_filter {
         search::draw_filter(f, filter_row, s, t);
+    }
+    if show_header {
+        tracklist::draw_column_header(f, header_row, t);
     }
 
     match s.pane {
@@ -542,9 +559,11 @@ mod tests {
         // bar or the heading, a half-page jump would overshoot the screen.
         let area = Rect::new(0, 0, 80, 24);
         // 24 - 4 (now playing: margin, rule, title, progress) - 1 (heading) = 19
-        assert_eq!(list_rows_for(area, false, false), 19);
+        assert_eq!(list_rows_for(area, false, false, false), 19);
         // The search pane also spends a row on the query line.
-        assert_eq!(list_rows_for(area, true, false), 18);
+        assert_eq!(list_rows_for(area, true, false, false), 18);
+        // A column header costs one more row of list.
+        assert_eq!(list_rows_for(area, false, false, true), 18);
     }
 
     #[test]
@@ -552,28 +571,47 @@ mod tests {
         // These are u16 subtractions; without saturation a short terminal would
         // wrap to 65535 and every page key would jump to the end of the list.
         let area = Rect::new(0, 0, 80, 2);
-        assert_eq!(list_rows_for(area, false, false), 0);
-        assert_eq!(list_rows_for(Rect::new(0, 0, 80, 0), false, false), 0);
+        assert_eq!(list_rows_for(area, false, false, false), 0);
+        assert_eq!(
+            list_rows_for(Rect::new(0, 0, 80, 0), false, false, false),
+            0
+        );
     }
 
     #[test]
     fn the_list_starts_below_the_heading() {
         // A click handler that assumed row 0 would select one row too high in
         // every pane, and two too high in Search.
-        assert_eq!(list_top_for(false, false), 1);
-        assert_eq!(list_top_for(true, false), 2);
+        assert_eq!(list_top_for(false, false, false), 1);
+        assert_eq!(list_top_for(true, false, false), 2);
+        // A column header pushes the first list row down one more.
+        assert_eq!(list_top_for(false, false, true), 2);
+        assert_eq!(list_top_for(true, true, true), 4);
     }
 
     #[test]
     fn a_click_in_the_sidebar_names_its_source() {
         let area = Rect::new(0, 0, 80, 24);
+        // Row 0 is Home. Rows below run through the grouped layout, so row 4 is
+        // Albums (source 3), not source 4 — the spacer after Home shifts them.
         assert_eq!(
-            click_target(area, 3, 0, false, false),
+            click_target(area, 3, 0, false, false, false),
             ClickTarget::Source(0)
         );
         assert_eq!(
-            click_target(area, 3, 4, false, false),
-            ClickTarget::Source(4)
+            click_target(area, 3, 4, false, false, false),
+            ClickTarget::Source(3)
+        );
+    }
+
+    #[test]
+    fn a_click_on_a_sidebar_spacer_selects_nothing() {
+        // The blank row between groups belongs to no source; a click there must
+        // not fall through to the pane one row down.
+        let area = Rect::new(0, 0, 80, 24);
+        assert_eq!(
+            click_target(area, 3, 1, false, false, false),
+            ClickTarget::Nothing
         );
     }
 
@@ -582,10 +620,25 @@ mod tests {
         // Row 0 of the main area is the heading, so the first list row is screen
         // row 1. Off by one here selects the wrong track on every click.
         let area = Rect::new(0, 0, 80, 24);
-        assert_eq!(click_target(area, 40, 1, false, false), ClickTarget::Row(0));
-        assert_eq!(click_target(area, 40, 5, false, false), ClickTarget::Row(4));
+        assert_eq!(
+            click_target(area, 40, 1, false, false, false),
+            ClickTarget::Row(0)
+        );
+        assert_eq!(
+            click_target(area, 40, 5, false, false, false),
+            ClickTarget::Row(4)
+        );
         // Search spends another row on the query line.
-        assert_eq!(click_target(area, 40, 2, true, false), ClickTarget::Row(0));
+        assert_eq!(
+            click_target(area, 40, 2, true, false, false),
+            ClickTarget::Row(0)
+        );
+        // A column header pushes the first list row down one more: with search
+        // and header both present the first row is at screen row 3.
+        assert_eq!(
+            click_target(area, 40, 3, true, false, true),
+            ClickTarget::Row(0)
+        );
     }
 
     #[test]
@@ -593,21 +646,21 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         // The pane heading.
         assert_eq!(
-            click_target(area, 40, 0, false, false),
+            click_target(area, 40, 0, false, false, false),
             ClickTarget::Nothing
         );
         // The rule between sidebar and list.
         assert_eq!(
-            click_target(area, SIDEBAR_WIDTH, 3, false, false),
+            click_target(area, SIDEBAR_WIDTH, 3, false, false, false),
             ClickTarget::Nothing
         );
         // The now-playing bar, and anything past the frame.
         assert_eq!(
-            click_target(area, 40, 21, false, false),
+            click_target(area, 40, 21, false, false, false),
             ClickTarget::Nothing
         );
         assert_eq!(
-            click_target(area, 40, 200, false, false),
+            click_target(area, 40, 200, false, false, false),
             ClickTarget::Nothing
         );
     }

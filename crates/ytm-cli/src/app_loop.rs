@@ -891,6 +891,7 @@ fn handle_click(
         row,
         state.search_row_visible(),
         state.filter_row_visible(),
+        state.column_header_visible(),
     ) {
         ClickTarget::Source(i) => {
             // The sidebar draws PANE_ORDER from its first row, so the index maps
@@ -1285,6 +1286,7 @@ pub async fn run(
             terminal.size()?.into(),
             state.search_row_visible(),
             state.filter_row_visible(),
+            state.column_header_visible(),
         );
         terminal.draw(|f| ytm_tui::render::render(f, &state, &theme, &keymap, &mut art))?;
 
