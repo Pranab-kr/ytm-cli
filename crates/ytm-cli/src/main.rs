@@ -129,12 +129,159 @@ fn build_theme(cfg: &config::Config) -> color_eyre::Result<Theme> {
     Ok(theme)
 }
 
+/// How long `ytm login` waits for the browser authorization before giving up.
+const LOGIN_DEADLINE_SECS: u64 = 300;
+
+/// `ytm` with no subcommand launches the TUI; the subcommands are the
+/// non-interactive paths, which is what makes auth debuggable without a
+/// terminal UI in the way.
+#[derive(Debug, clap::Parser)]
+#[command(name = "ytm", about = "YouTube Music in your terminal", version)]
+pub struct Cli {
+    /// Path to config.toml (defaults to the platform config dir)
+    #[arg(long, global = true)]
+    pub config: Option<std::path::PathBuf>,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum Command {
+    /// Sign in to YouTube Music
+    Login,
+    /// Forget stored credentials
+    Logout,
+    /// Print your playlists and exit
+    Playlists,
+    /// Cache maintenance
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
+}
+
+#[derive(Debug, clap::Subcommand, PartialEq, Eq)]
+pub enum CacheAction {
+    /// Delete all cached metadata
+    Clear,
+}
+
+/// Print the device code and wait for the browser authorization (FR-A1).
+///
+/// `println!` is allowed here and in the other subcommands: the TUI is not
+/// running, so there is no frame to corrupt. That is the whole reason these
+/// exist as subcommands rather than as panes.
+async fn run_login(cfg: &config::Config) -> color_eyre::Result<()> {
+    use ytm_core::auth::{KeyringStore, TokenStore};
+    use ytm_core::oauth::{begin_device_login, complete_device_login};
+
+    let (Some(client_id), Some(client_secret)) = (&cfg.auth.client_id, &cfg.auth.client_secret)
+    else {
+        return Err(eyre!(
+            "auth.client_id / auth.client_secret are not set in {}",
+            config::Config::default_path().display()
+        ));
+    };
+
+    // ytmapi_rs's own client, not reqwest's — that is what `begin_device_login`
+    // takes.
+    let client = ytmapi_rs::Client::new()?;
+    let (info, code) = begin_device_login(&client, client_id).await?;
+    println!("1. Open: {}", info.verification_url);
+    println!("2. Enter code: {}", info.user_code);
+    println!("3. Approve the request, then wait here.\n");
+    println!(
+        "polling every {}s, giving up after {LOGIN_DEADLINE_SECS}s...",
+        info.interval_secs
+    );
+
+    let store = KeyringStore::default_store();
+    let token = complete_device_login(
+        &client,
+        code,
+        client_id,
+        client_secret,
+        &store,
+        info.interval_secs,
+        LOGIN_DEADLINE_SECS,
+    )
+    .await?;
+    // StoredToken's Debug is redacted by hand, so this cannot leak the token.
+    tracing::info!(?token, "signed in");
+    println!("\nSigned in. Tokens are in the OS keyring, not on disk.");
+    println!("keyring round-trip: {}", store.load()?.is_some());
+    Ok(())
+}
+
+/// Forget the stored token. Deliberately does not touch the cookie file: that
+/// is the user's own export, and deleting someone's file is not this command's
+/// business.
+fn run_logout() -> color_eyre::Result<()> {
+    use ytm_core::auth::{KeyringStore, TokenStore};
+    // `clear` is documented idempotent: clearing when nothing is stored
+    // succeeds, so "already signed out" is not an error to report.
+    KeyringStore::default_store().clear()?;
+    println!("Signed out — the stored token has been cleared.");
+    println!("A cookie file, if you use one, is left alone.");
+    Ok(())
+}
+
+/// One playlist title per line — the fastest auth check there is, and scriptable.
+async fn run_playlists(cfg: &config::Config) -> color_eyre::Result<()> {
+    let source = build_source(cfg).await?;
+    let playlists = source.library_playlists().await?;
+    if playlists.is_empty() {
+        // Same trap as the TUI's empty-library hint: an expired cookie answers
+        // HTTP 200 with zero rows, so silence here would read as "no playlists".
+        return Err(eyre!(
+            "the library came back empty — if that is wrong, the cookie or token has expired"
+        ));
+    }
+    for p in &playlists {
+        match p.track_count {
+            Some(n) => println!("{}\t{} tracks", p.title, n),
+            None => println!("{}", p.title),
+        }
+    }
+    Ok(())
+}
+
+fn run_cache_clear() -> color_eyre::Result<()> {
+    let path = config::paths::cache_dir().join("cache.db");
+    let cache = ytm_core::cache::Cache::open(&path)?;
+    cache.clear()?;
+    println!("Cache cleared ({}).", path.display());
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
+    use clap::Parser;
     color_eyre::install()?;
     // Held for the process lifetime; dropping it loses buffered log lines.
     let _log_guard = logging::init(&config::paths::log_dir())?;
-    let cfg = config::Config::load(None)?;
+    let cli = Cli::parse();
+    let cfg = config::Config::load(cli.config.as_deref())?;
+
+    // Every subcommand returns an Err on failure, which `main` turns into a
+    // non-zero exit — that is what makes these usable from a script.
+    match &cli.command {
+        Some(Command::Login) => return run_login(&cfg).await,
+        Some(Command::Logout) => return run_logout(),
+        Some(Command::Playlists) => return run_playlists(&cfg).await,
+        Some(Command::Cache { action }) => {
+            return match action {
+                CacheAction::Clear => run_cache_clear(),
+            };
+        }
+        None => {}
+    }
+    run_tui(cfg).await
+}
+
+/// The default path: the full terminal UI.
+async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
     tracing::info!(
         auth = ?cfg.auth.kind,
         volume = cfg.playback.volume,
@@ -232,4 +379,67 @@ async fn main() -> color_eyre::Result<()> {
     // terminal rather than into the alternate screen.
     drop(guard);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn no_arguments_launches_the_tui() {
+        let c = Cli::parse_from(["ytm"]);
+        assert!(c.command.is_none());
+    }
+
+    #[test]
+    fn login_and_logout_parse() {
+        assert!(matches!(
+            Cli::parse_from(["ytm", "login"]).command,
+            Some(Command::Login)
+        ));
+        assert!(matches!(
+            Cli::parse_from(["ytm", "logout"]).command,
+            Some(Command::Logout)
+        ));
+    }
+
+    #[test]
+    fn playlists_is_a_non_interactive_listing() {
+        // Useful for scripting and for verifying auth without the TUI.
+        assert!(matches!(
+            Cli::parse_from(["ytm", "playlists"]).command,
+            Some(Command::Playlists)
+        ));
+    }
+
+    #[test]
+    fn a_config_path_can_be_overridden() {
+        let c = Cli::parse_from(["ytm", "--config", "/tmp/x.toml"]);
+        assert_eq!(
+            c.config.as_deref(),
+            Some(std::path::Path::new("/tmp/x.toml"))
+        );
+    }
+
+    #[test]
+    fn an_unknown_subcommand_is_rejected() {
+        assert!(Cli::try_parse_from(["ytm", "frobnicate"]).is_err());
+    }
+
+    #[test]
+    fn cache_clear_parses_as_a_nested_subcommand() {
+        assert!(matches!(
+            Cli::parse_from(["ytm", "cache", "clear"]).command,
+            Some(Command::Cache {
+                action: CacheAction::Clear
+            })
+        ));
+    }
+
+    #[test]
+    fn cache_without_an_action_is_rejected() {
+        // Better an error than silently doing nothing to someone's cache.
+        assert!(Cli::try_parse_from(["ytm", "cache"]).is_err());
+    }
 }

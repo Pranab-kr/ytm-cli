@@ -5591,6 +5591,7 @@ dependencies = [
  "ytm-core",
  "ytm-player",
  "ytm-tui",
+ "ytmapi-rs",
 ]
 
 [[package]]
