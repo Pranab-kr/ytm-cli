@@ -83,52 +83,45 @@ fn expand_tilde(p: &std::path::Path) -> std::path::PathBuf {
 
 /// Build whichever `MusicSource` config selects.
 ///
-/// Cookie auth is the live path; OAuth is kept because it is correct and will
-/// work again if Google restores device-flow tokens on InnerTube (see
-/// PROGRESS.md, Open question 3).
+/// Browser cookies are the only auth path.
+///
+/// The OAuth device flow was removed on 2026-08-31: Google stopped honouring
+/// device-flow tokens on the InnerTube endpoints this app uses, so it could never
+/// reach the library. `AuthKind::OAuth` still parses so an old config loads, and
+/// says so rather than failing obscurely.
 async fn build_source(cfg: &config::Config) -> color_eyre::Result<Arc<dyn MusicSource>> {
     use ytm_core::ytmusic::YtMusicSource;
 
-    match cfg.auth.kind {
-        config::AuthKind::Cookie => {
-            let path = cfg
-                .auth
-                .cookie_file
-                .as_deref()
-                .map(expand_tilde)
-                .ok_or_else(|| {
-                    eyre!(
-                        "auth.kind = \"cookie\" but auth.cookie_file is not set in {}",
-                        config::Config::default_path().display()
-                    )
-                })?;
-            let source = YtMusicSource::from_cookie_file(&path)
-                .await
-                .with_context(|| format!("could not use the cookie file at {}", path.display()))?;
-            Ok(Arc::new(source))
-        }
-        config::AuthKind::OAuth => {
-            use ytm_core::auth::{KeyringStore, TokenStore};
-            let (id, secret) = match (&cfg.auth.client_id, &cfg.auth.client_secret) {
-                (Some(i), Some(s)) => (i.clone(), s.clone()),
-                _ => {
-                    return Err(eyre!(
-                        "auth.kind = \"oauth\" but auth.client_id / auth.client_secret are not set in {}",
-                        config::Config::default_path().display()
-                    ));
-                }
-            };
-            let stored = KeyringStore::default_store()
-                .load()
-                .context("could not read the stored token from the OS keyring")?
-                .ok_or_else(|| {
-                    eyre!("not signed in — run `cargo run -p ytm-core --example login_spike` first")
-                })?;
-            let token = ytm_core::oauth::oauth_token_from_stored(&stored, &id, &secret)
-                .context("the stored token could not be rebuilt — sign in again")?;
-            Ok(Arc::new(YtMusicSource::from_oauth(token)))
-        }
+    if cfg.auth.kind == config::AuthKind::OAuth {
+        return Err(eyre!(
+            "auth.kind = \"oauth\" is no longer supported — Google stopped accepting \
+             device-flow tokens on YouTube Music's endpoints. Set auth.kind = \"cookie\" \
+             and auth.cookie_file in {} (see the README for how to export cookies).",
+            config::Config::default_path().display()
+        ));
     }
+
+    let path = cfg
+        .auth
+        .cookie_file
+        .as_deref()
+        .map(expand_tilde)
+        .ok_or_else(|| {
+            eyre!(
+                "auth.cookie_file is not set in {} — see the README for how to export \
+                 your cookies",
+                config::Config::default_path().display()
+            )
+        })?;
+    let source = YtMusicSource::from_cookie_file(&path)
+        .await
+        .with_context(|| {
+            format!(
+                "could not use the cookie file at {} — it may have expired; re-export it",
+                path.display()
+            )
+        })?;
+    Ok(Arc::new(source))
 }
 
 /// Theme from config: an explicit file wins, otherwise just the accent override.
@@ -157,9 +150,6 @@ fn build_theme(cfg: &config::Config) -> color_eyre::Result<(Theme, String)> {
     Ok((theme, name))
 }
 
-/// How long `ytm login` waits for the browser authorization before giving up.
-const LOGIN_DEADLINE_SECS: u64 = 300;
-
 /// `ytm` with no subcommand launches the TUI; the subcommands are the
 /// non-interactive paths, which is what makes auth debuggable without a
 /// terminal UI in the way.
@@ -176,10 +166,6 @@ pub struct Cli {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
-    /// Sign in to YouTube Music
-    Login,
-    /// Forget stored credentials
-    Logout,
     /// Print your playlists and exit
     Playlists,
     /// Write config.toml with every default and binding, then open it
@@ -201,66 +187,9 @@ pub enum CacheAction {
     Clear,
 }
 
-/// Print the device code and wait for the browser authorization (FR-A1).
-///
-/// `println!` is allowed here and in the other subcommands: the TUI is not
-/// running, so there is no frame to corrupt. That is the whole reason these
-/// exist as subcommands rather than as panes.
-async fn run_login(cfg: &config::Config) -> color_eyre::Result<()> {
-    use ytm_core::auth::{KeyringStore, TokenStore};
-    use ytm_core::oauth::{begin_device_login, complete_device_login};
-
-    let (Some(client_id), Some(client_secret)) = (&cfg.auth.client_id, &cfg.auth.client_secret)
-    else {
-        return Err(eyre!(
-            "auth.client_id / auth.client_secret are not set in {}",
-            config::Config::default_path().display()
-        ));
-    };
-
-    // ytmapi_rs's own client, not reqwest's — that is what `begin_device_login`
-    // takes.
-    let client = ytmapi_rs::Client::new()?;
-    let (info, code) = begin_device_login(&client, client_id).await?;
-    println!("1. Open: {}", info.verification_url);
-    println!("2. Enter code: {}", info.user_code);
-    println!("3. Approve the request, then wait here.\n");
-    println!(
-        "polling every {}s, giving up after {LOGIN_DEADLINE_SECS}s...",
-        info.interval_secs
-    );
-
-    let store = KeyringStore::default_store();
-    let token = complete_device_login(
-        &client,
-        code,
-        client_id,
-        client_secret,
-        &store,
-        info.interval_secs,
-        LOGIN_DEADLINE_SECS,
-    )
-    .await?;
-    // StoredToken's Debug is redacted by hand, so this cannot leak the token.
-    tracing::info!(?token, "signed in");
-    println!("\nSigned in. Tokens are in the OS keyring, not on disk.");
-    println!("keyring round-trip: {}", store.load()?.is_some());
-    Ok(())
-}
-
 /// Forget the stored token. Deliberately does not touch the cookie file: that
 /// is the user's own export, and deleting someone's file is not this command's
 /// business.
-fn run_logout() -> color_eyre::Result<()> {
-    use ytm_core::auth::{KeyringStore, TokenStore};
-    // `clear` is documented idempotent: clearing when nothing is stored
-    // succeeds, so "already signed out" is not an error to report.
-    KeyringStore::default_store().clear()?;
-    println!("Signed out — the stored token has been cleared.");
-    println!("A cookie file, if you use one, is left alone.");
-    Ok(())
-}
-
 /// One playlist title per line — the fastest auth check there is, and scriptable.
 async fn run_playlists(cfg: &config::Config) -> color_eyre::Result<()> {
     let source = build_source(cfg).await?;
@@ -363,8 +292,6 @@ async fn main() -> color_eyre::Result<()> {
     // Every subcommand returns an Err on failure, which `main` turns into a
     // non-zero exit — that is what makes these usable from a script.
     match &cli.command {
-        Some(Command::Login) => return run_login(&cfg).await,
-        Some(Command::Logout) => return run_logout(),
         Some(Command::Playlists) => return run_playlists(&cfg).await,
         Some(Command::Config { no_edit }) => return run_config(*no_edit),
         Some(Command::Cache { action }) => {
@@ -506,14 +433,16 @@ mod tests {
     }
 
     #[test]
-    fn login_and_logout_parse() {
+    fn config_is_the_way_in() {
+        // The subcommand that replaced `login`: cookie auth needs a config file,
+        // not a sign-in flow.
         assert!(matches!(
-            Cli::parse_from(["ytm", "login"]).command,
-            Some(Command::Login)
+            Cli::parse_from(["ytm", "config"]).command,
+            Some(Command::Config { no_edit: false })
         ));
         assert!(matches!(
-            Cli::parse_from(["ytm", "logout"]).command,
-            Some(Command::Logout)
+            Cli::parse_from(["ytm", "config", "--no-edit"]).command,
+            Some(Command::Config { no_edit: true })
         ));
     }
 

@@ -16,9 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .ok_or("usage: verify_edit <existing playlist title>")?;
 
-    let common::AuthChoice::Cookie(path) = common::auth_choice()? else {
-        return Err("needs cookie auth".into());
-    };
+    let common::AuthChoice::Cookie(path) = common::auth_choice()?;
     let src = YtMusicSource::from_cookie_file(&path).await?;
 
     let before = src.library_playlists().await?;

@@ -14,9 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .ok_or("usage: check_removable <playlistId>")?;
 
-    let common::AuthChoice::Cookie(path) = common::auth_choice()? else {
-        return Err("needs cookie auth".into());
-    };
+    let common::AuthChoice::Cookie(path) = common::auth_choice()?;
     let src = YtMusicSource::from_cookie_file(&path).await?;
     let tracks = src.playlist_tracks(id.as_str().into()).await?;
 

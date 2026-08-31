@@ -28,6 +28,11 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthKind {
+    /// Kept only so an old config naming it still loads, with a clear error.
+    ///
+    /// Google stopped honouring device-flow OAuth tokens on the InnerTube
+    /// endpoints this app uses, so the path could never work. The implementation
+    /// was removed rather than left as correct-looking code that always fails.
     OAuth,
     Cookie,
 }
@@ -44,7 +49,7 @@ pub struct AuthConfig {
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
-            kind: AuthKind::OAuth,
+            kind: AuthKind::Cookie,
             client_id: None,
             client_secret: None,
             cookie_file: None,
@@ -318,7 +323,9 @@ mod tests {
     #[test]
     fn defaults_apply_when_file_is_absent() {
         let c = Config::from_toml_str("").unwrap();
-        assert_eq!(c.auth.kind, AuthKind::OAuth);
+        // Cookie, because it is the only auth path that works — OAuth was
+        // removed once Google stopped accepting device-flow tokens on InnerTube.
+        assert_eq!(c.auth.kind, AuthKind::Cookie);
         assert_eq!(c.playback.volume, 70);
         assert!(c.ui.vim_keys);
         assert_eq!(c.ui.tick_ms, 250);
@@ -360,6 +367,15 @@ mod tests {
             err.contains("volume"),
             "message should name the offending key, got: {err}"
         );
+    }
+
+    #[test]
+    fn an_old_oauth_config_still_parses() {
+        // It must load, not fail at parse: `build_source` is where the user is
+        // told to switch to cookies, and that message is more use than a TOML
+        // error naming an unknown variant.
+        let c = Config::from_toml_str("[auth]\nkind = \"oauth\"").unwrap();
+        assert_eq!(c.auth.kind, AuthKind::OAuth);
     }
 
     #[test]

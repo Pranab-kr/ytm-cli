@@ -23,9 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .find(|a| !a.starts_with("--"))
         .ok_or("usage: dump_playlist_tracks <playlistId> [--raw]")?;
 
-    let common::AuthChoice::Cookie(path) = common::auth_choice()? else {
-        return Err("this spike needs cookie auth (auth.kind = \"cookie\")".into());
-    };
+    let common::AuthChoice::Cookie(path) = common::auth_choice()?;
     eprintln!("auth: browser cookie ({})", path.display());
 
     let api = ytmapi_rs::YtMusic::from_cookie_file(&path).await?;

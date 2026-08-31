@@ -13,9 +13,7 @@ use ytm_core::ytmusic::YtMusicSource;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let common::AuthChoice::Cookie(path) = common::auth_choice()? else {
-        return Err("this example is cookie-auth only".into());
-    };
+    let common::AuthChoice::Cookie(path) = common::auth_choice()?;
     let source = YtMusicSource::from_cookie_file(&path).await?;
 
     match source.library_albums().await {

@@ -3,13 +3,15 @@
 
 use crate::{mapping, model::*, source::*};
 use ytmapi_rs::YtMusic;
-use ytmapi_rs::auth::{BrowserToken, LoggedIn, OAuthToken};
+use ytmapi_rs::auth::{BrowserToken, LoggedIn};
 use ytmapi_rs::common::{ApiOutcome, YoutubeID};
 use ytmapi_rs::parse::SearchResultPlaylist;
 use ytmapi_rs::query::playlist::PrivacyStatus;
 use ytmapi_rs::query::{CreatePlaylistQuery, EditPlaylistQuery};
 
-/// Generic over the auth token type so OAuth and cookie auth share one impl.
+/// Generic over the token type, though cookie auth is the only one left: the
+/// generic is what keeps `MusicSource` free of any `ytmapi-rs` type, and it costs
+/// nothing to keep.
 pub struct YtMusicSource<A: LoggedIn> {
     api: YtMusic<A>,
 }
@@ -19,15 +21,6 @@ impl YtMusicSource<BrowserToken> {
     pub async fn from_cookie_file(path: impl AsRef<std::path::Path>) -> Result<Self, SourceError> {
         let api = YtMusic::from_cookie_file(path).await.map_err(classify)?;
         Ok(Self { api })
-    }
-}
-
-impl YtMusicSource<OAuthToken> {
-    /// Primary path (FR-A1..A3). The token comes from `oauth::complete_device_login`.
-    pub fn from_oauth(token: OAuthToken) -> Self {
-        Self {
-            api: YtMusic::from_auth_token(token),
-        }
     }
 }
 
@@ -208,7 +201,6 @@ macro_rules! impl_feed {
 }
 
 impl_feed!(BrowserToken);
-impl_feed!(OAuthToken);
 
 /// One `MusicSource` impl per concrete token type.
 ///
@@ -539,4 +531,3 @@ macro_rules! impl_music_source {
 }
 
 impl_music_source!(BrowserToken);
-impl_music_source!(OAuthToken);
