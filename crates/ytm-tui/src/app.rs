@@ -19,6 +19,18 @@ pub enum Pane {
     Queue,
 }
 
+/// Sidebar order, and therefore what the number keys 1-6 select. The sidebar
+/// widget renders from `SOURCES`, which must stay in this order — there is a
+/// test pinning the two together.
+pub const PANE_ORDER: [Pane; 6] = [
+    Pane::Playlists,
+    Pane::Songs,
+    Pane::Albums,
+    Pane::Artists,
+    Pane::Search,
+    Pane::Queue,
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Focus {
     #[default]
@@ -258,8 +270,19 @@ impl AppState {
                 self.focus = Focus::SearchInput;
             }
             InputAction::OpenQueue => self.set_pane(Pane::Queue),
-            InputAction::Left => self.focus = Focus::Sidebar,
+            // `h` is "go up a level" first and "focus the sidebar" second, so
+            // the pair reads like opening and closing a folder. Only the
+            // playlist pane has a level to leave; everywhere else `h` keeps its
+            // old meaning rather than swallowing the key.
+            InputAction::Left => {
+                if self.close_open_playlist() {
+                    // Stay in the list: the user is navigating it, not leaving it.
+                } else {
+                    self.focus = Focus::Sidebar;
+                }
+            }
             InputAction::Right => self.focus = Focus::Main,
+            InputAction::GoTo(n) => self.goto_source(n),
             _ => {} // transport actions are handled by the loop, not here
         }
     }
@@ -331,6 +354,47 @@ impl AppState {
     }
 
     /// Always reset the selection — a stale index points at the wrong row.
+    /// Leave an open playlist and show the playlist list again. Returns false
+    /// when there was no level to leave, so the caller can fall back.
+    ///
+    /// Clears `tracks` as well as the id: they are the open playlist's rows, and
+    /// leaving them would make `list_len` and `selected_track` disagree with
+    /// what is on screen.
+    pub fn close_open_playlist(&mut self) -> bool {
+        if self.pane != Pane::Playlists || self.open_playlist.is_none() {
+            return false;
+        }
+        self.open_playlist = None;
+        self.tracks.clear();
+        self.selected = 0;
+        self.scroll_offset = 0;
+        self.marked.clear();
+        true
+    }
+
+    /// Jump straight to the nth source, counting from 1 in sidebar order.
+    ///
+    /// Out of range is ignored rather than clamped: clamping would make `9` mean
+    /// "Queue", which is not what the user pressed.
+    pub fn goto_source(&mut self, n: u8) {
+        let Some(idx) = (n as usize).checked_sub(1) else {
+            return;
+        };
+        let Some(pane) = PANE_ORDER.get(idx).copied() else {
+            return;
+        };
+        self.sidebar_selected = idx;
+        self.set_pane(pane);
+        // Land in the list, not on the sidebar — the number key already said
+        // which source, so stopping at the sidebar would need a second key.
+        self.focus = if pane == Pane::Search {
+            // Otherwise letters would scroll instead of typing a query.
+            Focus::SearchInput
+        } else {
+            Focus::Main
+        };
+    }
+
     pub fn set_pane(&mut self, p: Pane) {
         self.pane = p;
         self.selected = 0;
@@ -680,5 +744,127 @@ mod tests {
         };
         s.apply(AppEvent::Input(InputAction::Down));
         assert_eq!(s.selected, 0, "modal must capture input");
+    }
+
+    #[test]
+    fn left_closes_an_open_playlist_like_going_up_a_folder() {
+        let mut s = AppState {
+            pane: Pane::Playlists,
+            playlists: vec![Playlist::stub("p1", "Focus")],
+            open_playlist: Some("p1".into()),
+            tracks: vec![Track::stub("v1", "A")],
+            focus: Focus::Main,
+            selected: 3,
+            ..Default::default()
+        };
+        s.apply_input(InputAction::Left);
+        assert!(s.open_playlist.is_none(), "the playlist should be closed");
+        assert!(
+            s.tracks.is_empty(),
+            "its tracks are no longer what the pane shows"
+        );
+        assert_eq!(
+            s.selected, 0,
+            "selection returns to the top of the playlist list"
+        );
+        assert_eq!(s.focus, Focus::Main, "closing keeps focus on the list");
+    }
+
+    #[test]
+    fn left_with_nothing_open_falls_back_to_focusing_the_sidebar() {
+        let mut s = AppState {
+            pane: Pane::Playlists,
+            focus: Focus::Main,
+            ..Default::default()
+        };
+        s.apply_input(InputAction::Left);
+        assert_eq!(s.focus, Focus::Sidebar);
+    }
+
+    #[test]
+    fn left_in_a_pane_with_no_hierarchy_just_focuses_the_sidebar() {
+        // Songs has nothing to go "back" to, so h must not eat the keypress.
+        let mut s = AppState {
+            pane: Pane::Songs,
+            tracks: vec![Track::stub("v1", "A")],
+            focus: Focus::Main,
+            ..Default::default()
+        };
+        s.apply_input(InputAction::Left);
+        assert_eq!(s.focus, Focus::Sidebar);
+        assert_eq!(s.tracks.len(), 1, "Songs tracks are not a playlist view");
+    }
+
+    #[test]
+    fn right_from_the_sidebar_moves_into_the_list() {
+        let mut s = AppState {
+            focus: Focus::Sidebar,
+            ..Default::default()
+        };
+        s.apply_input(InputAction::Right);
+        assert_eq!(s.focus, Focus::Main);
+    }
+
+    #[test]
+    fn a_number_key_selects_its_source_and_switches_pane() {
+        // 1-6 match the sidebar order top to bottom.
+        let mut s = AppState::default();
+        s.apply_input(InputAction::GoTo(3));
+        assert_eq!(s.pane, Pane::Albums);
+        assert_eq!(s.sidebar_selected, 2, "the sidebar highlight follows");
+        assert_eq!(s.focus, Focus::Main, "a source jump lands in the list");
+    }
+
+    #[test]
+    fn number_keys_cover_every_source_in_sidebar_order() {
+        for (n, want) in [
+            (1, Pane::Playlists),
+            (2, Pane::Songs),
+            (3, Pane::Albums),
+            (4, Pane::Artists),
+            (5, Pane::Search),
+            (6, Pane::Queue),
+        ] {
+            let mut s = AppState::default();
+            s.apply_input(InputAction::GoTo(n));
+            assert_eq!(s.pane, want, "{n} should select {want:?}");
+        }
+    }
+
+    #[test]
+    fn an_out_of_range_number_is_ignored_rather_than_clamped() {
+        // Clamping would make 9 mean "Queue", which the user did not ask for.
+        let mut s = AppState {
+            pane: Pane::Songs,
+            ..Default::default()
+        };
+        s.apply_input(InputAction::GoTo(9));
+        assert_eq!(s.pane, Pane::Songs);
+        s.apply_input(InputAction::GoTo(0));
+        assert_eq!(s.pane, Pane::Songs);
+    }
+
+    #[test]
+    fn jumping_to_search_focuses_the_input_so_typing_works() {
+        // Otherwise `5` lands you in a search pane where letters scroll.
+        let mut s = AppState::default();
+        s.apply_input(InputAction::GoTo(5));
+        assert_eq!(s.pane, Pane::Search);
+        assert_eq!(s.focus, Focus::SearchInput);
+    }
+
+    #[test]
+    fn opening_a_playlist_then_going_back_leaves_the_list_navigable() {
+        let mut s = AppState {
+            pane: Pane::Playlists,
+            playlists: vec![Playlist::stub("p1", "A"), Playlist::stub("p2", "B")],
+            open_playlist: Some("p1".into()),
+            tracks: vec![Track::stub("v1", "T")],
+            ..Default::default()
+        };
+        s.apply_input(InputAction::Left);
+        s.apply_input(InputAction::Down);
+        assert_eq!(s.selected, 1, "list_len must count playlists again");
+        assert!(s.selected_playlist().is_some());
     }
 }

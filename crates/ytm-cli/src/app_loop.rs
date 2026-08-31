@@ -526,18 +526,46 @@ pub fn dispatch_input(
             open_rename_prompt(state);
         }
         A::Refresh => {
-            let task = match state.pane {
-                Pane::Songs => Task::LoadSongs,
-                Pane::Albums => Task::LoadAlbums,
-                Pane::Artists => Task::LoadArtists,
-                _ => Task::LoadPlaylists,
-            };
-            return start(state, task);
+            return start(state, pane_task(state.pane)?);
+        }
+        // The forward half of the h/l pair: `l` descends into the selected
+        // playlist, `h` comes back out. Opening needs a fetch, so it cannot
+        // live in the reducer with the rest of Left/Right.
+        //
+        // Only descends from the playlist list. On a track pane there is
+        // nothing below, and playing here would make a navigation key start
+        // audio — Enter is the key that plays.
+        A::Right => {
+            if let Some(p) = state.selected_playlist() {
+                return start(state, Task::OpenPlaylist(p.id.clone()));
+            }
+            state.apply(AppEvent::Input(A::Right));
+        }
+        // A number key switches pane, so the new pane needs its rows.
+        A::GoTo(n) => {
+            state.apply(AppEvent::Input(A::GoTo(n)));
+            if let Some(task) = pane_task(state.pane) {
+                return start(state, task);
+            }
         }
         // Everything else is a state transition.
         other => state.apply(AppEvent::Input(other)),
     }
     None
+}
+
+/// The fetch a pane needs to fill itself, or `None` when it has nothing to load.
+///
+/// Queue is local state owned by the actor, and Search waits for a query — a
+/// fetch for either would be a request the user never made.
+fn pane_task(pane: Pane) -> Option<Task> {
+    Some(match pane {
+        Pane::Playlists => Task::LoadPlaylists,
+        Pane::Songs => Task::LoadSongs,
+        Pane::Albums => Task::LoadAlbums,
+        Pane::Artists => Task::LoadArtists,
+        Pane::Search | Pane::Queue => return None,
+    })
 }
 
 /// Record the current query on every keystroke, restarting the debounce timer.
@@ -1933,5 +1961,74 @@ mod tests {
             art_tick(&mut art, &s).is_none(),
             "a dead thumbnail must not be retried every tick"
         );
+    }
+
+    #[test]
+    fn right_on_a_playlist_opens_it_like_enter() {
+        // The forward half of the h/l pair: `l` descends into a playlist, `h`
+        // comes back out. Opening is a network task, so it lives here rather
+        // than in the reducer.
+        let (src, player) = deps();
+        let mut s = AppState {
+            pane: Pane::Playlists,
+            playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
+            focus: Focus::Main,
+            ..Default::default()
+        };
+        let task = dispatch_input(InputAction::Right, &mut s, &src, &*player);
+        assert_eq!(task, Some(Task::OpenPlaylist("p1".into())));
+    }
+
+    #[test]
+    fn right_inside_an_open_playlist_does_not_reopen_it() {
+        // Nothing to descend into, so `l` must not fire a redundant fetch.
+        let (src, player) = deps();
+        let mut s = AppState {
+            pane: Pane::Playlists,
+            playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
+            open_playlist: Some("p1".into()),
+            tracks: vec![ytm_core::Track::stub("v1", "T")],
+            focus: Focus::Main,
+            ..Default::default()
+        };
+        assert!(dispatch_input(InputAction::Right, &mut s, &src, &*player).is_none());
+    }
+
+    #[test]
+    fn right_on_a_track_pane_does_not_play_anything() {
+        // `l` is navigation, not Enter. Playing on a focus change would be a
+        // nasty surprise.
+        let (src, player) = deps();
+        let mut s = AppState {
+            pane: Pane::Songs,
+            tracks: vec![ytm_core::Track::stub("v1", "T")],
+            focus: Focus::Main,
+            ..Default::default()
+        };
+        let task = dispatch_input(InputAction::Right, &mut s, &src, &*player);
+        assert!(task.is_none());
+        assert!(
+            player.commands().is_empty(),
+            "nothing should reach the player"
+        );
+    }
+
+    #[test]
+    fn a_number_key_switching_to_a_pane_loads_it() {
+        // Pressing 3 for Albums must fetch albums, or the pane sits empty.
+        let (src, player) = deps();
+        let mut s = AppState::default();
+        let task = dispatch_input(InputAction::GoTo(3), &mut s, &src, &*player);
+        assert_eq!(task, Some(Task::LoadAlbums));
+        assert_eq!(s.pane, Pane::Albums);
+    }
+
+    #[test]
+    fn a_number_key_for_the_queue_needs_no_fetch() {
+        // The queue is local state owned by the actor; there is nothing to load.
+        let (src, player) = deps();
+        let mut s = AppState::default();
+        assert!(dispatch_input(InputAction::GoTo(6), &mut s, &src, &*player).is_none());
+        assert_eq!(s.pane, Pane::Queue);
     }
 }

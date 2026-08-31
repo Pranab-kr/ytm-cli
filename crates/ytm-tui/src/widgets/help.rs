@@ -35,8 +35,8 @@ fn action_label(a: &InputAction) -> Option<&'static str> {
         A::Quit => "quit",
         A::Up => "up",
         A::Down => "down",
-        A::Left => "focus sidebar",
-        A::Right => "focus list",
+        A::Left => "back / sidebar",
+        A::Right => "open / list",
         A::Home => "first row",
         A::End => "last row",
         A::TogglePause => "play / pause",
@@ -73,11 +73,20 @@ fn action_label(a: &InputAction) -> Option<&'static str> {
 /// Rows of `key  action`, from the *live* keymap — a user who rebound `quit`
 /// must not be told to press `q`.
 fn rows(km: &KeyMap) -> Vec<(String, &'static str)> {
-    km.bindings()
+    let mut v: Vec<(String, &'static str)> = km
+        .bindings()
         .iter()
         .filter_map(|(k, a)| action_label(a).map(|l| (k.clone(), l)))
-        .collect()
+        .collect();
+    v.extend(FIXED_ROWS.iter().map(|(k, l)| ((*k).to_owned(), *l)));
+    v
 }
+
+/// Bindings that are not single remappable characters, so `KeyMap::bindings`
+/// cannot report them — the digits are matched in `resolve`, and Tab is a
+/// non-char key. Listed explicitly because FR-U2 says the overlay shows what
+/// the user can actually press.
+const FIXED_ROWS: [(&str, &str); 2] = [("1-6", "jump to source"), ("tab", "next source")];
 
 /// Column count and column width for `n` bindings in a `w` x `h` inner area.
 ///
@@ -268,5 +277,26 @@ mod tests {
             )
         })
         .unwrap();
+    }
+
+    #[test]
+    fn the_overlay_lists_the_number_keys_for_sources() {
+        // FR-U2: a binding the user can press must be discoverable. The digits
+        // are resolved in `resolve`, not stored in the char table, so without an
+        // explicit row they would be invisible.
+        let text = text_of(&help_open());
+        assert!(
+            text.contains("1-6"),
+            "the source jump keys should be listed, got: {text}"
+        );
+    }
+
+    #[test]
+    fn the_overlay_explains_that_h_goes_back() {
+        let text = text_of(&help_open());
+        assert!(
+            text.contains("back") || text.contains("close"),
+            "h should read as going back a level, got: {text}"
+        );
     }
 }

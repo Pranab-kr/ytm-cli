@@ -3782,8 +3782,20 @@ impl AppState {
             InputAction::OpenHelp => self.modal = Some(Modal::Help),
             InputAction::OpenSearch => { self.set_pane(Pane::Search); self.focus = Focus::SearchInput; }
             InputAction::OpenQueue => self.set_pane(Pane::Queue),
-            InputAction::Left => self.focus = Focus::Sidebar,
+            // AMENDED 2026-08-31 (owner request): `h`/`l` read as folder
+            // open/close, not just focus movement. `Left` leaves an open
+            // playlist first and only falls back to focusing the sidebar when
+            // there is no level to leave; `close_open_playlist` also clears
+            // `tracks`, or `list_len` disagrees with what is on screen.
+            // `GoTo(n)` was declared in this enum from the start but never
+            // bound — it now jumps to the nth source in sidebar order.
+            InputAction::Left => {
+                if !self.close_open_playlist() {
+                    self.focus = Focus::Sidebar;
+                }
+            }
             InputAction::Right => self.focus = Focus::Main,
+            InputAction::GoTo(n) => self.goto_source(n),
             _ => {}   // transport actions are handled by the loop, not here
         }
     }
@@ -4053,6 +4065,12 @@ impl KeyMap {
         }
 
         match key.code {
+            // AMENDED 2026-08-31: 1-6 jump to a source, matched before the char
+            // table so a digit cannot be rebound away by accident. Only the six
+            // digits that name a source are bound — 7-9 and 0 fall through to
+            // None rather than being swallowed. The SearchInput branch above
+            // still wins, so a query like "90's" is typable.
+            KeyCode::Char(c @ '1'..='6') => Some(InputAction::GoTo(c as u8 - b'0')),
             KeyCode::Char(c) => self.chars.get(&c).cloned(),
             KeyCode::Down => Some(InputAction::Down),
             KeyCode::Up => Some(InputAction::Up),

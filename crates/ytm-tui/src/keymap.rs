@@ -78,6 +78,11 @@ impl KeyMap {
         }
 
         match key.code {
+            // 1-6 jump to a source, checked before the char table so a digit
+            // cannot be rebound to something else by accident. Only the digits
+            // that name a source are bound; 7-9 and 0 fall through to `None`
+            // rather than being swallowed.
+            KeyCode::Char(c @ '1'..='6') => Some(InputAction::GoTo(c as u8 - b'0')),
             KeyCode::Char(c) => self.chars.get(&c).cloned(),
             KeyCode::Down => Some(InputAction::Down),
             KeyCode::Up => Some(InputAction::Up),
@@ -279,5 +284,34 @@ mod tests {
     fn bindings_list_is_non_empty_for_the_help_overlay() {
         // FR-U2: '?' must show something real.
         assert!(!KeyMap::default().bindings().is_empty());
+    }
+
+    #[test]
+    fn number_keys_jump_straight_to_a_source() {
+        let m = KeyMap::default();
+        assert_eq!(m.resolve(key('1'), Focus::Main), Some(InputAction::GoTo(1)));
+        assert_eq!(m.resolve(key('6'), Focus::Main), Some(InputAction::GoTo(6)));
+    }
+
+    #[test]
+    fn digits_outside_the_source_range_are_not_bound() {
+        // 7-9 and 0 name no source; binding them would swallow the key.
+        let m = KeyMap::default();
+        assert_eq!(m.resolve(key('7'), Focus::Main), None);
+        assert_eq!(m.resolve(key('0'), Focus::Main), None);
+    }
+
+    #[test]
+    fn a_digit_typed_into_the_search_field_is_a_character_not_a_jump() {
+        // Searching for "90's" must be possible.
+        let m = KeyMap::default();
+        assert_eq!(
+            m.resolve(key('9'), Focus::SearchInput),
+            Some(InputAction::Char('9'))
+        );
+        assert_eq!(
+            m.resolve(key('1'), Focus::SearchInput),
+            Some(InputAction::Char('1'))
+        );
     }
 }

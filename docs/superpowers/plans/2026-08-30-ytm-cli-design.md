@@ -224,6 +224,16 @@ tracks them.
 
 ### UX
 - **FR-U1** Vim-style keymap by default, fully remappable via config.
+  - **FR-U1a** (added 2026-08-31, owner request) `h`/`l` and Left/Right navigate
+    the hierarchy like opening and closing a folder: `l` descends into the
+    selected playlist, `h` leaves it. With no level to leave, `h` falls back to
+    focusing the sidebar and `l` to focusing the list, which is what they did
+    before.
+  - **FR-U1b** (added 2026-08-31, owner request) `1`-`6` jump straight to the
+    nth sidebar source. `GoTo(u8)` existed in `InputAction` from the original
+    plan but was never bound; these are that binding. Digits outside the range
+    are unbound rather than clamped, and a digit typed into the search field is
+    a character, not a jump.
 - **FR-U2** `?` opens a help overlay listing active bindings.
 - **FR-U3** Toasts for success/error, auto-dismissing after ~4s.
 - **FR-U4** Spinner on every in-flight network operation.

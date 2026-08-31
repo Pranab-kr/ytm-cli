@@ -52,3 +52,21 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
 
     f.render_widget(Paragraph::new(lines), area);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_number_keys_match_the_order_the_sidebar_renders() {
+        // `goto_source` indexes PANE_ORDER; this widget renders SOURCES. If the
+        // two ever disagree, pressing 3 highlights one row and opens another.
+        use crate::app::PANE_ORDER;
+        let rendered: Vec<_> = SOURCES.iter().map(|(p, _)| *p).collect();
+        assert_eq!(
+            rendered,
+            PANE_ORDER.to_vec(),
+            "sidebar order and PANE_ORDER must stay identical"
+        );
+    }
+}

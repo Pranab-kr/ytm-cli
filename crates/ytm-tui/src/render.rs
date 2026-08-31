@@ -22,6 +22,10 @@ const SIDEBAR_WIDTH: u16 = 22;
 const NOWPLAYING_HEIGHT: u16 = 3;
 /// Columns the art panel takes when it appears.
 const ART_WIDTH: u16 = 24;
+/// Blank columns between the track list and the art panel. Without it the
+/// artwork's left edge sits flush against the duration column and the two read
+/// as one smeared block.
+const ART_GAP: u16 = 2;
 /// The main pane keeps at least this much, or the art panel does not appear.
 /// A shredded track list is worse than absent art (FR-U5).
 const MAIN_MIN_WIDTH: u16 = 48;
@@ -32,14 +36,19 @@ const MAIN_MIN_WIDTH: u16 = 48;
 /// The panel appears only when art is actually displayable, something is
 /// playing, and the list keeps enough columns to stay readable.
 pub fn split_for_art(area: Rect, art_enabled: bool, has_art: bool) -> (Rect, Option<Rect>) {
-    if !art_enabled || !has_art || area.width < MAIN_MIN_WIDTH + ART_WIDTH {
+    if !art_enabled || !has_art || area.width < MAIN_MIN_WIDTH + ART_WIDTH + ART_GAP {
         return (area, None);
     }
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(ART_WIDTH)])
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(ART_GAP),
+            Constraint::Length(ART_WIDTH),
+        ])
         .split(area);
-    (cols[0], Some(cols[1]))
+    // cols[1] is the gap: deliberately left unpainted.
+    (cols[0], Some(cols[2]))
 }
 
 pub fn render(f: &mut Frame, s: &AppState, t: &Theme, km: &KeyMap, art: &mut art::ArtCache) {
@@ -260,5 +269,38 @@ mod tests {
     fn an_eight_by_four_terminal_still_does_not_panic_with_art_enabled() {
         let s = playing();
         let _ = frame_text(&s, &mut ArtCache::disabled(), 8, 4);
+    }
+
+    #[test]
+    fn the_art_panel_is_separated_from_the_list_by_a_gap() {
+        // Without it the artwork's left edge sits flush against the duration
+        // column, and the two read as one smeared block.
+        let full = Rect::new(0, 0, 100, 20);
+        let (main, art) = split_for_art(full, true, true);
+        let art = art.expect("a 100-column frame has room for art");
+        assert!(
+            art.x > main.x + main.width,
+            "art at x={} must start past the list's right edge at {}",
+            art.x,
+            main.x + main.width
+        );
+        assert_eq!(
+            art.x - (main.x + main.width),
+            ART_GAP,
+            "the gap should be exactly ART_GAP columns"
+        );
+    }
+
+    #[test]
+    fn the_gap_is_counted_when_deciding_whether_art_fits() {
+        // A frame with room for the panel but not the gap must get no panel,
+        // rather than a panel that steals a column from the list.
+        let exact = Rect::new(0, 0, MAIN_MIN_WIDTH + ART_WIDTH, 20);
+        let (main, art) = split_for_art(exact, true, true);
+        assert_eq!(main, exact, "one column short of the gap means no art");
+        assert!(art.is_none());
+
+        let enough = Rect::new(0, 0, MAIN_MIN_WIDTH + ART_WIDTH + ART_GAP, 20);
+        assert!(split_for_art(enough, true, true).1.is_some());
     }
 }
