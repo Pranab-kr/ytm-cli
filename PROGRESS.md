@@ -3,9 +3,9 @@
 **Read this first. Update it before you stop.** It is the handoff between agents.
 
 Last updated: 2026-08-31 by the implementation agent
-Current phase: **Phase 8 complete, partly live-verified. Tasks 1-32 committed.**
-Next action: **Task 33** — SQLite cache, start of Phase 9. First, the owner
-should re-test **delete** and **add-to-playlist** (see "Live verification").
+Current phase: **Phase 9 underway. Tasks 1-33 committed.**
+Next action: **Task 34** — album art. First, the owner should re-test **delete**
+and **add-to-playlist** (see "Live verification").
 
 **Every browse pane works against the live account, and the queue is editable.**
 10 real playlists with track counts, Enter opens one and renders its tracks, `/`
@@ -21,6 +21,11 @@ delete are wired with optimistic updates and per-edit rollback. 230 tests pass.
    `MockSource` test had passed. Create and rename are confirmed working against
    the account. Delete and add-to-playlist are fixed but not yet retested.
 
+**Task 33 landed the cache, and measuring it found a real NFR-1 violation.**
+Cold start to first frame was **2480 ms** against a 300 ms budget, because
+`build_source` awaits a cookie-validation round trip *before* the terminal opens.
+Reordered so the cached frame paints first: **62 ms**. 266 tests pass.
+
 **Both gates are GREEN.**
 
 Cookie auth is the live auth path. The cookie file expires (see "Cookie
@@ -31,9 +36,10 @@ code bug.
 
 ## Where things stand
 
-Tasks 1-32 are implemented, committed, and pass `./scripts/check.sh`. Phases 0-7
-are complete. Phase 8's code is complete but **unverified against the live
-account** — see "Owner decisions due".
+Tasks 1-33 are implemented, committed, and pass `./scripts/check.sh`. Phases 0-7
+are complete. Phase 8's code is complete and partly live-verified — delete and
+add-to-playlist still need a retest (see "Live verification"). Phase 9 has
+started: Task 33 (the cache) is done.
 
 The whole vertical slice is now connected: config -> cookie auth -> `MusicSource`
 -> `tokio::spawn` -> `AppEvent` -> `AppState` -> `render` -> a real terminal, plus
@@ -93,7 +99,7 @@ guessing, and re-verify against the vendored source if a call does not compile.
 | 6 — Browse | 22–25 | ✅ done | Event loop, lists, search with debounce |
 | 7 — Queue UI | 26–27 | ✅ done | Queue view, toasts, spinner, help overlay |
 | 8 — CRUD | 28–32 | 🟡 create+rename live-verified | Playlist create/rename/delete, add/remove tracks. FR-C5 now works (option A). Delete + add need a retest |
-| 9 — Polish | 33–38 | ⬜ not started | Cache, album art, MPRIS, CLI, README |
+| 9 — Polish | 33–38 | 🟡 Task 33 done | Cache ✅, album art, MPRIS, CLI, README |
 
 ⚠️ = risk phase. See below.
 
@@ -207,6 +213,7 @@ one should stop, note it here, and ask.
 | 9.7b | Cookie auth: save the **raw `Cookie:` header value** from a logged-in `music.youtube.com` request into a file (NOT Netscape cookies.txt — `BrowserToken::from_str` uses the contents verbatim as the header and requires `SAPISID=` in it), then set `auth.kind = "cookie"` and `auth.cookie_file` in config.toml | ✅ done 2026-08-30 — **repeat whenever cookies expire**, see "Cookie expiry" |
 | 12.6 | Confirm audio is audible | ✅ done 2026-08-30 |
 | 30.5 / 31.5 / 32.5 | Verify playlist edits appear in the YouTube Music web UI | ⬜ |
+| 33.6 | Cold-start budget (NFR-1) | ✅ done 2026-08-31 — 62ms to first frame on a warm cache, measured from the log |
 | 34.5 | Check album art in a graphics-capable terminal | ⬜ |
 | 35.5 | Check media keys and `playerctl metadata` | ⬜ |
 
@@ -1033,3 +1040,57 @@ Flagged to the owner.
 
 Next: the owner retests delete and add-to-playlist, then **Task 33** (SQLite
 cache, Phase 9).
+
+### 2026-08-31 — implementation agent (Task 33, the cache and an NFR-1 fix)
+
+**Task 33 done.** `crates/ytm-core/src/cache.rs` plus the startup wiring in
+`main.rs` and `app_loop.rs`. 14 new tests, 266 pass workspace-wide. Gate green,
+committed.
+
+**Measuring the budget found a real violation, and it was not in the cache.**
+Step 6 says to check that nothing awaits the network before the first
+`terminal.draw`. Something did: `build_source` calls
+`YtMusic::from_cookie_file`, which does a **cookie-validation round trip** before
+returning a handle, and `main` ran it before the terminal existed. Warm cold
+start was **2480 ms** against a 300 ms budget, all of it a blank screen.
+
+Fixed by ordering `main` as: open cache -> preload state -> open terminal ->
+**draw** -> build the source -> run the loop. **62 ms** to first frame, measured
+from process start against a `first frame drawn` log line (nothing on screen is
+observable from outside the process, so that line is the measurement point and is
+worth keeping). The log shows `event="playlists" rows=11` arriving *after* the
+frame, so the refresh still works behind the reorder.
+
+Two consequences of that move, both deliberate:
+- `preload_from_cache` is `pub` and called from `main`, not from `run`. `run`
+  still redraws immediately, so it stays correct when called with a cold cache.
+- A `build_source` failure now happens with the terminal already in the alternate
+  screen, so that arm drops the guard before returning the error — otherwise the
+  report prints where it cannot be read. Same reasoning as the panic hook.
+
+**Write-through skips an empty library response, on purpose.** Under cookie auth
+an expired cookie answers HTTP 200 with zero rows (see "Cookie expiry"), and
+caching that would turn a one-off auth lapse into a wiped cache — the next launch
+would come up blank with nothing to fall back on. An account that really is empty
+just keeps a stale cache, which is the cheaper mistake. There is a test.
+Search results are not cached either: they belong to a query, not to the library.
+Playlist tracks *are* written through even when empty, because they are keyed by
+playlist id and cannot wipe anything else.
+
+**Two small deviations from the plan's code.**
+- `rusqlite` 0.40.2 has no `FromSql`/`ToSql` for `u64`, so `duration` is stored
+  and read as `i64` (`.max(0)` on the way back). The plan's `r.get(5)?` into a
+  `u64` does not compile.
+- `save_*` uses `conn.unchecked_transaction()`, not `conn.transaction()` — the
+  latter needs `&mut Connection`, and `Cache`'s methods take `&self` so the whole
+  thing stays shareable.
+
+**Note for Task 38 (requirement checklist).** NFR-1 is measured and green at
+62 ms, but from the *log*, not from a human watching the screen. The
+`cached_tracks=0` in that line is also worth knowing: the library-songs pane is
+only fetched when the user visits it, so a first-launch cache holds playlists
+only. Nothing is wrong; a cold Songs pane on the second launch is expected.
+
+Next: **Task 34** — album art. Note the tmux/`TERM=tmux-256color` caveat recorded
+under "Environment": kitty graphics may be blocked, and the documented response is
+to record it as a known limitation rather than fight it.
