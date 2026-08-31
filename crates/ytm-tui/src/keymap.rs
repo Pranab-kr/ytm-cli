@@ -60,8 +60,28 @@ impl KeyMap {
     pub fn resolve(&self, key: KeyEvent, focus: Focus) -> Option<InputAction> {
         // Ctrl-C escapes everything, including a text field.
         if key.modifiers.contains(KeyModifiers::CONTROL) {
+            // Ctrl+C first: it is the escape hatch and must not be shadowed by
+            // any of the editing chords below.
+            if key.code == KeyCode::Char('c') {
+                return Some(InputAction::Quit);
+            }
+            // The readline chords only mean anything where there is text and a
+            // caret. Outside a field they stay unbound rather than being given
+            // some second meaning in a list.
+            if focus == Focus::SearchInput {
+                return match key.code {
+                    KeyCode::Char('w') => Some(InputAction::DeleteWordBack),
+                    KeyCode::Char('a') => Some(InputAction::LineStart),
+                    KeyCode::Char('e') => Some(InputAction::LineEnd),
+                    KeyCode::Left => Some(InputAction::WordLeft),
+                    KeyCode::Right => Some(InputAction::WordRight),
+                    // Paging the results while the query has focus is still useful.
+                    KeyCode::Char('d') => Some(InputAction::PageDown),
+                    KeyCode::Char('u') => Some(InputAction::PageUp),
+                    _ => None,
+                };
+            }
             return match key.code {
-                KeyCode::Char('c') => Some(InputAction::Quit),
                 KeyCode::Char('d') => Some(InputAction::PageDown),
                 KeyCode::Char('u') => Some(InputAction::PageUp),
                 _ => None,
@@ -74,8 +94,14 @@ impl KeyMap {
                 KeyCode::Backspace => Some(InputAction::Backspace),
                 KeyCode::Esc => Some(InputAction::Cancel),
                 KeyCode::Enter => Some(InputAction::Confirm),
+                // Down/Up move through the results below; Left/Right move the
+                // caret, which is what they mean in every other text field.
                 KeyCode::Down => Some(InputAction::Down),
                 KeyCode::Up => Some(InputAction::Up),
+                KeyCode::Left => Some(InputAction::CharLeft),
+                KeyCode::Right => Some(InputAction::CharRight),
+                KeyCode::Home => Some(InputAction::LineStart),
+                KeyCode::End => Some(InputAction::LineEnd),
                 _ => None,
             };
         }
@@ -422,5 +448,142 @@ mod tests {
             None,
             "a remap is exclusive, so the default must be gone"
         );
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn ctrl_code(k: KeyCode) -> KeyEvent {
+        KeyEvent::new(k, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_w_in_the_search_field_deletes_a_word() {
+        // Through `resolve`, not straight into the reducer: the reducer handling
+        // an action proves nothing if no key press can produce it.
+        let m = KeyMap::default();
+        assert_eq!(
+            m.resolve(ctrl('w'), Focus::SearchInput),
+            Some(InputAction::DeleteWordBack)
+        );
+    }
+
+    #[test]
+    fn ctrl_arrows_in_the_search_field_move_by_word() {
+        let m = KeyMap::default();
+        assert_eq!(
+            m.resolve(ctrl_code(KeyCode::Left), Focus::SearchInput),
+            Some(InputAction::WordLeft)
+        );
+        assert_eq!(
+            m.resolve(ctrl_code(KeyCode::Right), Focus::SearchInput),
+            Some(InputAction::WordRight)
+        );
+    }
+
+    #[test]
+    fn ctrl_a_and_ctrl_e_jump_to_the_ends_of_the_search_line() {
+        let m = KeyMap::default();
+        assert_eq!(
+            m.resolve(ctrl('a'), Focus::SearchInput),
+            Some(InputAction::LineStart)
+        );
+        assert_eq!(
+            m.resolve(ctrl('e'), Focus::SearchInput),
+            Some(InputAction::LineEnd)
+        );
+    }
+
+    #[test]
+    fn plain_arrows_in_the_search_field_move_the_caret() {
+        // Left/Right were unhandled in the field, so the per-character motion
+        // the reducer implements was unreachable too.
+        let m = KeyMap::default();
+        assert_eq!(
+            m.resolve(
+                KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+                Focus::SearchInput
+            ),
+            Some(InputAction::CharLeft)
+        );
+        assert_eq!(
+            m.resolve(
+                KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+                Focus::SearchInput
+            ),
+            Some(InputAction::CharRight)
+        );
+    }
+
+    #[test]
+    fn ctrl_c_still_quits_from_the_search_field() {
+        // The chords above must not shadow the escape hatch.
+        let m = KeyMap::default();
+        assert_eq!(
+            m.resolve(ctrl('c'), Focus::SearchInput),
+            Some(InputAction::Quit)
+        );
+        assert_eq!(m.resolve(ctrl('c'), Focus::Main), Some(InputAction::Quit));
+    }
+
+    #[test]
+    fn ctrl_d_and_ctrl_u_still_page_in_a_list() {
+        let m = KeyMap::default();
+        assert_eq!(
+            m.resolve(ctrl('d'), Focus::Main),
+            Some(InputAction::PageDown)
+        );
+        assert_eq!(m.resolve(ctrl('u'), Focus::Main), Some(InputAction::PageUp));
+    }
+
+    #[test]
+    fn the_editing_chords_do_nothing_outside_a_text_field() {
+        // In a list, Ctrl+W must not silently mean something else.
+        let m = KeyMap::default();
+        assert_eq!(m.resolve(ctrl('w'), Focus::Main), None);
+        assert_eq!(m.resolve(ctrl('e'), Focus::Main), None);
+        assert_eq!(m.resolve(ctrl_code(KeyCode::Left), Focus::Main), None);
+    }
+
+    #[test]
+    fn the_theme_and_config_keys_are_reachable_from_a_key_press() {
+        // Both are handled in the event loop, which no unit test enters, so
+        // without this nothing proves a user can produce them.
+        let m = KeyMap::default();
+        assert_eq!(
+            m.resolve(key('t'), Focus::Main),
+            Some(InputAction::CycleTheme)
+        );
+        assert_eq!(
+            m.resolve(key(','), Focus::Main),
+            Some(InputAction::EditConfig)
+        );
+    }
+
+    #[test]
+    fn t_and_comma_are_text_while_typing_a_name() {
+        // A playlist called "night, take 2" must be typeable.
+        let m = KeyMap::default();
+        assert_eq!(
+            m.resolve(key('t'), Focus::SearchInput),
+            Some(InputAction::Char('t'))
+        );
+        assert_eq!(
+            m.resolve(key(','), Focus::SearchInput),
+            Some(InputAction::Char(','))
+        );
+    }
+
+    #[test]
+    fn every_action_name_the_config_accepts_maps_to_a_real_action() {
+        // ACTION_NAMES is hand-maintained beside action_from_name; a name in one
+        // and not the other is a binding the user can write that does nothing.
+        for n in KeyMap::action_names() {
+            assert!(
+                action_from_name(n).is_some(),
+                "{n:?} is offered to users but maps to no action"
+            );
+        }
     }
 }

@@ -3,7 +3,7 @@
 use crate::{
     app::{AppState, Focus},
     theme::Theme,
-    util::text::{tail_to_width, truncate_to_width},
+    util::text::{display_width, tail_to_width, truncate_to_width},
 };
 use ratatui::{
     Frame,
@@ -37,17 +37,47 @@ pub fn draw_input(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
             truncate_to_width("type to search", budget),
             Style::default().fg(t.fg_dim),
         ));
+        if focused {
+            spans.push(Span::styled(CURSOR, Style::default().fg(t.accent)));
+        }
+    } else if focused {
+        // Split the query at the caret and draw it between the halves. Painting
+        // it after the whole string instead would leave the word motions moving
+        // state that nothing on screen reflects.
+        let (before, after) = split_at_cursor(&s.search_query, s.search_cursor);
+        // The caret takes a column, and `before` is truncated from the left so
+        // the caret stays on screen while typing a long query.
+        let left_budget = budget.saturating_sub(1);
+        let left = tail_to_width(before, left_budget);
+        let right_budget = left_budget.saturating_sub(display_width(&left));
+        spans.push(Span::styled(left, Style::default().fg(t.fg_bright)));
+        spans.push(Span::styled(CURSOR, Style::default().fg(t.accent)));
+        spans.push(Span::styled(
+            truncate_to_width(after, right_budget),
+            Style::default().fg(t.fg_bright),
+        ));
     } else {
+        // Unfocused: no caret, so the tail of the query is what matters.
         spans.push(Span::styled(
             tail_to_width(&s.search_query, budget),
             Style::default().fg(t.fg_bright),
         ));
     }
-    if focused {
-        spans.push(Span::styled(CURSOR, Style::default().fg(t.accent)));
-    }
 
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Split the query at the caret, clamped and snapped to a char boundary.
+///
+/// The offset can be stale — the query is replaced from outside the field — and
+/// slicing a stale or mid-codepoint index panics, which in a TUI takes the whole
+/// session down rather than merely looking wrong.
+fn split_at_cursor(q: &str, cursor: usize) -> (&str, &str) {
+    let mut at = cursor.min(q.len());
+    while at > 0 && !q.is_char_boundary(at) {
+        at -= 1;
+    }
+    q.split_at(at)
 }
 
 /// Shown when a query returned nothing, to distinguish it from "not searched
@@ -161,5 +191,55 @@ mod tests {
         .unwrap();
         // Row 1 of the main pane is the query row; it must stay one row.
         assert!(text_of(&s).contains("Search:"));
+    }
+
+    #[test]
+    fn the_caret_is_drawn_where_the_cursor_actually_is() {
+        // The whole point of the motions is visible feedback. If the caret is
+        // always painted after the text, Ctrl+Left moves state nothing can see
+        // and the feature looks broken however correct the reducer is.
+        use crate::app::{AppState, Focus, Pane};
+        let mut s = AppState {
+            pane: Pane::Search,
+            focus: Focus::SearchInput,
+            search_query: "boards of canada".into(),
+            search_cursor: "boards of canada".len(),
+            ..Default::default()
+        };
+        let at_end = text_of(&s);
+        s.search_cursor = "boards".len();
+        let mid_line = text_of(&s);
+        assert_ne!(
+            at_end, mid_line,
+            "moving the caret must change what is on screen"
+        );
+    }
+
+    #[test]
+    fn the_caret_sits_between_the_two_halves_of_the_query() {
+        use crate::app::{AppState, Focus, Pane};
+        let s = AppState {
+            pane: Pane::Search,
+            focus: Focus::SearchInput,
+            search_query: "abc xyz".into(),
+            search_cursor: 3, // right after "abc"
+            ..Default::default()
+        };
+        // The buffer is row-major across the whole 80-column frame, so the query
+        // row has to be located rather than assumed to be the first one.
+        let t = text_of(&s);
+        let row = t
+            .as_bytes()
+            .chunks(80)
+            .map(|c| String::from_utf8_lossy(c).to_string())
+            .find(|r| r.contains("Search:"))
+            .expect("the query row must be on screen");
+        let caret = row.find('\u{258F}').expect("a focused field draws a caret");
+        let a = row.find("abc").expect("text before the caret");
+        let z = row.find("xyz").expect("text after the caret");
+        assert!(
+            a < caret && caret < z,
+            "caret at {caret} must fall between abc at {a} and xyz at {z}: {row:?}"
+        );
     }
 }

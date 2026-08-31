@@ -236,6 +236,14 @@ impl AppState {
                 (Modal::Prompt { value, .. }, InputAction::Backspace) => {
                     value.pop();
                 }
+                // Ctrl+W. A prompt appends at the end and draws no caret, so
+                // "delete the previous word" is the whole of line editing that
+                // is well defined here — the motions need a caret to move, and
+                // are deliberately not claimed for prompts.
+                (Modal::Prompt { value, .. }, InputAction::DeleteWordBack) => {
+                    let at = crate::util::text::prev_word_boundary(value, value.len());
+                    value.truncate(at);
+                }
                 // Submission is the loop's job: it owns the API calls.
                 _ => {}
             }
@@ -1435,5 +1443,91 @@ mod tests {
         press(&mut s, InputAction::Char('o'));
         assert_eq!(s.search_query, "bo");
         assert_eq!(s.search_cursor, 2);
+    }
+
+    #[test]
+    fn typing_and_editing_a_query_with_real_key_presses() {
+        // The full path: crossterm KeyEvent -> keymap -> reducer -> the text.
+        // Every earlier test stopped at one of those seams, which is how the
+        // chords shipped unreachable.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let km = crate::keymap::KeyMap::default();
+        let mut s = AppState::default();
+
+        let send = |s: &mut AppState, code: KeyCode, ctrl: bool| {
+            let m = if ctrl {
+                KeyModifiers::CONTROL
+            } else {
+                KeyModifiers::NONE
+            };
+            if let Some(a) = km.resolve(KeyEvent::new(code, m), s.input_focus()) {
+                s.apply(AppEvent::Input(a));
+            }
+        };
+
+        // `/` opens search, then type a query.
+        send(&mut s, KeyCode::Char('/'), false);
+        assert_eq!(s.focus, Focus::SearchInput);
+        for c in "boards of canada".chars() {
+            send(&mut s, KeyCode::Char(c), false);
+        }
+        assert_eq!(s.search_query, "boards of canada");
+
+        // Ctrl+W drops the last word.
+        send(&mut s, KeyCode::Char('w'), true);
+        assert_eq!(s.search_query, "boards of ");
+
+        // Ctrl+Left twice, then type at the caret.
+        send(&mut s, KeyCode::Left, true);
+        send(&mut s, KeyCode::Left, true);
+        assert_eq!(s.search_cursor, 0);
+        for c in "the ".chars() {
+            send(&mut s, KeyCode::Char(c), false);
+        }
+        assert_eq!(s.search_query, "the boards of ");
+
+        // Ctrl+E to the end, Ctrl+A back to the start.
+        send(&mut s, KeyCode::Char('e'), true);
+        assert_eq!(s.search_cursor, s.search_query.len());
+        send(&mut s, KeyCode::Char('a'), true);
+        assert_eq!(s.search_cursor, 0);
+    }
+
+    #[test]
+    fn ctrl_w_deletes_a_word_in_a_playlist_name_prompt() {
+        // A prompt reports SearchInput focus, so the chords resolve there. If the
+        // reducer ignores them, Ctrl+W silently does nothing while naming a
+        // playlist — the field would accept text but not editing. Only Ctrl+W:
+        // a prompt has no caret, so the motions have nothing to move.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let km = crate::keymap::KeyMap::default();
+        let mut s = AppState {
+            modal: Some(Modal::Prompt {
+                title: "New playlist".into(),
+                value: String::new(),
+                action: PromptAction::CreatePlaylist,
+            }),
+            ..Default::default()
+        };
+        let send = |s: &mut AppState, code: KeyCode, ctrl: bool| {
+            let m = if ctrl {
+                KeyModifiers::CONTROL
+            } else {
+                KeyModifiers::NONE
+            };
+            if let Some(a) = km.resolve(KeyEvent::new(code, m), s.input_focus()) {
+                s.apply(AppEvent::Input(a));
+            }
+        };
+        for c in "late night".chars() {
+            send(&mut s, KeyCode::Char(c), false);
+        }
+        send(&mut s, KeyCode::Char('w'), true);
+        match &s.modal {
+            Some(Modal::Prompt { value, .. }) => {
+                assert_eq!(value, "late ", "Ctrl+W must edit a prompt as well")
+            }
+            other => panic!("expected the prompt to survive, got {other:?}"),
+        }
     }
 }
