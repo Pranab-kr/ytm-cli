@@ -1,6 +1,7 @@
 mod app_loop;
 mod config;
 mod logging;
+mod mpris;
 
 use color_eyre::eyre::{Context, eyre};
 use crossterm::{
@@ -197,6 +198,10 @@ async fn main() -> color_eyre::Result<()> {
         ytm_tui::widgets::art::ArtCache::disabled()
     };
 
+    // Optional by design: no bus means no media keys and nothing else changes.
+    let (media_tx, media_keys) = tokio::sync::mpsc::unbounded_channel();
+    let media = mpris::attach(media_tx);
+
     let source = match build_source(&cfg).await {
         Ok(s) => s,
         Err(e) => {
@@ -218,6 +223,8 @@ async fn main() -> color_eyre::Result<()> {
         cfg.auth.kind == config::AuthKind::Cookie,
         cache,
         art,
+        media,
+        media_keys,
     )
     .await;
 

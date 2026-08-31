@@ -1,5 +1,6 @@
 //! The event loop. Owns AppState; nothing here may block on I/O (NFR-2).
 
+use crate::mpris;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io::Stdout;
 use std::sync::Arc;
@@ -584,6 +585,8 @@ pub async fn run(
     cookie_auth: bool,
     cache: Option<ytm_core::cache::Cache>,
     mut art: ytm_tui::widgets::art::ArtCache,
+    mut media: Option<souvlaki::MediaControls>,
+    mut media_keys: mpsc::UnboundedReceiver<PlayerCommand>,
 ) -> color_eyre::Result<()> {
     use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind};
     use futures::StreamExt;
@@ -626,7 +629,27 @@ pub async fn run(
             }
 
             // Player actor
-            Some(pe) = player_events.recv() => state.apply(AppEvent::Player(pe)),
+            Some(pe) = player_events.recv() => {
+                // Metadata on a track change, status on a state change. Not on
+                // every Progress event: that is 4Hz of D-Bus traffic for a
+                // position the desktop widget interpolates itself.
+                let notify = matches!(
+                    pe,
+                    ytm_player::player::PlayerEvent::TrackChanged(_)
+                        | ytm_player::player::PlayerEvent::StateChanged(_)
+                );
+                state.apply(AppEvent::Player(pe));
+                if notify && let Some(c) = media.as_mut() {
+                    mpris::update(c, &state);
+                }
+            }
+
+            // OS media keys. The handler runs on souvlaki's thread and can only
+            // send, so the command is forwarded from here where the player lives.
+            Some(cmd) = media_keys.recv() => {
+                tracing::debug!(?cmd, "media key");
+                send(&player, cmd);
+            }
 
             // Background work results
             Some(ae) = app_rx.recv() => {
