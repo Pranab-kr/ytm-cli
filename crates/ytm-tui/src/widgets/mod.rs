@@ -1,5 +1,6 @@
 //! ratatui widgets. Each one draws into a `Rect` and reads `AppState`; none of
 //! them mutate it.
+pub mod art;
 pub mod help;
 pub mod modal;
 pub mod nowplaying;

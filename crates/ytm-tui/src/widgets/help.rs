@@ -191,7 +191,16 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
         let theme = Theme::default();
-        t.draw(|f| crate::render::render(f, s, &theme, km)).unwrap();
+        t.draw(|f| {
+            crate::render::render(
+                f,
+                s,
+                &theme,
+                km,
+                &mut crate::widgets::art::ArtCache::disabled(),
+            )
+        })
+        .unwrap();
         t.backend()
             .buffer()
             .content()
@@ -249,7 +258,15 @@ mod tests {
         // Layout math on a tiny terminal is how a TUI panics.
         let mut t = Terminal::new(TestBackend::new(8, 3)).unwrap();
         let theme = Theme::default();
-        t.draw(|f| crate::render::render(f, &help_open(), &theme, &KeyMap::default()))
-            .unwrap();
+        t.draw(|f| {
+            crate::render::render(
+                f,
+                &help_open(),
+                &theme,
+                &KeyMap::default(),
+                &mut crate::widgets::art::ArtCache::disabled(),
+            )
+        })
+        .unwrap();
     }
 }

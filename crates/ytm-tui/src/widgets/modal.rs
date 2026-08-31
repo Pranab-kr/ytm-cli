@@ -127,8 +127,16 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
         let theme = Theme::default();
-        t.draw(|f| crate::render::render(f, s, &theme, &KeyMap::default()))
-            .unwrap();
+        t.draw(|f| {
+            crate::render::render(
+                f,
+                s,
+                &theme,
+                &KeyMap::default(),
+                &mut crate::widgets::art::ArtCache::disabled(),
+            )
+        })
+        .unwrap();
         t.backend()
             .buffer()
             .content()
@@ -277,10 +285,26 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let mut t = Terminal::new(TestBackend::new(6, 3)).unwrap();
         let theme = Theme::default();
-        t.draw(|f| crate::render::render(f, &confirming(), &theme, &KeyMap::default()))
-            .unwrap();
-        t.draw(|f| crate::render::render(f, &prompting("abc"), &theme, &KeyMap::default()))
-            .unwrap();
+        t.draw(|f| {
+            crate::render::render(
+                f,
+                &confirming(),
+                &theme,
+                &KeyMap::default(),
+                &mut crate::widgets::art::ArtCache::disabled(),
+            )
+        })
+        .unwrap();
+        t.draw(|f| {
+            crate::render::render(
+                f,
+                &prompting("abc"),
+                &theme,
+                &KeyMap::default(),
+                &mut crate::widgets::art::ArtCache::disabled(),
+            )
+        })
+        .unwrap();
     }
 
     #[test]

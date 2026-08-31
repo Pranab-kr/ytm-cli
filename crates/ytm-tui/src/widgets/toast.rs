@@ -127,8 +127,16 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let mut t = Terminal::new(TestBackend::new(80, 20)).unwrap();
         let theme = Theme::default();
-        t.draw(|f| crate::render::render(f, s, &theme, &crate::keymap::KeyMap::default()))
-            .unwrap();
+        t.draw(|f| {
+            crate::render::render(
+                f,
+                s,
+                &theme,
+                &crate::keymap::KeyMap::default(),
+                &mut crate::widgets::art::ArtCache::disabled(),
+            )
+        })
+        .unwrap();
         t.backend()
             .buffer()
             .content()

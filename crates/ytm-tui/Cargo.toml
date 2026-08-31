@@ -10,12 +10,14 @@ ytm-player = { path = "../ytm-player" }
 ratatui.workspace = true
 crossterm.workspace = true
 ratatui-image.workspace = true
+image.workspace = true
 throbber-widgets-tui.workspace = true
 unicode-width.workspace = true
 nucleo.workspace = true
 serde.workspace = true
 toml.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 ytm-core = { path = "../ytm-core", features = ["mock"] }

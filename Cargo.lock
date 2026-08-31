@@ -5577,7 +5577,9 @@ dependencies = [
  "crossterm",
  "directories",
  "futures",
+ "image",
  "ratatui",
+ "reqwest 0.13.4",
  "serde",
  "souvlaki",
  "thiserror 2.0.20",
@@ -5628,6 +5630,7 @@ name = "ytm-tui"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "image",
  "nucleo",
  "ratatui",
  "ratatui-image",
@@ -5636,6 +5639,7 @@ dependencies = [
  "throbber-widgets-tui",
  "tokio",
  "toml",
+ "tracing",
  "unicode-width",
  "ytm-core",
  "ytm-player",

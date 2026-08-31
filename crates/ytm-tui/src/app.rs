@@ -164,6 +164,11 @@ impl AppState {
                 }
             }
 
+            // Art is owned by the loop's `ArtCache`, not by state — protocol
+            // objects are not comparable, cloneable, or meaningful to a test
+            // backend. State ignores them so `apply` stays a pure reducer.
+            AppEvent::ArtLoaded { .. } | AppEvent::ArtFailed { .. } => {}
+
             AppEvent::MutationOk {
                 token,
                 real_id,

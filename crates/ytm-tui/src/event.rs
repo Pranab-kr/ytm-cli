@@ -70,6 +70,18 @@ pub enum AppEvent {
         tracks: Vec<Track>,
     },
 
+    /// Album art bytes arrived and decoded. Carries the URL so a late response
+    /// for a track that is no longer playing can be cached without being drawn.
+    ArtLoaded {
+        url: String,
+        image: Box<image::DynamicImage>,
+    },
+    /// Art could not be fetched or decoded. Not shown to the user: FR-U5 makes
+    /// art optional, and a toast per missing thumbnail would be noise.
+    ArtFailed {
+        url: String,
+    },
+
     /// A mutation succeeded server-side; `token` matches the optimistic edit.
     /// `real_id` is the server's id for a create, which replaces the temp one.
     MutationOk {

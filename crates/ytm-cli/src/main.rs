@@ -176,14 +176,26 @@ async fn main() -> color_eyre::Result<()> {
     // it first put a blank terminal on screen for ~2.4s. Keys typed during the
     // wait are buffered by the terminal and handled once the loop starts.
     let keymap = KeyMap::default();
+    // The pre-probe frame cannot draw art: the picker does not exist yet.
+    let mut art_probe = ytm_tui::widgets::art::ArtCache::disabled();
     guard
         .terminal
-        .draw(|f| ytm_tui::render::render(f, &state, &theme, &keymap))?;
+        .draw(|f| ytm_tui::render::render(f, &state, &theme, &keymap, &mut art_probe))?;
     tracing::info!(
         cached_playlists = state.playlists.len(),
         cached_tracks = state.tracks.len(),
         "first frame drawn"
     );
+
+    // Probed after the alternate screen is entered (what `from_query_stdio`'s own
+    // docs require) and after the first draw (it blocks up to 2s on a terminal
+    // that never answers, which would eat the whole NFR-1 budget). Still before
+    // the event stream exists, or the reply would be read as a key press.
+    let art = if cfg.ui.album_art {
+        ytm_tui::widgets::art::ArtCache::detect()
+    } else {
+        ytm_tui::widgets::art::ArtCache::disabled()
+    };
 
     let source = match build_source(&cfg).await {
         Ok(s) => s,
@@ -205,6 +217,7 @@ async fn main() -> color_eyre::Result<()> {
         cfg.ui.tick_ms,
         cfg.auth.kind == config::AuthKind::Cookie,
         cache,
+        art,
     )
     .await;
 

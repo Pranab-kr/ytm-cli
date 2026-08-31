@@ -583,6 +583,7 @@ pub async fn run(
     tick_ms: u64,
     cookie_auth: bool,
     cache: Option<ytm_core::cache::Cache>,
+    mut art: ytm_tui::widgets::art::ArtCache,
 ) -> color_eyre::Result<()> {
     use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind};
     use futures::StreamExt;
@@ -597,7 +598,7 @@ pub async fn run(
     // `main` has already drawn the cached frame — building the source needs a
     // network round trip, and NFR-1 will not survive doing that first. Redrawing
     // here is cheap and keeps `run` correct when called with a cold cache.
-    terminal.draw(|f| ytm_tui::render::render(f, &state, &theme, &keymap))?;
+    terminal.draw(|f| ytm_tui::render::render(f, &state, &theme, &keymap, &mut art))?;
     state.loading = true;
     spawn_task(Task::LoadPlaylists, source.clone(), app_tx.clone());
 
@@ -635,6 +636,15 @@ pub async fn run(
                 if let Some(c) = cache.as_ref() {
                     cache_write_through(c, &ae);
                 }
+                // Art lives in the cache, not in state: protocol objects are
+                // not comparable or cloneable, so a pure reducer cannot hold them.
+                if let AppEvent::ArtFailed { url } = &ae {
+                    art.mark_failed(url);
+                }
+                if let AppEvent::ArtLoaded { url, image } = ae {
+                    art.insert(&url, *image);
+                    continue;
+                }
                 state.apply(ae);
             }
 
@@ -646,10 +656,15 @@ pub async fn run(
                 if let Some(task) = search_tick(&mut debounce, &mut state, now_ms) {
                     spawn_task(task, source.clone(), app_tx.clone());
                 }
+                if art.is_enabled()
+                    && let Some(url) = art_tick(&mut art, &state)
+                {
+                    spawn_art_fetch(url, app_tx.clone());
+                }
             }
         }
 
-        terminal.draw(|f| ytm_tui::render::render(f, &state, &theme, &keymap))?;
+        terminal.draw(|f| ytm_tui::render::render(f, &state, &theme, &keymap, &mut art))?;
 
         if state.should_quit {
             send(&player, PlayerCommand::Shutdown);
@@ -801,6 +816,53 @@ fn cache_write_through(cache: &ytm_core::cache::Cache, ev: &AppEvent) {
     if let Err(e) = result {
         tracing::warn!(error = %e, event = event_name(ev), "could not write to the cache");
     }
+}
+
+/// The URL to fetch art for, if any, exactly once per URL.
+///
+/// Called from the tick arm rather than on `TrackChanged`, so a track whose art
+/// failed to decode, or that started playing before the picker finished probing,
+/// still gets one attempt. `should_fetch` is what makes "every tick" cheap.
+fn art_tick(art: &mut ytm_tui::widgets::art::ArtCache, state: &AppState) -> Option<String> {
+    let url = state.now_playing.as_ref()?.thumbnail_url.as_deref()?;
+    art.should_fetch(url).then(|| url.to_owned())
+}
+
+/// Fetch and decode one thumbnail off the UI thread (NFR-2).
+///
+/// Decoding is CPU work, so it goes to `spawn_blocking` rather than holding a
+/// runtime worker. Every failure path posts `ArtFailed`, which is what stops the
+/// URL being retried on every tick; a silent drop would retry forever.
+fn spawn_art_fetch(url: String, tx: mpsc::UnboundedSender<AppEvent>) {
+    tokio::spawn(async move {
+        let ev = match fetch_art(&url).await {
+            Ok(image) => AppEvent::ArtLoaded {
+                url: url.clone(),
+                image: Box::new(image),
+            },
+            Err(e) => {
+                // Debug level, not warn: a missing thumbnail is normal and
+                // FR-U5 says the UI is complete without art.
+                tracing::debug!(url = %url, error = %e, "album art unavailable");
+                AppEvent::ArtFailed { url: url.clone() }
+            }
+        };
+        let _ = tx.send(ev);
+    });
+}
+
+async fn fetch_art(
+    url: &str,
+) -> Result<image::DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
+    let bytes = reqwest::get(url).await?.error_for_status()?.bytes().await?;
+    // Decode is CPU-bound; keep it off the async workers.
+    let image = tokio::task::spawn_blocking(move || {
+        image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()?
+            .decode()
+    })
+    .await??;
+    Ok(image)
 }
 
 /// Mark the spinner before handing work off, so FR-U4 holds for the whole
@@ -1794,5 +1856,59 @@ mod tests {
             },
         );
         assert!(cache.load_library_songs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn art_is_fetched_once_for_the_playing_track() {
+        let mut art = ytm_tui::widgets::art::ArtCache::disabled();
+        let s = AppState {
+            now_playing: Some(ytm_core::Track {
+                thumbnail_url: Some("https://example.com/a.jpg".into()),
+                ..ytm_core::Track::stub("v1", "T")
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            art_tick(&mut art, &s).as_deref(),
+            Some("https://example.com/a.jpg")
+        );
+        assert!(
+            art_tick(&mut art, &s).is_none(),
+            "a second tick must not refetch the same URL"
+        );
+    }
+
+    #[test]
+    fn no_art_is_fetched_when_nothing_is_playing() {
+        let mut art = ytm_tui::widgets::art::ArtCache::disabled();
+        assert!(art_tick(&mut art, &AppState::default()).is_none());
+    }
+
+    #[test]
+    fn a_track_without_a_thumbnail_fetches_nothing() {
+        let mut art = ytm_tui::widgets::art::ArtCache::disabled();
+        let s = AppState {
+            now_playing: Some(ytm_core::Track::stub("v1", "T")),
+            ..Default::default()
+        };
+        assert!(art_tick(&mut art, &s).is_none());
+    }
+
+    #[test]
+    fn a_failed_art_url_is_not_refetched() {
+        let mut art = ytm_tui::widgets::art::ArtCache::disabled();
+        let s = AppState {
+            now_playing: Some(ytm_core::Track {
+                thumbnail_url: Some("https://example.com/dead.jpg".into()),
+                ..ytm_core::Track::stub("v1", "T")
+            }),
+            ..Default::default()
+        };
+        assert!(art_tick(&mut art, &s).is_some());
+        art.mark_failed("https://example.com/dead.jpg");
+        assert!(
+            art_tick(&mut art, &s).is_none(),
+            "a dead thumbnail must not be retried every tick"
+        );
     }
 }
