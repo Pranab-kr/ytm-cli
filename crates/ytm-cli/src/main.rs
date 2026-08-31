@@ -401,7 +401,10 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
     let (theme, theme_name) = build_theme(&cfg)?;
 
     // Fails cleanly here rather than mid-frame if libmpv is missing.
-    let (player, player_events) = ytm_player::actor::spawn_player(volume)?;
+    // The same cookie file the API uses: yt-dlp needs cookies too, or YouTube
+    // answers every stream request with its bot check.
+    let cookie_file = cfg.auth.cookie_file.clone();
+    let (player, player_events) = ytm_player::actor::spawn_player(volume, cookie_file)?;
 
     let mut state = AppState {
         volume,

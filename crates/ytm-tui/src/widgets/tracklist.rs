@@ -1,11 +1,7 @@
 //! One row per track: mark, title, artist, duration. Columns are sized by
 //! display width so CJK titles keep the grid intact (spec §6).
 
-use crate::{
-    app::{AppState, Pane},
-    theme::Theme,
-    util::text::pad_to_width,
-};
+use crate::{app::AppState, theme::Theme, util::text::pad_to_width};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -46,11 +42,14 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
         return;
     }
 
-    let rows: &[ytm_core::Track] = match s.pane {
-        Pane::Search => &s.search_results,
-        Pane::Queue => &s.queue,
-        _ => &s.tracks,
-    };
+    // `visible_tracks` is the single source of truth for which rows are on
+    // screen: it picks the right list for the pane (an open artist's tracks are
+    // not `tracks`) and applies the filter. Reading raw state here instead was
+    // two bugs at once — `/` filtered nothing visibly, and an open artist drew
+    // the library songs while `list_len` counted the artist's, so scrolling
+    // stopped dead at the shorter list's length.
+    let rows: Vec<ytm_core::Track> = s.visible_tracks();
+    let rows: &[ytm_core::Track] = &rows;
 
     if rows.is_empty() {
         f.render_widget(

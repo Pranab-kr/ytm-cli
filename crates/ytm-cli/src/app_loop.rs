@@ -1055,6 +1055,11 @@ fn event_name(ev: &AppEvent) -> &'static str {
         AppEvent::ArtistsLoaded(_) => "artists",
         AppEvent::PlaylistTracksLoaded { .. } => "playlist_tracks",
         AppEvent::SearchResults { .. } => "search",
+        // Named rather than left as "other": the home feed walks several pages
+        // and is the slowest fetch in the app, so an unlabelled multi-second
+        // entry is the one you most want to identify in a log.
+        AppEvent::HomeLoaded(_) => "home",
+        AppEvent::ArtistTracksLoaded { .. } => "artist_tracks",
         _ => "other",
     }
 }
@@ -1067,6 +1072,10 @@ fn event_rows(ev: &AppEvent) -> usize {
         AppEvent::ArtistsLoaded(v) => v.len(),
         AppEvent::PlaylistTracksLoaded { tracks, .. } => tracks.len(),
         AppEvent::SearchResults { tracks, .. } => tracks.len(),
+        // Shelves, not cards: the shelf count is what says whether the
+        // multi-page walk actually reached page 2.
+        AppEvent::HomeLoaded(v) => v.len(),
+        AppEvent::ArtistTracksLoaded { tracks, .. } => tracks.len(),
         _ => 0,
     }
 }

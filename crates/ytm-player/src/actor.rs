@@ -75,6 +75,7 @@ impl Player for MpvPlayer {
 /// Start the actor thread. Returns the handle plus the event stream to select on.
 pub fn spawn_player(
     volume: u8,
+    cookie_header_file: Option<std::path::PathBuf>,
 ) -> Result<(MpvPlayer, mpsc::UnboundedReceiver<PlayerEvent>), PlayerError> {
     // Probe before spawning so a missing libmpv is a clean startup error.
     let handle = MpvHandle::new()?;
@@ -85,7 +86,7 @@ pub fn spawn_player(
 
     std::thread::Builder::new()
         .name("ytm-player".into())
-        .spawn(move || run_actor(handle, cmd_rx, ev_tx, volume))
+        .spawn(move || run_actor(handle, cmd_rx, ev_tx, volume, cookie_header_file))
         .map_err(|e| PlayerError::MpvUnavailable(e.to_string()))?;
 
     Ok((MpvPlayer { tx: cmd_tx }, ev_rx))
@@ -342,6 +343,7 @@ fn run_actor(
     cmds: std_mpsc::Receiver<PlayerCommand>,
     events: mpsc::UnboundedSender<PlayerEvent>,
     volume: u8,
+    cookie_header_file: Option<std::path::PathBuf>,
 ) {
     // The actor thread needs its own small runtime for the async resolver.
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -358,7 +360,15 @@ fn run_actor(
     let mut actor = Actor {
         mpv,
         rt,
-        resolver: StreamResolver::new(),
+        resolver: {
+            // YouTube refuses anonymous stream requests ("Sign in to confirm
+            // you're not a bot"), so yt-dlp needs the same cookies the API uses.
+            let r = StreamResolver::new();
+            if let Some(path) = cookie_header_file.as_deref() {
+                r.use_cookie_header_file(path);
+            }
+            r
+        },
         queue: Queue::default(),
         retry: RetryState::default(),
         state: PlaybackState::Stopped,

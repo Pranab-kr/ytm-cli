@@ -107,8 +107,12 @@ pub fn draw_playlists(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     let ro_w = READONLY.len() + 1;
     let title_w = w.saturating_sub(COUNT_WIDTH + ro_w);
 
-    draw_list(f, area, s, t, s.playlists.len(), |idx, style, dim| {
-        let p = &s.playlists[idx];
+    // The filtered view, not `s.playlists`: the reducer counts and indexes this
+    // list, so drawing the raw one makes `/` appear to do nothing and puts the
+    // cursor on a different row than Enter acts on.
+    let rows = s.visible_playlists();
+    draw_list(f, area, s, t, rows.len(), |idx, style, dim| {
+        let p = &rows[idx];
         let count = match p.track_count {
             Some(n) => format!("{n} tracks"),
             None => "\u{2014}".to_owned(),
@@ -134,8 +138,9 @@ pub fn draw_albums(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     let title_w = text_w / 2;
     let artist_w = text_w.saturating_sub(title_w);
 
-    draw_list(f, area, s, t, s.albums.len(), |idx, style, dim| {
-        let a = &s.albums[idx];
+    let rows = s.visible_albums();
+    draw_list(f, area, s, t, rows.len(), |idx, style, dim| {
+        let a = &rows[idx];
         let artists = if a.artists.is_empty() {
             "Unknown artist".to_owned()
         } else {
@@ -160,8 +165,9 @@ pub fn draw_artists(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     let name_w = (w * 6) / 10;
     let subs_w = w.saturating_sub(name_w);
 
-    draw_list(f, area, s, t, s.artists.len(), |idx, style, dim| {
-        let a = &s.artists[idx];
+    let rows = s.visible_artists();
+    draw_list(f, area, s, t, rows.len(), |idx, style, dim| {
+        let a = &rows[idx];
         vec![
             Span::styled(pad_to_width(&a.name, name_w), style),
             Span::styled(

@@ -503,13 +503,25 @@ impl AppState {
             // playlist pane has a level to leave; everywhere else `h` keeps its
             // old meaning rather than swallowing the key.
             InputAction::Left => {
-                if self.close_open_playlist() {
+                // An open playlist or an open artist is a level to leave. Without
+                // the artist branch `h` focused the sidebar while the artist's
+                // tracks stayed on screen, so there was no way back to the list.
+                if self.close_open_playlist() || self.close_open_artist() {
                     // Stay in the list: the user is navigating it, not leaving it.
                 } else {
                     self.focus = Focus::Sidebar;
                 }
             }
-            InputAction::Right => self.focus = Focus::Main,
+            // `l` descends where there is somewhere to go. On an artist row that
+            // is their track list, which mirrors `l` on a playlist row.
+            InputAction::Right => {
+                if self.focus == Focus::Main && self.selected_artist().is_some() {
+                    // The loop turns this into the fetch; state cannot call the
+                    // API. Focus stays put so the rows replace the list in place.
+                } else {
+                    self.focus = Focus::Main;
+                }
+            }
             InputAction::GoTo(n) => self.goto_source(n),
             _ => {} // transport actions are handled by the loop, not here
         }
@@ -564,7 +576,7 @@ impl AppState {
             Pane::Playlists if self.open_playlist.is_some() => self.visible_tracks().len(),
             Pane::Playlists => self.visible_playlists().len(),
             Pane::Songs => self.visible_tracks().len(),
-            Pane::Albums => self.albums.len(),
+            Pane::Albums => self.visible_albums().len(),
             // An open artist shows their tracks; otherwise the list of artists.
             Pane::Artists if self.open_artist.is_some() => self.visible_tracks().len(),
             Pane::Artists => self.visible_artists().len(),
@@ -619,6 +631,16 @@ impl AppState {
         self.playlists
             .iter()
             .filter(|p| self.matches_filter(&p.title))
+            .cloned()
+            .collect()
+    }
+
+    pub fn visible_albums(&self) -> Vec<Album> {
+        self.albums
+            .iter()
+            .filter(|a| {
+                self.matches_filter(&a.title) || a.artists.iter().any(|x| self.matches_filter(x))
+            })
             .cloned()
             .collect()
     }
