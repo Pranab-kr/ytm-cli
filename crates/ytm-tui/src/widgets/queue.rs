@@ -27,10 +27,19 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
         return;
     }
 
-    if s.queue.is_empty() {
+    // The filtered view, not `s.queue`: the reducer counts and indexes this, so
+    // drawing the raw queue made `/` look broken here and put the cursor on a
+    // different row than `x` or Enter acted on.
+    let rows = s.visible_tracks();
+
+    if rows.is_empty() {
         f.render_widget(
             Paragraph::new(Span::styled(
-                "Queue is empty",
+                if s.is_filtering() {
+                    "No matches"
+                } else {
+                    "Queue is empty"
+                },
                 Style::default().fg(t.fg_dim),
             )),
             area,
@@ -39,20 +48,31 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     }
 
     let h = area.height as usize;
-    let (start, end) = visible_window(s.selected, s.scroll_offset, h, s.queue.len());
+    let (start, end) = visible_window(s.selected, s.scroll_offset, h, rows.len());
     let w = area.width as usize;
 
     let text_w = w.saturating_sub(DURATION_WIDTH + MARK_WIDTH);
     let title_w = (text_w * TITLE_SHARE) / 10;
     let artist_w = text_w.saturating_sub(title_w);
 
-    let items: Vec<ListItem> = s.queue[start..end]
+    let items: Vec<ListItem> = rows[start..end]
         .iter()
         .enumerate()
         .map(|(i, track)| {
             let idx = start + i;
             let is_sel = idx == s.selected;
-            let is_current = s.queue_current == Some(idx);
+            // Unfiltered, the visible index *is* the queue index, and that is the
+            // only way to tell two copies of the same song apart — the queue can
+            // legitimately hold a video twice. Under a filter the two indices
+            // differ, so fall back to the id and accept that duplicates both
+            // highlight; showing the wrong row as playing would be worse.
+            let is_current = if s.is_filtering() {
+                s.queue_current
+                    .and_then(|c| s.queue.get(c))
+                    .is_some_and(|c| c.video_id == track.video_id)
+            } else {
+                s.queue_current == Some(idx)
+            };
 
             let base = if is_current {
                 Style::default().fg(t.accent).add_modifier(Modifier::BOLD)

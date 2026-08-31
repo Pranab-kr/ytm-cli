@@ -463,19 +463,16 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
     let (media_tx, media_keys) = tokio::sync::mpsc::unbounded_channel();
     let media = mpris::attach(media_tx);
 
-    let source = match build_source(&cfg).await {
-        Ok(s) => s,
-        Err(e) => {
-            // The terminal is already in the alternate screen, so restore it
-            // before the report goes out or the error lands where it cannot be read.
-            drop(guard);
-            return Err(e);
-        }
-    };
+    // NOT awaited here. Cookie auth validates over the network, and awaiting it
+    // before the loop starts left the app frozen for seconds with the cached
+    // frame already on screen: keys went into the terminal's buffer and all fired
+    // at once when it returned. The loop awaits this concurrently with input, so
+    // navigation works from the first frame.
+    let source_fut = build_source(&cfg);
     let result = app_loop::run(
         &mut guard.terminal,
         state,
-        source,
+        source_fut,
         player,
         player_events,
         keymap,

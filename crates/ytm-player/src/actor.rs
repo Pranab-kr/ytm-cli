@@ -242,6 +242,17 @@ impl Actor {
                 self.play_track(&t);
             }
 
+            // Play an entry that is already queued, rather than inserting a copy
+            // of it. Enter on a queue row went through `PlayNow`, which inserts,
+            // so replaying a finished track left two rows for the same song.
+            PlayerCommand::JumpTo(idx) => {
+                self.retry.reset();
+                if let Some(t) = self.queue.jump_to(idx) {
+                    self.emit_queue();
+                    self.play_track(&t);
+                }
+            }
+
             PlayerCommand::Pause => {
                 if self.mpv.set_pause(true).is_ok() {
                     self.set_state(PlaybackState::Paused);

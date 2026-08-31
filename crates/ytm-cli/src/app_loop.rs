@@ -128,6 +128,30 @@ const SEEK_STEP: i64 = 5;
 /// Volume step per key press.
 const VOLUME_STEP: i64 = 5;
 
+/// Start a fetch, or say why it cannot run yet.
+///
+/// The source is built concurrently with the loop (see `run`), so for the first
+/// moment there is nothing to fetch with. Actions that need the network are
+/// declined with a toast rather than queued: replaying them seconds later would
+/// fire requests the user has already moved on from.
+fn try_spawn(
+    task: Task,
+    source: &Option<Arc<dyn MusicSource>>,
+    tx: &mpsc::UnboundedSender<AppEvent>,
+    state: &mut AppState,
+) {
+    match source {
+        Some(src) => spawn_task(task, src.clone(), tx.clone()),
+        None => state.push_toast(ToastKind::Info, "still connecting…", state.elapsed_ms),
+    }
+}
+
+/// How close two clicks must be to count as a double-click.
+///
+/// 400ms is the common desktop default. Too short and a deliberate double-click
+/// reads as two singles; too long and two unrelated clicks play something.
+const DOUBLE_CLICK_MS: u64 = 400;
+
 /// Work the loop should start in the background as a result of an input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Task {
@@ -547,7 +571,6 @@ pub fn open_remove_confirm(state: &mut AppState) {
 pub fn dispatch_input(
     action: InputAction,
     state: &mut AppState,
-    _source: &Arc<impl MusicSource + ?Sized>,
     player: &impl Player,
 ) -> Option<Task> {
     use InputAction as A;
@@ -624,6 +647,15 @@ pub fn dispatch_input(
             send(player, PlayerCommand::SetRepeat(state.repeat));
         }
         A::Confirm => {
+            // In the queue, Enter plays the row that is already there. Going
+            // through PlayNow (which inserts) put a second copy of a finished
+            // track in beside the first.
+            if state.pane == Pane::Queue {
+                if state.selected < state.queue.len() {
+                    send(player, PlayerCommand::JumpTo(state.selected));
+                }
+                return None;
+            }
             // In the playlist list, Enter opens; on a track, Enter plays.
             if let Some(p) = state.selected_playlist() {
                 return start(state, Task::OpenPlaylist(p.id.clone()));
@@ -691,9 +723,29 @@ pub fn dispatch_input(
         // answers with `QueueChanged`; a local edit would leave the view
         // showing an order the player disagrees with.
         A::RemoveFromPlaylist if state.pane == Pane::Queue => {
-            if state.selected < state.queue.len() {
-                send(player, PlayerCommand::RemoveFromQueue(state.selected));
+            // Marked rows if any, else the cursor — so `V` over a run then `x`
+            // clears the range instead of one row. Removed highest-index first:
+            // each removal shifts everything after it, so ascending order would
+            // delete the wrong entries after the first.
+            let mut targets: Vec<usize> = if state.marked.is_empty() {
+                vec![state.selected]
+            } else {
+                state
+                    .queue
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| state.marked.contains(&t.video_id))
+                    .map(|(i, _)| i)
+                    .collect()
+            };
+            targets.sort_unstable_by(|a, b| b.cmp(a));
+            for idx in targets {
+                if idx < state.queue.len() {
+                    send(player, PlayerCommand::RemoveFromQueue(idx));
+                }
             }
+            state.marked.clear();
+            state.visual_anchor = None;
         }
         A::MoveEntryUp | A::MoveEntryDown if state.pane == Pane::Queue => {
             let from = state.selected;
@@ -864,7 +916,12 @@ fn send(player: &impl Player, cmd: PlayerCommand) {
 pub async fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     mut state: AppState,
-    source: Arc<dyn MusicSource>,
+    // Not built yet on purpose. Cookie auth validates over the network, and
+    // awaiting that *before* the loop starts froze the app for seconds with the
+    // cached frame already on screen — keys went into the terminal's buffer and
+    // all fired at once when it finally returned. The loop starts first and awaits
+    // this concurrently with reading input.
+    source_fut: impl std::future::Future<Output = color_eyre::Result<Arc<dyn MusicSource>>>,
     player: impl Player,
     mut player_events: mpsc::UnboundedReceiver<ytm_player::player::PlayerEvent>,
     mut keymap: KeyMap,
@@ -891,18 +948,26 @@ pub async fn run(
     let mut debounce = SearchDebounce::default();
     // `zz` spans two key presses, so the prefix has to live across iterations.
     let mut pending = ytm_tui::keymap::Pending::default();
+    // Last left click, for double-click detection: (row index, millis). Crossterm
+    // reports no double-click event of its own, so two clicks on the same row
+    // inside the window are what makes one.
+    let mut last_click: Option<(usize, u64)> = None;
 
     // `main` has already drawn the cached frame — building the source needs a
     // network round trip, and NFR-1 will not survive doing that first. Redrawing
     // here is cheap and keeps `run` correct when called with a cold cache.
     terminal.draw(|f| ytm_tui::render::render(f, &state, &theme, &keymap, &mut art))?;
-    // The fetch the *starting* pane needs, not always playlists: with
-    // `ui.start_pane` set to anything else, loading playlists left the visible
-    // pane empty until the user pressed a key.
-    if let Some(task) = pane_task(state.pane) {
-        state.loading = true;
-        spawn_task(task, source.clone(), app_tx.clone());
-    }
+    // Loading from the first frame: the source is still being built, and the
+    // spinner is the honest signal that something is in flight.
+    state.loading = true;
+
+    // `None` until the source is ready. Every key still works meanwhile —
+    // navigation, the queue, playback of anything cached — and the handful of
+    // actions that need the network are skipped rather than queued, because
+    // replaying them later would fire commands the user has moved on from.
+    let mut source: Option<Arc<dyn MusicSource>> = None;
+    let mut source_fut = std::pin::pin!(source_fut);
+    let mut pending_first_fetch = true;
 
     loop {
         tokio::select! {
@@ -927,15 +992,41 @@ pub async fn run(
                             // one that costs a keypress, and `a`/Enter are one key
                             // away once the row is selected.
                             MouseEventKind::Down(MouseButton::Left) if state.modal.is_none() => {
-                                if let Some(task) = handle_click(
+                                let before = state.selected;
+                                let task = handle_click(
                                     m.column,
                                     m.row,
                                     terminal.size()?.into(),
                                     &mut state,
-                                )
-                                    && let Some(t) = start(&mut state, task)
-                                {
-                                    spawn_task(t, source.clone(), app_tx.clone());
+                                );
+                                if let Some(task) = task {
+                                    if let Some(t) = start(&mut state, task) {
+                                        try_spawn(t, &source, &app_tx, &mut state);
+                                    }
+                                    // A sidebar click is not part of a double-click
+                                    // on a row.
+                                    last_click = None;
+                                } else {
+                                    // Second click on the same row inside the
+                                    // window: activate it, exactly as Enter would.
+                                    // Routed through `dispatch_input` rather than
+                                    // sending PlayNow here, so a double-click on a
+                                    // playlist or artist row opens it instead of
+                                    // trying to play a row that is not a track.
+                                    let now = state.elapsed_ms;
+                                    let same = last_click
+                                        .is_some_and(|(row, at)| {
+                                            row == state.selected
+                                                && now.saturating_sub(at) <= DOUBLE_CLICK_MS
+                                        });
+                                    if same && state.selected == before {
+                                        if let Some(t) = dispatch_input(InputAction::Confirm, &mut state, &player) {
+                                            try_spawn(t, &source, &app_tx, &mut state);
+                                        }
+                                        last_click = None;
+                                    } else {
+                                        last_click = Some((state.selected, now));
+                                    }
                                 }
                             }
                             // Right click queues the row under the pointer, which is
@@ -1002,8 +1093,8 @@ pub async fn run(
                                     terminal.clear()?;
                                 }
                                 _ => {
-                                    if let Some(task) = dispatch_input(a, &mut state, &source, &player) {
-                                        spawn_task(task, source.clone(), app_tx.clone());
+                                    if let Some(task) = dispatch_input(a, &mut state, &player) {
+                                        try_spawn(task, &source, &app_tx, &mut state);
                                     }
                                 }
                             }
@@ -1061,13 +1152,44 @@ pub async fn run(
                 state.apply(ae);
             }
 
+            // The source finishing its handshake. `pending_first_fetch` keeps this
+            // arm from being polled again once it has completed — a completed
+            // future must not be awaited a second time.
+            built = &mut source_fut, if pending_first_fetch => {
+                pending_first_fetch = false;
+                match built {
+                    Ok(src) => {
+                        // The starting pane's rows, now that there is something to
+                        // fetch them with.
+                        if let Some(task) = pane_task(state.pane) {
+                            spawn_task(task, src.clone(), app_tx.clone());
+                        } else {
+                            state.loading = false;
+                        }
+                        source = Some(src);
+                    }
+                    Err(e) => {
+                        // Not fatal any more: the TUI is already up and usable for
+                        // anything cached, so an auth failure is a message rather
+                        // than an exit that dumps a report over a live screen.
+                        state.loading = false;
+                        state.push_toast(
+                            ToastKind::Error,
+                            &format!("could not sign in: {e}"),
+                            state.elapsed_ms,
+                        );
+                        tracing::error!(error = %e, "source unavailable");
+                    }
+                }
+            }
+
             // Render tick
             _ = ticker.tick() => {
                 let now_ms = started.elapsed().as_millis() as u64;
                 state.elapsed_ms = now_ms;
                 state.apply(AppEvent::Tick);
                 if let Some(task) = search_tick(&mut debounce, &mut state, now_ms) {
-                    spawn_task(task, source.clone(), app_tx.clone());
+                    try_spawn(task, &source, &app_tx, &mut state);
                 }
                 if art.is_enabled()
                     && let Some(url) = art_tick(&mut art, &state)
@@ -1335,20 +1457,20 @@ mod tests {
 
     #[test]
     fn toggle_pause_reaches_the_player_not_the_state() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState::default();
-        dispatch_input(InputAction::TogglePause, &mut s, &src, &*player);
+        dispatch_input(InputAction::TogglePause, &mut s, &*player);
         assert!(matches!(player.commands()[0], PlayerCommand::TogglePause));
     }
 
     #[test]
     fn volume_up_clamps_at_one_hundred() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             volume: 97,
             ..Default::default()
         };
-        dispatch_input(InputAction::VolumeUp, &mut s, &src, &*player);
+        dispatch_input(InputAction::VolumeUp, &mut s, &*player);
         match player.commands()[0] {
             PlayerCommand::SetVolume(v) => assert_eq!(v, 100),
             ref o => panic!("expected SetVolume, got {o:?}"),
@@ -1357,12 +1479,12 @@ mod tests {
 
     #[test]
     fn volume_down_clamps_at_zero() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             volume: 2,
             ..Default::default()
         };
-        dispatch_input(InputAction::VolumeDown, &mut s, &src, &*player);
+        dispatch_input(InputAction::VolumeDown, &mut s, &*player);
         match player.commands()[0] {
             PlayerCommand::SetVolume(v) => assert_eq!(v, 0),
             ref o => panic!("expected SetVolume, got {o:?}"),
@@ -1371,9 +1493,9 @@ mod tests {
 
     #[test]
     fn cycle_repeat_advances_the_mode() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState::default();
-        dispatch_input(InputAction::CycleRepeat, &mut s, &src, &*player);
+        dispatch_input(InputAction::CycleRepeat, &mut s, &*player);
         match player.commands()[0] {
             PlayerCommand::SetRepeat(m) => {
                 assert_eq!(m, ytm_player::player::RepeatMode::One)
@@ -1384,14 +1506,14 @@ mod tests {
 
     #[test]
     fn confirm_on_a_selected_track_plays_it() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             pane: Pane::Songs,
             tracks: vec![ytm_core::Track::stub("v7", "Song")],
             selected: 0,
             ..Default::default()
         };
-        dispatch_input(InputAction::Confirm, &mut s, &src, &*player);
+        dispatch_input(InputAction::Confirm, &mut s, &*player);
         match &player.commands()[0] {
             PlayerCommand::PlayNow(t) => assert_eq!(t.video_id.as_str(), "v7"),
             o => panic!("expected PlayNow, got {o:?}"),
@@ -1400,12 +1522,12 @@ mod tests {
 
     #[test]
     fn confirm_with_an_empty_list_sends_nothing() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             pane: Pane::Songs,
             ..Default::default()
         };
-        dispatch_input(InputAction::Confirm, &mut s, &src, &*player);
+        dispatch_input(InputAction::Confirm, &mut s, &*player);
         assert!(
             player.commands().is_empty(),
             "must not play a track that does not exist"
@@ -1414,13 +1536,13 @@ mod tests {
 
     #[test]
     fn add_to_queue_enqueues_the_selected_track() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             pane: Pane::Songs,
             tracks: vec![ytm_core::Track::stub("v1", "A")],
             ..Default::default()
         };
-        dispatch_input(InputAction::AddToQueue, &mut s, &src, &*player);
+        dispatch_input(InputAction::AddToQueue, &mut s, &*player);
         assert!(matches!(
             player.commands()[0],
             PlayerCommand::EnqueueBack(_)
@@ -1454,7 +1576,7 @@ mod tests {
     #[test]
     fn typing_a_query_fires_one_search_after_the_pause_not_per_keystroke() {
         // FR-S2: three keystrokes must cost one request, not three.
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut d = ytm_tui::search_state::SearchDebounce::new(300);
         let mut s = AppState {
             pane: Pane::Search,
@@ -1465,7 +1587,7 @@ mod tests {
         let mut fired = Vec::new();
         for (i, c) in "boa".chars().enumerate() {
             let now = 1000 + i as u64 * 50;
-            dispatch_input(InputAction::Char(c), &mut s, &src, &*player);
+            dispatch_input(InputAction::Char(c), &mut s, &*player);
             note_search_input(&mut d, &s, now);
             // A tick between keystrokes is too soon to fire.
             if let Some(t) = search_tick(&mut d, &mut s, now + 10) {
@@ -1481,14 +1603,14 @@ mod tests {
 
     #[test]
     fn a_settled_query_does_not_fire_again_on_every_tick() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut d = ytm_tui::search_state::SearchDebounce::new(300);
         let mut s = AppState {
             pane: Pane::Search,
             focus: Focus::SearchInput,
             ..Default::default()
         };
-        dispatch_input(InputAction::Char('x'), &mut s, &src, &*player);
+        dispatch_input(InputAction::Char('x'), &mut s, &*player);
         note_search_input(&mut d, &s, 1000);
         assert!(search_tick(&mut d, &mut s, 1400).is_some());
         for now in [1500, 1600, 5000] {
@@ -1498,14 +1620,14 @@ mod tests {
 
     #[test]
     fn keystrokes_outside_the_search_pane_never_schedule_a_search() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut d = ytm_tui::search_state::SearchDebounce::new(300);
         let mut s = AppState {
             pane: Pane::Songs,
             focus: Focus::Main,
             ..Default::default()
         };
-        dispatch_input(InputAction::Down, &mut s, &src, &*player);
+        dispatch_input(InputAction::Down, &mut s, &*player);
         note_search_input(&mut d, &s, 1000);
         assert_eq!(search_tick(&mut d, &mut s, 2000), None);
     }
@@ -1526,9 +1648,9 @@ mod tests {
 
     #[test]
     fn x_in_the_queue_removes_the_selected_entry() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = queue_of_three();
-        dispatch_input(InputAction::RemoveFromPlaylist, &mut s, &src, &*player);
+        dispatch_input(InputAction::RemoveFromPlaylist, &mut s, &*player);
         match player.commands()[0] {
             PlayerCommand::RemoveFromQueue(i) => assert_eq!(i, 1),
             ref o => panic!("expected RemoveFromQueue, got {o:?}"),
@@ -1539,30 +1661,30 @@ mod tests {
     fn removing_a_queue_entry_does_not_mutate_the_local_queue() {
         // The actor owns queue truth and answers with QueueChanged. Editing
         // `state.queue` here would show a row count the player disagrees with.
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = queue_of_three();
-        dispatch_input(InputAction::RemoveFromPlaylist, &mut s, &src, &*player);
+        dispatch_input(InputAction::RemoveFromPlaylist, &mut s, &*player);
         assert_eq!(s.queue.len(), 3, "the view must wait for QueueChanged");
     }
 
     #[test]
     fn x_outside_the_queue_does_not_touch_the_queue() {
         // In a playlist, `x` means remove-from-playlist (Task 32), not dequeue.
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             pane: Pane::Songs,
             tracks: vec![ytm_core::Track::stub("v1", "A")],
             ..Default::default()
         };
-        dispatch_input(InputAction::RemoveFromPlaylist, &mut s, &src, &*player);
+        dispatch_input(InputAction::RemoveFromPlaylist, &mut s, &*player);
         assert!(player.commands().is_empty());
     }
 
     #[test]
     fn moving_an_entry_down_swaps_it_with_the_next_one() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = queue_of_three();
-        dispatch_input(InputAction::MoveEntryDown, &mut s, &src, &*player);
+        dispatch_input(InputAction::MoveEntryDown, &mut s, &*player);
         match player.commands()[0] {
             PlayerCommand::MoveInQueue { from, to } => assert_eq!((from, to), (1, 2)),
             ref o => panic!("expected MoveInQueue, got {o:?}"),
@@ -1572,9 +1694,9 @@ mod tests {
 
     #[test]
     fn moving_an_entry_up_swaps_it_with_the_previous_one() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = queue_of_three();
-        dispatch_input(InputAction::MoveEntryUp, &mut s, &src, &*player);
+        dispatch_input(InputAction::MoveEntryUp, &mut s, &*player);
         match player.commands()[0] {
             PlayerCommand::MoveInQueue { from, to } => assert_eq!((from, to), (1, 0)),
             ref o => panic!("expected MoveInQueue, got {o:?}"),
@@ -1584,17 +1706,17 @@ mod tests {
 
     #[test]
     fn an_entry_cannot_be_moved_off_either_end() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut top = AppState {
             selected: 0,
             ..queue_of_three()
         };
-        dispatch_input(InputAction::MoveEntryUp, &mut top, &src, &*player);
+        dispatch_input(InputAction::MoveEntryUp, &mut top, &*player);
         let mut bottom = AppState {
             selected: 2,
             ..queue_of_three()
         };
-        dispatch_input(InputAction::MoveEntryDown, &mut bottom, &src, &*player);
+        dispatch_input(InputAction::MoveEntryDown, &mut bottom, &*player);
         assert!(
             player.commands().is_empty(),
             "an out-of-range move would panic the actor"
@@ -1605,7 +1727,7 @@ mod tests {
 
     #[test]
     fn reordering_outside_the_queue_is_ignored() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             pane: Pane::Songs,
             tracks: vec![
@@ -1614,7 +1736,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        dispatch_input(InputAction::MoveEntryDown, &mut s, &src, &*player);
+        dispatch_input(InputAction::MoveEntryDown, &mut s, &*player);
         assert!(
             player.commands().is_empty(),
             "there is no server-side track order to change (out of scope)"
@@ -1623,17 +1745,17 @@ mod tests {
 
     #[test]
     fn the_clear_binding_empties_the_queue() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = queue_of_three();
-        dispatch_input(InputAction::ClearQueue, &mut s, &src, &*player);
+        dispatch_input(InputAction::ClearQueue, &mut s, &*player);
         assert!(matches!(player.commands()[0], PlayerCommand::ClearQueue));
     }
 
     #[test]
     fn clearing_resets_the_selection_so_it_cannot_dangle() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = queue_of_three();
-        dispatch_input(InputAction::ClearQueue, &mut s, &src, &*player);
+        dispatch_input(InputAction::ClearQueue, &mut s, &*player);
         assert_eq!(s.selected, 0);
     }
 
@@ -1792,17 +1914,17 @@ mod tests {
 
     #[test]
     fn n_opens_a_create_prompt_and_r_a_rename_prompt() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             pane: Pane::Playlists,
             playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
             selected: 0,
             ..Default::default()
         };
-        dispatch_input(InputAction::CreatePlaylist, &mut s, &src, &*player);
+        dispatch_input(InputAction::CreatePlaylist, &mut s, &*player);
         assert!(matches!(s.modal, Some(ytm_tui::app::Modal::Prompt { .. })));
         s.modal = None;
-        dispatch_input(InputAction::RenamePlaylist, &mut s, &src, &*player);
+        dispatch_input(InputAction::RenamePlaylist, &mut s, &*player);
         assert!(matches!(s.modal, Some(ytm_tui::app::Modal::Prompt { .. })));
         assert!(player.commands().is_empty(), "neither touches the player");
     }
@@ -1906,14 +2028,14 @@ mod tests {
     fn y_confirms_a_delete_and_n_declines_it() {
         // Nothing else proves a user can actually answer the box: `y` and `n`
         // are not in the keymap, so the loop has to resolve them.
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut yes = AppState {
             pane: Pane::Playlists,
             playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
             ..Default::default()
         };
         open_delete_confirm(&mut yes);
-        let task = dispatch_input(InputAction::Char('y'), &mut yes, &src, &*player);
+        let task = dispatch_input(InputAction::Char('y'), &mut yes, &*player);
         assert!(
             matches!(
                 task,
@@ -1931,20 +2053,20 @@ mod tests {
             ..Default::default()
         };
         open_delete_confirm(&mut no);
-        assert!(dispatch_input(InputAction::Char('n'), &mut no, &src, &*player).is_none());
+        assert!(dispatch_input(InputAction::Char('n'), &mut no, &*player).is_none());
         assert!(no.modal.is_none(), "n closes the box");
         assert_eq!(no.playlists.len(), 1, "and deletes nothing");
     }
 
     #[test]
     fn d_on_a_playlist_opens_the_delete_confirmation() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             pane: Pane::Playlists,
             playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
             ..Default::default()
         };
-        dispatch_input(InputAction::DeletePlaylist, &mut s, &src, &*player);
+        dispatch_input(InputAction::DeletePlaylist, &mut s, &*player);
         assert!(matches!(s.modal, Some(Modal::Confirm { .. })));
     }
 
@@ -2120,7 +2242,7 @@ mod tests {
 
     #[test]
     fn picking_a_playlist_spawns_the_add_and_clears_the_marks() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             pane: Pane::Songs,
             tracks: vec![
@@ -2133,7 +2255,7 @@ mod tests {
         s.marked.insert(ytm_core::VideoId::from("v1"));
         s.marked.insert(ytm_core::VideoId::from("v2"));
         open_add_to_playlist(&mut s);
-        let task = dispatch_input(InputAction::Confirm, &mut s, &src, &*player);
+        let task = dispatch_input(InputAction::Confirm, &mut s, &*player);
         match task {
             Some(Task::Mutate {
                 task: MutationTask::AddTracks { id, videos },
@@ -2218,7 +2340,7 @@ mod tests {
 
     #[test]
     fn navigation_actions_do_not_reach_the_player() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             pane: Pane::Songs,
             tracks: vec![
@@ -2227,7 +2349,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        dispatch_input(InputAction::Down, &mut s, &src, &*player);
+        dispatch_input(InputAction::Down, &mut s, &*player);
         assert!(player.commands().is_empty());
         assert_eq!(s.selected, 1, "state handles navigation");
     }
@@ -2373,21 +2495,21 @@ mod tests {
         // The forward half of the h/l pair: `l` descends into a playlist, `h`
         // comes back out. Opening is a network task, so it lives here rather
         // than in the reducer.
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             pane: Pane::Playlists,
             playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
             focus: Focus::Main,
             ..Default::default()
         };
-        let task = dispatch_input(InputAction::Right, &mut s, &src, &*player);
+        let task = dispatch_input(InputAction::Right, &mut s, &*player);
         assert_eq!(task, Some(Task::OpenPlaylist("p1".into())));
     }
 
     #[test]
     fn right_inside_an_open_playlist_does_not_reopen_it() {
         // Nothing to descend into, so `l` must not fire a redundant fetch.
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             pane: Pane::Playlists,
             playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
@@ -2396,21 +2518,21 @@ mod tests {
             focus: Focus::Main,
             ..Default::default()
         };
-        assert!(dispatch_input(InputAction::Right, &mut s, &src, &*player).is_none());
+        assert!(dispatch_input(InputAction::Right, &mut s, &*player).is_none());
     }
 
     #[test]
     fn right_on_a_track_pane_does_not_play_anything() {
         // `l` is navigation, not Enter. Playing on a focus change would be a
         // nasty surprise.
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             pane: Pane::Songs,
             tracks: vec![ytm_core::Track::stub("v1", "T")],
             focus: Focus::Main,
             ..Default::default()
         };
-        let task = dispatch_input(InputAction::Right, &mut s, &src, &*player);
+        let task = dispatch_input(InputAction::Right, &mut s, &*player);
         assert!(task.is_none());
         assert!(
             player.commands().is_empty(),
@@ -2422,9 +2544,9 @@ mod tests {
     fn a_number_key_switching_to_a_pane_loads_it() {
         // Pressing 4 for Albums must fetch albums, or the pane sits empty.
         // Home is source 1, so the sources after it all shifted by one.
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState::default();
-        let task = dispatch_input(InputAction::GoTo(4), &mut s, &src, &*player);
+        let task = dispatch_input(InputAction::GoTo(4), &mut s, &*player);
         assert_eq!(task, Some(Task::LoadAlbums));
         assert_eq!(s.pane, Pane::Albums);
     }
@@ -2432,9 +2554,9 @@ mod tests {
     #[test]
     fn a_number_key_for_the_queue_needs_no_fetch() {
         // The queue is local state owned by the actor; there is nothing to load.
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState::default();
-        assert!(dispatch_input(InputAction::GoTo(7), &mut s, &src, &*player).is_none());
+        assert!(dispatch_input(InputAction::GoTo(7), &mut s, &*player).is_none());
         assert_eq!(s.pane, Pane::Queue);
     }
 
@@ -2462,7 +2584,7 @@ mod tests {
         // End to end for `V`: the keymap must produce the action, the range must
         // mark, and the picker must carry every row. Feeding actions in directly
         // would prove the reducer works while nothing could reach it.
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let km = ytm_tui::keymap::KeyMap::default();
         let mut s = AppState {
             pane: Pane::Songs,
@@ -2481,14 +2603,14 @@ mod tests {
                     s.input_focus(),
                 )
                 .unwrap_or_else(|| panic!("{c:?} is unbound"));
-            dispatch_input(a, s, &src, &*player)
+            dispatch_input(a, s, &*player)
         };
         press(&mut s, 'V');
         press(&mut s, 'j');
         press(&mut s, 'j');
         assert_eq!(s.marked.len(), 3, "V then j j must mark three rows");
         press(&mut s, 'A');
-        match dispatch_input(InputAction::Confirm, &mut s, &src, &*player) {
+        match dispatch_input(InputAction::Confirm, &mut s, &*player) {
             Some(Task::Mutate {
                 task: MutationTask::AddTracks { videos, .. },
                 ..
@@ -2504,7 +2626,7 @@ mod tests {
     fn hand_marks_and_a_visual_range_add_up_through_the_keymap() {
         // The owner's question: does marking rows by hand still work alongside
         // the new range selection? The union must reach the API.
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let km = ytm_tui::keymap::KeyMap::default();
         let mut s = AppState {
             pane: Pane::Songs,
@@ -2523,7 +2645,7 @@ mod tests {
                     s.input_focus(),
                 )
                 .unwrap();
-            dispatch_input(a, s, &src, &*player)
+            dispatch_input(a, s, &*player)
         };
         press(&mut s, 'v'); // hand-mark v0
         press(&mut s, 'j');
@@ -2531,7 +2653,7 @@ mod tests {
         press(&mut s, 'V'); // range from v2
         press(&mut s, 'j'); // ..v3
         press(&mut s, 'A');
-        match dispatch_input(InputAction::Confirm, &mut s, &src, &*player) {
+        match dispatch_input(InputAction::Confirm, &mut s, &*player) {
             Some(Task::Mutate {
                 task: MutationTask::AddTracks { videos, .. },
                 ..
@@ -2567,7 +2689,7 @@ mod tests {
 
     #[test]
     fn enter_on_an_album_row_does_not_play_an_invisible_song() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             pane: Pane::Songs,
             focus: ytm_tui::app::Focus::Main,
@@ -2578,7 +2700,7 @@ mod tests {
         // now shows albums.
         s.apply(AppEvent::Input(InputAction::GoTo(4)));
         assert_eq!(s.pane, Pane::Albums);
-        dispatch_input(InputAction::Confirm, &mut s, &src, &*player);
+        dispatch_input(InputAction::Confirm, &mut s, &*player);
         let log = player.commands();
         assert!(
             log.is_empty(),
@@ -2588,7 +2710,7 @@ mod tests {
 
     #[test]
     fn add_to_queue_on_an_album_row_queues_nothing() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             pane: Pane::Songs,
             focus: ytm_tui::app::Focus::Main,
@@ -2596,7 +2718,7 @@ mod tests {
             ..Default::default()
         };
         s.apply(AppEvent::Input(InputAction::GoTo(4)));
-        dispatch_input(InputAction::AddToQueue, &mut s, &src, &*player);
+        dispatch_input(InputAction::AddToQueue, &mut s, &*player);
         let log = player.commands();
         assert!(log.is_empty(), "`a` on an album row queued a song: {log:?}");
     }
@@ -2605,13 +2727,13 @@ mod tests {
     fn adding_to_the_queue_confirms_with_a_toast() {
         // FR-U3: `a` is otherwise silent unless the queue pane happens to be
         // open, so the user cannot tell it worked.
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             pane: Pane::Songs,
             tracks: vec![ytm_core::Track::stub("v1", "Roygbiv")],
             ..Default::default()
         };
-        dispatch_input(InputAction::AddToQueue, &mut s, &src, &*player);
+        dispatch_input(InputAction::AddToQueue, &mut s, &*player);
         assert_eq!(s.toasts.len(), 1, "adding must be acknowledged");
         assert_eq!(s.toasts[0].kind, ToastKind::Success);
         assert!(
@@ -2624,13 +2746,13 @@ mod tests {
     #[test]
     fn play_next_confirms_with_its_own_wording() {
         // `e` and `a` do different things, so one shared message would mislead.
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             pane: Pane::Songs,
             tracks: vec![ytm_core::Track::stub("v1", "Roygbiv")],
             ..Default::default()
         };
-        dispatch_input(InputAction::PlayNext, &mut s, &src, &*player);
+        dispatch_input(InputAction::PlayNext, &mut s, &*player);
         assert_eq!(s.toasts.len(), 1);
         assert!(
             s.toasts[0].text.to_lowercase().contains("next"),
@@ -2642,7 +2764,7 @@ mod tests {
     #[test]
     fn adding_a_whole_marked_selection_reports_the_count() {
         // A range of 12 tracks naming only the first would read as a bug.
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             pane: Pane::Songs,
             tracks: (0..3)
@@ -2653,7 +2775,7 @@ mod tests {
         for t in s.tracks.clone() {
             s.marked.insert(t.video_id.clone());
         }
-        dispatch_input(InputAction::AddToQueue, &mut s, &src, &*player);
+        dispatch_input(InputAction::AddToQueue, &mut s, &*player);
         assert!(s.toasts[0].text.contains('3'), "got: {}", s.toasts[0].text);
         match player.commands().first() {
             Some(PlayerCommand::EnqueueBack(ts)) => {
@@ -2665,12 +2787,12 @@ mod tests {
 
     #[test]
     fn adding_with_an_empty_list_says_nothing_rather_than_lying() {
-        let (src, player) = deps();
+        let (_src, player) = deps();
         let mut s = AppState {
             pane: Pane::Songs,
             ..Default::default()
         };
-        dispatch_input(InputAction::AddToQueue, &mut s, &src, &*player);
+        dispatch_input(InputAction::AddToQueue, &mut s, &*player);
         assert!(s.toasts.is_empty(), "nothing was added, so say nothing");
         assert!(player.commands().is_empty());
     }
