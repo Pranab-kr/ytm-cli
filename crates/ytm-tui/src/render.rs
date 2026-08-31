@@ -17,9 +17,10 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-/// Spec §6: sidebar ~22 columns, now-playing bar 3 rows.
+/// Spec §6: sidebar ~22 columns. The bar's own height comes from the widget that
+/// draws it, so adding a row there cannot leave the layout reserving too few.
 pub const SIDEBAR_WIDTH: u16 = 22;
-const NOWPLAYING_HEIGHT: u16 = 3;
+const NOWPLAYING_HEIGHT: u16 = nowplaying::HEIGHT;
 /// Columns the art panel takes when it appears.
 const ART_WIDTH: u16 = 24;
 /// Blank columns between the track list and the art panel. Without it the
@@ -48,7 +49,12 @@ pub enum ClickTarget {
     Source(usize),
     /// The nth row of the list, counting from the top of the visible window.
     Row(usize),
-    /// Chrome: the heading, the now-playing bar, the rule.
+    /// The progress row of the now-playing bar, with the column clicked. The
+    /// caller turns it into a position: only `nowplaying` knows where the bar
+    /// starts, and duplicating that here is how a click would seek to the wrong
+    /// second.
+    Progress(u16),
+    /// Chrome: the heading, the rest of the now-playing bar, the rule.
     Nothing,
 }
 
@@ -57,14 +63,19 @@ pub fn click_target(
     area: Rect,
     col: u16,
     row: u16,
-    pane: Pane,
-    has_search_input: bool,
+    search_row: bool,
     filter_row: bool,
 ) -> ClickTarget {
-    // The now-playing bar is not clickable; neither is anything below the frame.
-    let body_height = area.height.saturating_sub(NOWPLAYING_HEIGHT);
-    if row >= body_height {
-        return ClickTarget::Nothing;
+    let (body, np) = body_and_nowplaying(area);
+    // The progress row is the one clickable part of the now-playing bar. The
+    // margin, the rule, and the title row stay inert, so a click on the title
+    // cannot move playback.
+    if row >= body.height {
+        return if row == np.y + nowplaying::PROGRESS_ROW && col >= np.x && col < np.x + np.width {
+            ClickTarget::Progress(col - np.x)
+        } else {
+            ClickTarget::Nothing
+        };
     }
     if col < SIDEBAR_WIDTH {
         return ClickTarget::Source(row as usize);
@@ -73,7 +84,7 @@ pub fn click_target(
     if col == SIDEBAR_WIDTH {
         return ClickTarget::Nothing;
     }
-    let top = list_top_for(pane, has_search_input, filter_row);
+    let top = list_top_for(search_row, filter_row);
     match row.checked_sub(top) {
         Some(offset) => ClickTarget::Row(offset as usize),
         // The heading row.
@@ -86,28 +97,35 @@ pub fn click_target(
 /// The click handler needs it to turn a mouse position into a row index, and it
 /// has to be derived from the same constants the layout uses or a click lands on
 /// a different row than the one under the pointer.
-pub fn list_top_for(pane: Pane, has_search_input: bool, filter_row: bool) -> u16 {
-    // Row 0 is the pane heading; the search pane spends row 1 on its query line;
-    // a visible filter row takes one more. Miss any of these and a click lands
-    // on a different row than the pointer.
-    let mut top = 1;
-    if pane == Pane::Search && has_search_input {
-        top += 1;
-    }
-    top + u16::from(filter_row)
+/// Both take the flags rather than the pane, because two panes now grow a query
+/// row: Search always, and Artists while `S` is open. Deriving it from the pane
+/// here is what let the layout and the click math disagree.
+pub fn list_top_for(search_row: bool, filter_row: bool) -> u16 {
+    // Row 0 is the pane heading; a query row takes the next; a visible filter row
+    // takes one more. Miss any of these and a click lands on a different row than
+    // the pointer.
+    1 + u16::from(search_row) + u16::from(filter_row)
 }
 
-pub fn list_rows_for(area: Rect, pane: Pane, has_search_input: bool, filter_row: bool) -> usize {
+pub fn list_rows_for(area: Rect, search_row: bool, filter_row: bool) -> usize {
     // Now-playing bar, then the pane heading inside the main area.
     let body = area.height.saturating_sub(NOWPLAYING_HEIGHT);
-    let rows = body.saturating_sub(1);
-    // The search pane spends one more row on its query line.
-    let rows = if pane == Pane::Search && has_search_input {
-        rows.saturating_sub(1)
-    } else {
-        rows
-    };
-    rows.saturating_sub(u16::from(filter_row)) as usize
+    body.saturating_sub(1)
+        .saturating_sub(u16::from(search_row))
+        .saturating_sub(u16::from(filter_row)) as usize
+}
+
+/// The body area and the now-playing bar below it.
+///
+/// Shared with the click handler: hit-testing the progress bar has to use the
+/// same split `render` draws from, or a click would seek to a position other
+/// than the one under the pointer.
+pub fn body_and_nowplaying(area: Rect) -> (Rect, Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(NOWPLAYING_HEIGHT)])
+        .split(area);
+    (rows[0], rows[1])
 }
 
 /// Split the main area into list and art panel, or leave it whole.
@@ -137,10 +155,8 @@ pub fn render(f: &mut Frame, s: &AppState, t: &Theme, km: &KeyMap, art: &mut art
         return;
     }
 
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(NOWPLAYING_HEIGHT)])
-        .split(area);
+    let (body, np) = body_and_nowplaying(area);
+    let rows = [body, np];
 
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -154,18 +170,15 @@ pub fn render(f: &mut Frame, s: &AppState, t: &Theme, km: &KeyMap, art: &mut art
     // Art is keyed by the playing track's thumbnail, and only drawn once the
     // bytes have arrived — an in-flight URL leaves the layout unsplit rather
     // than reserving a gap that may never fill.
-    let art_url = s
-        .now_playing
-        .as_ref()
-        .and_then(|t| t.thumbnail_url.as_deref());
-    let has_art = art_url.is_some_and(|u| art.get(u).is_some());
+    let art_url = s.art_url();
+    let has_art = art_url.as_deref().is_some_and(|u| art.get(u).is_some());
     let (main_area, art_area) = split_for_art(cols[2], art.is_enabled(), has_art);
 
     sidebar::draw(f, cols[0], s, t);
     draw_rule(f, cols[1], t);
     draw_main(f, main_area, s, t);
     if let Some(a) = art_area {
-        art::draw(f, a, art_url, art);
+        art::draw(f, a, art_url.as_deref(), art);
     }
     nowplaying::draw(f, rows[1], s, t);
 
@@ -204,15 +217,20 @@ fn draw_main(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     // rows. It must be visible: without it the user types and sees only rows
     // vanishing, with nothing to say what the filter holds or how to leave it.
     let show_filter = s.filter_row_visible();
+    // The query row is drawn here rather than inside the Search pane, because
+    // Artists borrows the same field for `S`. Owning it in one place is what
+    // keeps the layout, the click math, and `list_top_for` in agreement.
+    let show_search = s.search_row_visible();
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
+            Constraint::Length(u16::from(show_search)),
             Constraint::Length(u16::from(show_filter)),
             Constraint::Min(0),
         ])
         .split(area);
-    let (filter_row, list_row) = (rows[1], rows[2]);
+    let (search_row, filter_row, list_row) = (rows[1], rows[2], rows[3]);
 
     let (heading, badge) = heading_parts(s, w);
     let mut spans = vec![Span::styled(
@@ -231,6 +249,9 @@ fn draw_main(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     // Top-right of the heading row: tied to the pane whose data is loading.
     toast::draw_spinner(f, rows[0], s, t);
 
+    if show_search {
+        search::draw_input(f, search_row, s, t);
+    }
     if show_filter {
         search::draw_filter(f, filter_row, s, t);
     }
@@ -250,24 +271,17 @@ fn draw_main(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     }
 }
 
-/// Search is the one pane with its own input row: the query line, then results.
+/// The results below the query row, which `draw_main` has already drawn.
 fn draw_search(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(area);
-
-    search::draw_input(f, rows[0], s, t);
-
     // "Searched and found nothing" must not look like "hasn't searched yet",
     // which is what `tracklist`'s generic empty state would say.
     if s.search_results.is_empty() && !s.search_query.trim().is_empty() {
-        search::draw_no_matches(f, rows[1], t);
+        search::draw_no_matches(f, area, t);
     } else {
-        tracklist::draw(f, rows[1], s, t);
+        tracklist::draw(f, area, s, t);
     }
 }
 
@@ -460,6 +474,39 @@ mod tests {
     }
 
     #[test]
+    fn the_artists_pane_draws_a_query_row_while_its_search_is_open() {
+        // The bug the owner hit: `S` here focused the search field but only the
+        // Search pane ever drew one, so the field was invisible. Every later key
+        // went into it — `a`, `v`, digits, Tab — and the pane looked frozen.
+        let mut s = AppState {
+            pane: Pane::Artists,
+            focus: crate::app::Focus::Main,
+            ..Default::default()
+        };
+        s.apply(crate::event::AppEvent::Input(
+            crate::event::InputAction::OpenSearch,
+        ));
+        let text = frame_text(&s, &mut ArtCache::disabled(), 80, 24);
+        assert!(
+            text.contains("Search:"),
+            "the artist query field must be on screen, got: {text}"
+        );
+    }
+
+    #[test]
+    fn the_artists_pane_has_no_query_row_before_its_search_opens() {
+        // Guards the test above: drawing the row unconditionally would satisfy it
+        // while stealing a row from the artist list.
+        let s = AppState {
+            pane: Pane::Artists,
+            focus: crate::app::Focus::Main,
+            ..Default::default()
+        };
+        let text = frame_text(&s, &mut ArtCache::disabled(), 80, 24);
+        assert!(!text.contains("Search:"));
+    }
+
+    #[test]
     fn the_heading_is_clean_outside_visual_mode() {
         // Without this the indicator could be painted unconditionally and the
         // test above would still pass.
@@ -494,10 +541,10 @@ mod tests {
         // Paging and `zz` are computed from this. If it counted the now-playing
         // bar or the heading, a half-page jump would overshoot the screen.
         let area = Rect::new(0, 0, 80, 24);
-        // 24 - 3 (now playing) - 1 (heading) = 20
-        assert_eq!(list_rows_for(area, Pane::Songs, false, false), 20);
+        // 24 - 4 (now playing: margin, rule, title, progress) - 1 (heading) = 19
+        assert_eq!(list_rows_for(area, false, false), 19);
         // The search pane also spends a row on the query line.
-        assert_eq!(list_rows_for(area, Pane::Search, true, false), 19);
+        assert_eq!(list_rows_for(area, true, false), 18);
     }
 
     #[test]
@@ -505,30 +552,27 @@ mod tests {
         // These are u16 subtractions; without saturation a short terminal would
         // wrap to 65535 and every page key would jump to the end of the list.
         let area = Rect::new(0, 0, 80, 2);
-        assert_eq!(list_rows_for(area, Pane::Songs, false, false), 0);
-        assert_eq!(
-            list_rows_for(Rect::new(0, 0, 80, 0), Pane::Songs, false, false),
-            0
-        );
+        assert_eq!(list_rows_for(area, false, false), 0);
+        assert_eq!(list_rows_for(Rect::new(0, 0, 80, 0), false, false), 0);
     }
 
     #[test]
     fn the_list_starts_below_the_heading() {
         // A click handler that assumed row 0 would select one row too high in
         // every pane, and two too high in Search.
-        assert_eq!(list_top_for(Pane::Songs, false, false), 1);
-        assert_eq!(list_top_for(Pane::Search, true, false), 2);
+        assert_eq!(list_top_for(false, false), 1);
+        assert_eq!(list_top_for(true, false), 2);
     }
 
     #[test]
     fn a_click_in_the_sidebar_names_its_source() {
         let area = Rect::new(0, 0, 80, 24);
         assert_eq!(
-            click_target(area, 3, 0, Pane::Songs, false, false),
+            click_target(area, 3, 0, false, false),
             ClickTarget::Source(0)
         );
         assert_eq!(
-            click_target(area, 3, 4, Pane::Songs, false, false),
+            click_target(area, 3, 4, false, false),
             ClickTarget::Source(4)
         );
     }
@@ -538,19 +582,10 @@ mod tests {
         // Row 0 of the main area is the heading, so the first list row is screen
         // row 1. Off by one here selects the wrong track on every click.
         let area = Rect::new(0, 0, 80, 24);
-        assert_eq!(
-            click_target(area, 40, 1, Pane::Songs, false, false),
-            ClickTarget::Row(0)
-        );
-        assert_eq!(
-            click_target(area, 40, 5, Pane::Songs, false, false),
-            ClickTarget::Row(4)
-        );
+        assert_eq!(click_target(area, 40, 1, false, false), ClickTarget::Row(0));
+        assert_eq!(click_target(area, 40, 5, false, false), ClickTarget::Row(4));
         // Search spends another row on the query line.
-        assert_eq!(
-            click_target(area, 40, 2, Pane::Search, true, false),
-            ClickTarget::Row(0)
-        );
+        assert_eq!(click_target(area, 40, 2, true, false), ClickTarget::Row(0));
     }
 
     #[test]
@@ -558,21 +593,21 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         // The pane heading.
         assert_eq!(
-            click_target(area, 40, 0, Pane::Songs, false, false),
+            click_target(area, 40, 0, false, false),
             ClickTarget::Nothing
         );
         // The rule between sidebar and list.
         assert_eq!(
-            click_target(area, SIDEBAR_WIDTH, 3, Pane::Songs, false, false),
+            click_target(area, SIDEBAR_WIDTH, 3, false, false),
             ClickTarget::Nothing
         );
         // The now-playing bar, and anything past the frame.
         assert_eq!(
-            click_target(area, 40, 21, Pane::Songs, false, false),
+            click_target(area, 40, 21, false, false),
             ClickTarget::Nothing
         );
         assert_eq!(
-            click_target(area, 40, 200, Pane::Songs, false, false),
+            click_target(area, 40, 200, false, false),
             ClickTarget::Nothing
         );
     }

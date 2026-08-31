@@ -651,8 +651,12 @@ pub fn dispatch_input(
             // through PlayNow (which inserts) put a second copy of a finished
             // track in beside the first.
             if state.pane == Pane::Queue {
-                if state.selected < state.queue.len() {
-                    send(player, PlayerCommand::JumpTo(state.selected));
+                // `selected` counts *visible* rows and JumpTo takes a queue index.
+                // Passing it through played the queue's nth track instead of the
+                // filtered row under the cursor. `None` means the row is past the
+                // end, where a command would index past the queue in the actor.
+                if let Some(i) = state.queue_index_of_selected() {
+                    send(player, PlayerCommand::JumpTo(i));
                 }
                 return None;
             }
@@ -727,8 +731,11 @@ pub fn dispatch_input(
             // clears the range instead of one row. Removed highest-index first:
             // each removal shifts everything after it, so ascending order would
             // delete the wrong entries after the first.
+            // The marked path matches by video id against the real queue, so it was
+            // always right; the cursor path needs the same visible-to-queue
+            // translation Enter does.
             let mut targets: Vec<usize> = if state.marked.is_empty() {
-                vec![state.selected]
+                state.queue_index_of_selected().into_iter().collect()
             } else {
                 state
                     .queue
@@ -748,18 +755,63 @@ pub fn dispatch_input(
             state.visual_anchor = None;
         }
         A::MoveEntryUp | A::MoveEntryDown if state.pane == Pane::Queue => {
-            let from = state.selected;
-            let to = if action == A::MoveEntryUp {
-                from.checked_sub(1)
+            let down = action == A::MoveEntryDown;
+            // Marked rows move as one block, the way `x` removes them as one.
+            // Without this a `V` range could be selected and deleted but never
+            // reordered, which is what the owner hit. Matched by video id
+            // against the real queue, so the set is right under a filter too.
+            let mut targets: Vec<usize> = if state.marked.is_empty() {
+                state.queue_index_of_selected().into_iter().collect()
             } else {
-                Some(from + 1).filter(|t| *t < state.queue.len())
+                state
+                    .queue
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| state.marked.contains(&t.video_id))
+                    .map(|(i, _)| i)
+                    .collect()
             };
             // Out of range at either end: the actor would index past the queue.
-            if let Some(to) = to {
-                send(player, PlayerCommand::MoveInQueue { from, to });
-                // Follow the entry rather than the row, or a held key would
-                // walk the selection back over the track it just moved.
-                state.selected = to;
+            // Checked across the whole block, because sliding only the entries
+            // with room left would squash the range together.
+            let at_edge = if down {
+                targets.iter().any(|i| i + 1 >= state.queue.len())
+            } else {
+                targets.contains(&0)
+            };
+            if !targets.is_empty() && !at_edge {
+                // Highest index first going down, lowest first going up: each
+                // move shifts everything past it, so the other order would drag
+                // the block apart one entry at a time.
+                targets.sort_unstable();
+                if down {
+                    targets.reverse();
+                }
+                for from in &targets {
+                    let to = if down { from + 1 } else { from - 1 };
+                    send(player, PlayerCommand::MoveInQueue { from: *from, to });
+                }
+                // Follow the entry rather than the row, or a held key would walk
+                // the selection back over the track it just moved. The marks are
+                // video ids, so they ride along with their entries and `J` can be
+                // held to keep going.
+                let follows = state.marked.is_empty()
+                    || state
+                        .queue
+                        .get(state.selected)
+                        .is_some_and(|t| state.marked.contains(&t.video_id));
+                if follows {
+                    state.selected = if down {
+                        state.selected + 1
+                    } else {
+                        state.selected.saturating_sub(1)
+                    };
+                }
+                // The range has become a block move, so stop extending it: a
+                // later `j` would otherwise recompute the marks from an anchor
+                // that no longer points at the row it was set on.
+                state.visual_anchor = None;
+                state.marks_before_visual.clear();
             }
         }
         A::MoveEntryUp | A::MoveEntryDown => {}
@@ -790,6 +842,19 @@ pub fn dispatch_input(
             if let Some(p) = state.selected_playlist() {
                 return start(state, Task::OpenPlaylist(p.id.clone()));
             }
+            // An artist row descends into their tracks, the same as Enter. The
+            // reducer's Right arm already assumed the loop did this ("the loop
+            // turns this into the fetch") but nothing here checked, so `l` on an
+            // artist silently did nothing while `l` on a playlist worked.
+            if let Some(a) = state.selected_artist() {
+                return start(
+                    state,
+                    Task::OpenArtist {
+                        id: a.id.clone(),
+                        name: a.name.clone(),
+                    },
+                );
+            }
             state.apply(AppEvent::Input(A::Right));
         }
         // A number key switches pane, so the new pane needs its rows.
@@ -816,16 +881,15 @@ fn handle_click(
     row: u16,
     area: ratatui::layout::Rect,
     state: &mut AppState,
+    player: &impl Player,
 ) -> Option<Task> {
     use ytm_tui::render::{ClickTarget, click_target};
 
-    let typing = state.focus == ytm_tui::app::Focus::SearchInput;
     match click_target(
         area,
         col,
         row,
-        state.pane,
-        typing || !state.search_query.is_empty(),
+        state.search_row_visible(),
         state.filter_row_visible(),
     ) {
         ClickTarget::Source(i) => {
@@ -849,6 +913,20 @@ fn handle_click(
                 state.focus = ytm_tui::app::Focus::Main;
                 state.refresh_visual_marks();
             }
+            None
+        }
+        // Seeking is the one thing a click does that is not selection: the bar
+        // *is* a position, so clicking it anywhere else would be the surprise.
+        // `nowplaying` owns the geometry, so a wider flags column cannot make a
+        // click land on a different second than the pointer.
+        ClickTarget::Progress(col) => {
+            let (_, np) = ytm_tui::render::body_and_nowplaying(area);
+            let secs = ytm_tui::widgets::nowplaying::seek_target_secs(
+                np.width as usize,
+                col as usize,
+                state,
+            )?;
+            send(player, PlayerCommand::SeekAbsolute(secs));
             None
         }
         ClickTarget::Nothing => None,
@@ -998,6 +1076,7 @@ pub async fn run(
                                     m.row,
                                     terminal.size()?.into(),
                                     &mut state,
+                                    &player,
                                 );
                                 if let Some(task) = task {
                                     if let Some(t) = start(&mut state, task) {
@@ -1037,6 +1116,7 @@ pub async fn run(
                                     m.row,
                                     terminal.size()?.into(),
                                     &mut state,
+                                    &player,
                                 )
                                 .is_none()
                                     && let Some(t) = state.selected_track()
@@ -1203,8 +1283,7 @@ pub async fn run(
         // `zz`, and only the frame knows it.
         state.viewport_rows = ytm_tui::render::list_rows_for(
             terminal.size()?.into(),
-            state.pane,
-            !state.search_query.is_empty() || state.focus == ytm_tui::app::Focus::SearchInput,
+            state.search_row_visible(),
             state.filter_row_visible(),
         );
         terminal.draw(|f| ytm_tui::render::render(f, &state, &theme, &keymap, &mut art))?;
@@ -1390,8 +1469,8 @@ fn cache_write_through(cache: &ytm_core::cache::Cache, ev: &AppEvent) {
 /// failed to decode, or that started playing before the picker finished probing,
 /// still gets one attempt. `should_fetch` is what makes "every tick" cheap.
 fn art_tick(art: &mut ytm_tui::widgets::art::ArtCache, state: &AppState) -> Option<String> {
-    let url = state.now_playing.as_ref()?.thumbnail_url.as_deref()?;
-    art.should_fetch(url).then(|| url.to_owned())
+    let url = state.art_url()?;
+    art.should_fetch(&url).then_some(url)
 }
 
 /// Fetch and decode one thumbnail off the UI thread (NFR-2).
@@ -1657,6 +1736,88 @@ mod tests {
         }
     }
 
+    /// A queue with a filter on, matching entries 1 and 3 only.
+    fn filtered_queue_of_four() -> AppState {
+        AppState {
+            pane: Pane::Queue,
+            focus: Focus::Main,
+            queue: vec![
+                ytm_core::Track::stub("q0", "We Don't Talk Anymore"),
+                ytm_core::Track::stub("q1", "blue"),
+                ytm_core::Track::stub("q2", "Something Else"),
+                ytm_core::Track::stub("q3", "I'm Good (Blue)"),
+            ],
+            filter: "blu".into(),
+            selected: 0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn enter_on_a_filtered_row_plays_that_row_not_the_queues_nth() {
+        // The owner's report: filter to "blu", press Enter on the first match, and
+        // the queue's *first* track played instead. `selected` counts visible rows;
+        // JumpTo takes a queue index.
+        let (_src, player) = deps();
+        let mut s = filtered_queue_of_four();
+        dispatch_input(InputAction::Confirm, &mut s, &*player);
+        match player.commands()[0] {
+            PlayerCommand::JumpTo(i) => assert_eq!(i, 1, "visible row 0 is queue 1"),
+            ref o => panic!("expected JumpTo, got {o:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_on_the_second_filtered_row_plays_the_right_entry() {
+        // "if the 2nd song hover and sel, the queue current song plays next one".
+        let (_src, player) = deps();
+        let mut s = AppState {
+            selected: 1,
+            ..filtered_queue_of_four()
+        };
+        dispatch_input(InputAction::Confirm, &mut s, &*player);
+        match player.commands()[0] {
+            PlayerCommand::JumpTo(i) => assert_eq!(i, 3, "visible row 1 is queue 3"),
+            ref o => panic!("expected JumpTo, got {o:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_past_the_last_filtered_row_sends_nothing() {
+        // Two matches, so row 2 does not exist. A command here would index past
+        // the queue in the actor.
+        let (_src, player) = deps();
+        let mut s = AppState {
+            selected: 2,
+            ..filtered_queue_of_four()
+        };
+        dispatch_input(InputAction::Confirm, &mut s, &*player);
+        assert!(player.commands().is_empty());
+    }
+
+    #[test]
+    fn x_on_a_filtered_row_removes_that_row() {
+        // Same translation bug: unmarked `x` passed the visible index straight
+        // through, so it deleted whatever sat at that spot in the full queue.
+        let (_src, player) = deps();
+        let mut s = filtered_queue_of_four();
+        dispatch_input(InputAction::RemoveFromPlaylist, &mut s, &*player);
+        match player.commands()[0] {
+            PlayerCommand::RemoveFromQueue(i) => assert_eq!(i, 1),
+            ref o => panic!("expected RemoveFromQueue, got {o:?}"),
+        }
+    }
+
+    #[test]
+    fn moving_a_filtered_row_moves_that_entry() {
+        // J/K had the same bug. Marked ranges never did — they match by video id
+        // against the real queue — so this only ever bit the single-row case.
+        let (_src, player) = deps();
+        let mut s = filtered_queue_of_four();
+        dispatch_input(InputAction::MoveEntryDown, &mut s, &*player);
+        assert_eq!(moves(&player), vec![(1, 2)], "queue 1 moves to 2");
+    }
+
     #[test]
     fn removing_a_queue_entry_does_not_mutate_the_local_queue() {
         // The actor owns queue truth and answers with QueueChanged. Editing
@@ -1723,6 +1884,144 @@ mod tests {
         );
         assert_eq!(top.selected, 0);
         assert_eq!(bottom.selected, 2);
+    }
+
+    /// The reorder commands a dispatch produced, in the order the actor sees them.
+    fn moves(player: &MockPlayer) -> Vec<(usize, usize)> {
+        player
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                PlayerCommand::MoveInQueue { from, to } => Some((*from, *to)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn queue_of_four_with_middle_marked() -> AppState {
+        let mut s = AppState {
+            pane: Pane::Queue,
+            queue: vec![
+                ytm_core::Track::stub("v1", "A"),
+                ytm_core::Track::stub("v2", "B"),
+                ytm_core::Track::stub("v3", "C"),
+                ytm_core::Track::stub("v4", "D"),
+            ],
+            focus: Focus::Main,
+            selected: 1,
+            ..Default::default()
+        };
+        s.marked.insert(ytm_core::VideoId::from("v2"));
+        s.marked.insert(ytm_core::VideoId::from("v3"));
+        s
+    }
+
+    #[test]
+    fn a_marked_block_moves_down_together() {
+        // FR-Q3 with FR-C4: `J` moved only the cursor row, so a `V` range could
+        // be selected and removed but never reordered. Highest index first —
+        // each move shifts what follows it, so ascending order would drag the
+        // block apart.
+        let (_src, player) = deps();
+        let mut s = queue_of_four_with_middle_marked();
+        dispatch_input(InputAction::MoveEntryDown, &mut s, &*player);
+        assert_eq!(moves(&player), vec![(2, 3), (1, 2)]);
+        assert_eq!(s.selected, 2, "the cursor follows the block");
+    }
+
+    #[test]
+    fn a_marked_block_moves_up_together() {
+        let (_src, player) = deps();
+        let mut s = queue_of_four_with_middle_marked();
+        dispatch_input(InputAction::MoveEntryUp, &mut s, &*player);
+        // Lowest index first going up, for the same reason reversed.
+        assert_eq!(moves(&player), vec![(1, 0), (2, 1)]);
+        assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn a_marked_block_stops_at_the_ends_instead_of_collapsing() {
+        // Moving a block that already touches an end would slide only the
+        // entries that can move and squash the range together.
+        let (_src, player) = deps();
+        let mut top = queue_of_four_with_middle_marked();
+        top.marked.insert(ytm_core::VideoId::from("v1"));
+        dispatch_input(InputAction::MoveEntryUp, &mut top, &*player);
+
+        let mut bottom = queue_of_four_with_middle_marked();
+        bottom.marked.insert(ytm_core::VideoId::from("v4"));
+        dispatch_input(InputAction::MoveEntryDown, &mut bottom, &*player);
+
+        assert!(
+            moves(&player).is_empty(),
+            "a block against the edge must not move at all"
+        );
+    }
+
+    /// Replay a dispatch's reorder commands through the real queue.
+    ///
+    /// The pairs alone do not prove the result: each `MoveInQueue` is a remove
+    /// then an insert, so every command shifts the indices the next one means.
+    /// This runs them through the actor's own `Queue` and reads the order out.
+    fn order_after(action: InputAction, state: &mut AppState) -> Vec<String> {
+        let (_src, player) = deps();
+        let mut q = ytm_player::queue::Queue::default();
+        q.push_back(state.queue.clone());
+        dispatch_input(action, state, &*player);
+        for (from, to) in moves(&player) {
+            q.move_item(from, to);
+        }
+        q.tracks()
+            .iter()
+            .map(|t| t.video_id.as_str().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_block_moved_down_stays_contiguous_in_the_real_queue() {
+        let mut s = queue_of_four_with_middle_marked();
+        assert_eq!(
+            order_after(InputAction::MoveEntryDown, &mut s),
+            vec!["v1", "v4", "v2", "v3"],
+            "v2+v3 must slide past v4 as one block, still adjacent and in order"
+        );
+    }
+
+    #[test]
+    fn a_block_moved_up_stays_contiguous_in_the_real_queue() {
+        let mut s = queue_of_four_with_middle_marked();
+        assert_eq!(
+            order_after(InputAction::MoveEntryUp, &mut s),
+            vec!["v2", "v3", "v1", "v4"]
+        );
+    }
+
+    #[test]
+    fn a_split_selection_moves_each_run_without_swallowing_a_gap() {
+        // Marks need not be contiguous — `v` on two distant rows is legal. Each
+        // marked entry moves one step; the unmarked row between them stays put.
+        let mut s = queue_of_four_with_middle_marked();
+        s.marked.remove(&ytm_core::VideoId::from("v3"));
+        s.marked.insert(ytm_core::VideoId::from("v4"));
+        // v2 and v4 marked, v4 is last, so the block is against the bottom.
+        let (_src, player) = deps();
+        dispatch_input(InputAction::MoveEntryDown, &mut s, &*player);
+        assert!(
+            moves(&player).is_empty(),
+            "one marked entry at the end pins the whole selection"
+        );
+    }
+
+    #[test]
+    fn a_moved_block_keeps_its_marks_so_the_key_repeats() {
+        // Marks are video ids, so they follow the entries through the reorder.
+        // Clearing them here would make `J` move the block once and then start
+        // moving the single cursor row instead.
+        let (_src, player) = deps();
+        let mut s = queue_of_four_with_middle_marked();
+        dispatch_input(InputAction::MoveEntryDown, &mut s, &*player);
+        assert!(s.marked.contains(&ytm_core::VideoId::from("v2")));
+        assert!(s.marked.contains(&ytm_core::VideoId::from("v3")));
     }
 
     #[test]
@@ -2504,6 +2803,48 @@ mod tests {
         };
         let task = dispatch_input(InputAction::Right, &mut s, &*player);
         assert_eq!(task, Some(Task::OpenPlaylist("p1".into())));
+    }
+
+    #[test]
+    fn right_on_an_artist_opens_their_tracks_like_enter() {
+        // `l` on a playlist row opened it, but on an artist row it did nothing:
+        // the reducer's Right arm says "the loop turns this into the fetch" and
+        // the loop only ever checked for a playlist. Enter worked, so the pane
+        // was reachable but the h/l pair was half-missing.
+        let (_src, player) = deps();
+        let mut s = AppState {
+            pane: Pane::Artists,
+            artists: vec![ytm_core::Artist {
+                id: ytm_core::ArtistId::from("UC1"),
+                name: "Sabrina Carpenter".into(),
+                subscribers: None,
+                thumbnail_url: None,
+            }],
+            focus: Focus::Main,
+            ..Default::default()
+        };
+        let task = dispatch_input(InputAction::Right, &mut s, &*player);
+        assert_eq!(
+            task,
+            Some(Task::OpenArtist {
+                id: ytm_core::ArtistId::from("UC1"),
+                name: "Sabrina Carpenter".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn right_inside_an_open_artist_does_not_reopen_them() {
+        // Their tracks are already on screen, so `l` must not refetch.
+        let (_src, player) = deps();
+        let mut s = AppState {
+            pane: Pane::Artists,
+            open_artist: Some((ytm_core::ArtistId::from("UC1"), "Someone".into())),
+            artist_tracks: vec![ytm_core::Track::stub("v1", "T")],
+            focus: Focus::Main,
+            ..Default::default()
+        };
+        assert_eq!(dispatch_input(InputAction::Right, &mut s, &*player), None);
     }
 
     #[test]

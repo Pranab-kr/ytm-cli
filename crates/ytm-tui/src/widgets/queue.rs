@@ -1,8 +1,8 @@
 //! The play queue: one row per entry, with the current one marked.
 //!
-//! Columns match `tracklist` so switching panes does not shift the grid, but the
-//! left column means something different here: it is the play position (FR-Q1),
-//! not the multi-select bullet. Nothing in the queue is multi-selected.
+//! Columns match `tracklist` so switching panes does not shift the grid. The
+//! left column carries two meanings here: the play position (FR-Q1) and the
+//! multi-select bullet (FR-C4), with the bullet winning when a row is marked.
 
 use crate::{
     app::AppState, theme::Theme, util::text::pad_to_width, widgets::tracklist::visible_window,
@@ -74,6 +74,8 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
                 s.queue_current == Some(idx)
             };
 
+            let marked = s.marked.contains(&track.video_id);
+
             let base = if is_current {
                 Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
             } else {
@@ -86,11 +88,20 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
                 Style::default().fg(t.fg_dim)
             };
 
+            // The gutter shows one glyph and the mark wins it, so a `V` range
+            // reads as a contiguous run of bullets even across the current row.
+            // Play position is not lost: the current entry keeps its bold accent
+            // title, and its `\u{25b6}` returns as soon as the mark clears.
+            let gutter = if marked {
+                "\u{2022} "
+            } else if is_current {
+                "\u{25b6} "
+            } else {
+                "  "
+            };
+
             ListItem::new(Line::from(vec![
-                Span::styled(
-                    if is_current { "\u{25b6} " } else { "  " },
-                    Style::default().fg(t.accent),
-                ),
+                Span::styled(gutter, Style::default().fg(t.accent)),
                 Span::styled(pad_to_width(&track.title, title_w), style),
                 Span::styled(pad_to_width(&track.artist_display(), artist_w), dim),
                 Span::styled(
@@ -174,6 +185,27 @@ mod tests {
             text_of(&s).contains("\u{25b6}"),
             "current entry needs a marker"
         );
+    }
+
+    #[test]
+    fn a_marked_queue_entry_shows_the_multiselect_bullet() {
+        // FR-C4/FR-Q3: `v`/`V` marks must be visible here, the same as in the
+        // track list, or the user cannot see what they selected before moving
+        // or removing it. The state side already marks queue rows; the widget
+        // was the only place the selection went unseen.
+        let mut s = two_entries();
+        s.marked.insert(ytm_core::VideoId::from("v2"));
+        assert!(
+            text_of(&s).contains('\u{2022}'),
+            "a marked queue row needs the bullet"
+        );
+    }
+
+    #[test]
+    fn an_unmarked_queue_shows_no_bullet() {
+        // Guards the test above: drawing the bullet on every row would pass it
+        // while telling the user nothing.
+        assert!(!text_of(&two_entries()).contains('\u{2022}'));
     }
 
     #[test]

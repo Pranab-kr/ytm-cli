@@ -50,6 +50,10 @@ pub enum HomeRow {
     Item(HomeItem),
 }
 
+/// Pixels to request for album art. Comfortably over the ~240px a 24-column
+/// panel needs, so the art stays sharp if the panel or the font grows.
+pub const ART_PX: u32 = 600;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Focus {
     #[default]
@@ -541,8 +545,12 @@ impl AppState {
             // before visual mode so the more visible state wins: a filtered list
             // is on screen and labelled, so Esc reads as "get rid of that".
             InputAction::Cancel if self.is_filtering() => {
+                // Keep the cursor on the row the user was looking at. Resetting to
+                // 0 meant Esc-then-Enter played the first track in the pane rather
+                // than the one they had picked out of the filtered list.
+                let keep = self.unfiltered_index_of_selected();
                 self.filter.clear();
-                self.selected = 0;
+                self.selected = keep;
                 self.scroll_offset = 0;
             }
             // Esc means "undo this selection" while a range is being made.
@@ -650,8 +658,116 @@ impl AppState {
     /// Shown while typing *and* while a filter is still narrowing rows after the
     /// field lost focus — otherwise a filtered list looks like a short list, with
     /// nothing to say why rows are missing or how to get them back.
+    /// The art URL for what is playing, at a size that can fill the panel.
+    ///
+    /// One accessor because the fetch and the cache lookup must agree: keyed on
+    /// different URLs, the image would be downloaded and then never found.
+    ///
+    /// The upsize is the whole point. YouTube volunteers 120px thumbnails and
+    /// `ratatui-image`'s `Resize::Fit` never upscales, so the art filled only
+    /// half the 24-column panel however wide the panel was — the empty right-hand
+    /// strip the owner reported. Verified live: the same URL at `=w600-h600`
+    /// returns a real 600x600 JPEG.
+    pub fn art_url(&self) -> Option<String> {
+        Some(ytm_core::mapping::thumbnail_at_size(
+            self.now_playing.as_ref()?.thumbnail_url.as_deref()?,
+            ART_PX,
+        ))
+    }
+
+    /// Queue index of a visible row, or `None` when this is not the queue.
+    ///
+    /// `selected` counts *visible* rows; `JumpTo`, `RemoveFromQueue` and
+    /// `MoveInQueue` all take real queue indices. Unfiltered the two are equal,
+    /// which is why passing `selected` straight through worked until a filter was
+    /// on — then Enter played whatever sat at that position in the full queue.
+    ///
+    /// Positional rather than by video id, because the queue may legitimately hold
+    /// the same track twice and an id lookup would pick the first copy.
+    pub fn queue_index_of_row(&self, row: usize) -> Option<usize> {
+        if self.pane != Pane::Queue {
+            return None;
+        }
+        if !self.is_filtering() {
+            return (row < self.queue.len()).then_some(row);
+        }
+        self.queue
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| self.track_matches_filter(t))
+            .map(|(i, _)| i)
+            .nth(row)
+    }
+
+    /// Queue index of the row under the cursor.
+    pub fn queue_index_of_selected(&self) -> Option<usize> {
+        self.queue_index_of_row(self.selected)
+    }
+
+    /// The row `selected` would have if the filter were cleared.
+    fn unfiltered_index_of_selected(&self) -> usize {
+        if !self.is_filtering() {
+            return self.selected;
+        }
+        let nth = self.selected;
+        let found = match self.pane {
+            // Home is never filtered, so the row index already is the real one.
+            Pane::Home => Some(nth),
+            Pane::Playlists if self.open_playlist.is_none() => self
+                .playlists
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| self.matches_filter(&p.title))
+                .map(|(i, _)| i)
+                .nth(nth),
+            Pane::Albums => self
+                .albums
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| self.album_matches(a))
+                .map(|(i, _)| i)
+                .nth(nth),
+            Pane::Artists if self.open_artist.is_none() => self
+                .artists
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| self.matches_filter(&a.name))
+                .map(|(i, _)| i)
+                .nth(nth),
+            // Every track pane, including an open playlist or artist.
+            _ => {
+                let src = self.unfiltered_tracks();
+                src.iter()
+                    .enumerate()
+                    .filter(|(_, t)| self.track_matches_filter(t))
+                    .map(|(i, _)| i)
+                    .nth(nth)
+            }
+        };
+        // Nothing matched (a filter with no hits, cleared while empty): the top is
+        // the only index certain to be in range.
+        found.unwrap_or(0)
+    }
+
     pub fn filter_row_visible(&self) -> bool {
         self.focus == Focus::FilterInput || self.is_filtering()
+    }
+
+    /// Whether a query row is drawn above the list.
+    ///
+    /// The Artists pane borrows the same field for `S` (FR-B7), so it grows the
+    /// row too. One method rather than a condition repeated in the layout, the
+    /// click math, and the viewport count: when those disagreed, `S` in Artists
+    /// focused a field that was never drawn, so every key went into an invisible
+    /// query and the pane looked frozen.
+    pub fn search_row_visible(&self) -> bool {
+        match self.pane {
+            Pane::Search => true,
+            // Not once an artist is open: that is a track list, and the row
+            // would claim a search is still on screen to leave.
+            Pane::Artists => self.artist_search_active && self.open_artist.is_none(),
+            _ => false,
+        }
     }
 
     /// Does this text survive the filter? Case-insensitive substring.
@@ -966,6 +1082,14 @@ impl AppState {
     }
 
     pub fn set_pane(&mut self, p: Pane) {
+        // The Artists pane borrows the Search pane's query buffer for `S`, so
+        // leaving it has to put that buffer back. Without this, typing an artist
+        // name here and then opening Search showed the name already in the field,
+        // as if the user had searched for it there — and `artist_search_active`
+        // stayed set, so the next search fired at `search_artists`.
+        if self.pane == Pane::Artists && p != Pane::Artists {
+            self.close_artist_search();
+        }
         self.pane = p;
         self.selected = 0;
         // The filter narrows one pane's rows. Carrying it across would hide
@@ -1322,6 +1446,124 @@ mod tests {
         s.select_prev();
         s.select_prev();
         assert_eq!(s.selected, 0, "clamps at the start");
+    }
+
+    fn filtered_queue() -> AppState {
+        AppState {
+            pane: Pane::Queue,
+            focus: Focus::Main,
+            queue: vec![
+                Track::stub("q0", "We Don't Talk Anymore"),
+                Track::stub("q1", "blue"),
+                Track::stub("q2", "Something Else"),
+                Track::stub("q3", "I'm Good (Blue)"),
+            ],
+            filter: "blu".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_filtered_row_maps_to_its_real_queue_index() {
+        // The owner's bug: "blu" leaves rows 1 and 3 on screen, so visible row 0
+        // is queue 1 and visible row 1 is queue 3. Passing `selected` through
+        // played queue[0] and queue[1] instead.
+        let s = filtered_queue();
+        assert_eq!(s.queue_index_of_row(0), Some(1));
+        assert_eq!(s.queue_index_of_row(1), Some(3));
+    }
+
+    #[test]
+    fn an_unfiltered_row_is_its_own_queue_index() {
+        let s = AppState {
+            filter: String::new(),
+            ..filtered_queue()
+        };
+        assert_eq!(s.queue_index_of_row(2), Some(2));
+    }
+
+    #[test]
+    fn a_row_past_the_end_maps_to_nothing() {
+        // Better no command than one the actor would index past the queue with.
+        assert_eq!(filtered_queue().queue_index_of_row(2), None);
+        assert_eq!(
+            AppState {
+                filter: String::new(),
+                ..filtered_queue()
+            }
+            .queue_index_of_row(9),
+            None
+        );
+    }
+
+    #[test]
+    fn duplicate_tracks_map_by_position_not_by_id() {
+        // The queue can hold the same video twice. An id lookup would send both
+        // rows to the first copy.
+        let s = AppState {
+            queue: vec![
+                Track::stub("dup", "blue"),
+                Track::stub("x", "nope"),
+                Track::stub("dup", "blue"),
+            ],
+            ..filtered_queue()
+        };
+        assert_eq!(s.queue_index_of_row(0), Some(0));
+        assert_eq!(s.queue_index_of_row(1), Some(2));
+    }
+
+    #[test]
+    fn the_queue_mapping_is_only_for_the_queue() {
+        let s = AppState {
+            pane: Pane::Songs,
+            ..filtered_queue()
+        };
+        assert_eq!(s.queue_index_of_row(0), None);
+    }
+
+    #[test]
+    fn clearing_the_filter_keeps_the_cursor_on_the_same_track() {
+        // The other half of the report: Esc then Enter played the queue's first
+        // song, because clearing the filter reset the cursor to row 0.
+        let mut s = filtered_queue();
+        s.selected = 1; // "I'm Good (Blue)", which is queue 3
+        s.apply(AppEvent::Input(InputAction::Cancel));
+        assert!(!s.is_filtering(), "Esc still clears the filter");
+        assert_eq!(s.selected, 3, "the cursor follows the track it was on");
+        assert_eq!(
+            s.selected_track().map(|t| t.title),
+            Some("I'm Good (Blue)".to_owned())
+        );
+    }
+
+    #[test]
+    fn clearing_a_filter_that_matched_nothing_does_not_dangle() {
+        let mut s = AppState {
+            filter: "zzzz".into(),
+            ..filtered_queue()
+        };
+        s.apply(AppEvent::Input(InputAction::Cancel));
+        assert!(s.selected < s.queue.len());
+    }
+
+    #[test]
+    fn clearing_the_filter_keeps_the_cursor_in_a_list_pane_too() {
+        // Same fix, and the same reason: the row under the cursor is what the
+        // user was aiming at, whichever pane they are in.
+        let mut s = AppState {
+            pane: Pane::Playlists,
+            focus: Focus::Main,
+            playlists: vec![
+                Playlist::stub("p0", "Alpha"),
+                Playlist::stub("p1", "Focus mix"),
+                Playlist::stub("p2", "Beta"),
+            ],
+            filter: "focus".into(),
+            selected: 0,
+            ..Default::default()
+        };
+        s.apply(AppEvent::Input(InputAction::Cancel));
+        assert_eq!(s.selected, 1, "Focus mix is row 1 unfiltered");
     }
 
     #[test]
@@ -2478,6 +2720,70 @@ mod tests {
             s.selected_track().is_none(),
             "closing must clear the tracks, not leave them behind"
         );
+    }
+
+    #[test]
+    fn the_artists_pane_grows_a_query_row_when_its_search_opens() {
+        // The bug: `S` focused the field but nothing drew it, so every later key
+        // went into an invisible query and the pane looked frozen.
+        let mut s = AppState {
+            pane: Pane::Artists,
+            focus: Focus::Main,
+            ..Default::default()
+        };
+        assert!(!s.search_row_visible(), "no row before `S`");
+        s.apply(AppEvent::Input(InputAction::OpenSearch));
+        assert!(
+            s.search_row_visible(),
+            "`S` must put a field on screen, not just take focus"
+        );
+        assert_eq!(s.focus, Focus::SearchInput);
+    }
+
+    #[test]
+    fn an_open_artist_hides_the_query_row() {
+        // Their tracks are a list, not a search. Leaving the row up would claim
+        // there is still a field to type in.
+        let mut s = AppState {
+            pane: Pane::Artists,
+            focus: Focus::Main,
+            ..Default::default()
+        };
+        s.apply(AppEvent::Input(InputAction::OpenSearch));
+        s.apply(AppEvent::ArtistTracksLoaded {
+            id: ArtistId::from("UC1"),
+            name: "Someone".into(),
+            tracks: vec![Track::stub("v1", "A song")],
+        });
+        assert!(!s.search_row_visible());
+    }
+
+    #[test]
+    fn the_search_pane_always_has_its_query_row() {
+        // It is drawn unconditionally, empty query or not. The click math used to
+        // decide otherwise, so a click in an unused Search pane hit the row above.
+        let s = AppState {
+            pane: Pane::Search,
+            ..Default::default()
+        };
+        assert!(s.search_row_visible());
+    }
+
+    #[test]
+    fn leaving_the_artists_pane_clears_its_search() {
+        // The two panes share one query buffer. Without this, typing an artist
+        // name and then switching to Search showed that name already in the
+        // field, as if the user had searched for it there.
+        let mut s = AppState {
+            pane: Pane::Artists,
+            focus: Focus::Main,
+            ..Default::default()
+        };
+        s.apply(AppEvent::Input(InputAction::OpenSearch));
+        s.search_query = "sabrina".into();
+        s.set_pane(Pane::Search);
+        assert!(s.search_query.is_empty(), "the query must not follow");
+        assert!(!s.artist_search_active);
     }
 
     #[test]
