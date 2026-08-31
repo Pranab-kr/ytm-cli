@@ -63,6 +63,18 @@ leaves your machine. Use it knowing that, or don't use it.
 `yt-dlp` is called as a subprocess and needs to stay current — YouTube breaks
 stream extraction regularly. If playback stops working, update it first.
 
+**Not required:** `playerctl` is not a dependency. Media-key and now-playing
+support is built in over MPRIS (via `souvlaki`), so your desktop's own media keys
+and now-playing widget work with nothing extra installed. `playerctl` is just a
+convenient way to *test* it from a shell:
+
+```bash
+playerctl -p ytm_cli metadata     # optional, for checking MPRIS works
+```
+
+If there is no D-Bus session bus at all, the app runs exactly as before, without
+media keys. Nothing else changes.
+
 ## Install
 
 ```bash
@@ -137,16 +149,30 @@ add_to_queue = "a"
 
 ## Authentication
 
-Two paths. **Cookie auth is the one that works today** — see the note under
-OAuth below.
+Browser cookies. That is the only path — the OAuth device flow was removed
+because Google stopped honouring device-flow tokens on the endpoints this app
+uses, so it could never reach your library.
 
-### Cookie auth (recommended)
+### Use a private / incognito window
 
-1. Open <https://music.youtube.com> in a browser, signed in.
-2. DevTools → Network → click any request to `/youtubei/v1/...`.
-3. Copy the **entire value** of the `Cookie:` request header.
-4. Paste it into a file, e.g. `~/.config/ytm-cli/cookies.txt`.
-5. Set in `config.toml`:
+**Do this in a private window, and it matters.** A normal browser session keeps
+rotating its cookies, so an export from your everyday window can stop working
+within hours. A private window's session is frozen the moment you stop using it,
+so the export keeps working for far longer.
+
+1. Open a **private / incognito** window.
+2. Go to <https://music.youtube.com> and **sign in**.
+3. Open DevTools (F12) → **Network** tab.
+4. **Hold Shift and click the reload button.** Without this the request list is
+   often served from cache and shows no `Cookie:` header at all — this is the
+   step people get stuck on.
+5. Click any request to `/youtubei/v1/...`, find **Request Headers**, and copy
+   the **entire value** of the `Cookie:` header.
+6. Paste it into a file, e.g. `~/.config/ytm-cli/cookies.txt`.
+7. **Close the private window — do not sign out.** Signing out invalidates the
+   session you just exported. Closing it leaves the cookies valid.
+
+Then in `config.toml`:
 
 ```toml
 [auth]
@@ -154,46 +180,34 @@ kind = "cookie"
 cookie_file = "~/.config/ytm-cli/cookies.txt"
 ```
 
-The file must hold the raw header value and contain `SAPISID=`. It is **not**
-Netscape `cookies.txt` format — the contents are sent verbatim as the header.
+Check it worked without starting the TUI:
 
-Cookies expire every few weeks. When your library suddenly reads empty, re-export
-before assuming a bug.
-
-### OAuth device flow
-
-1. Open the [Google Cloud Console](https://console.cloud.google.com), create or
-   pick a project.
-2. Enable **YouTube Data API v3**.
-3. Credentials → Create OAuth client → application type
-   **TVs and Limited Input devices**.
-4. Under Data Access, add the `https://www.googleapis.com/auth/youtube` scope.
-5. Add your music account as a test user.
-6. Put the client id and secret in `config.toml`:
-
-```toml
-[auth]
-kind = "oauth"
-client_id = "….apps.googleusercontent.com"
-client_secret = "…"
+```bash
+ytm-cli playlists
 ```
 
-7. Run `ytm-cli login` and follow the code and URL.
+**Format matters.** The file holds the raw header value — one line, starting
+something like `VISITOR_INFO1_LIVE=...; SAPISID=...` — and must contain
+`SAPISID=`. It is **not** Netscape `cookies.txt` format; the contents are sent
+verbatim as the header. A Netscape export fails with an opaque
+`Error parsing header.`
 
-Tokens go to the OS keyring, never to disk or the log.
+The same file is used for playback: `yt-dlp` needs cookies too, or YouTube
+answers stream requests with *"Sign in to confirm you're not a bot"*. The app
+converts the header into the format yt-dlp wants automatically — you only export
+once.
 
-> **Known limitation:** Google currently rejects device-flow tokens on the
-> InnerTube endpoints this app uses, so login succeeds but the library reads
-> empty. The code path is correct and kept in place; use cookie auth until that
-> changes.
+### When your library suddenly reads empty
+
+The cookie expired. An expired cookie is **not** an auth error: YouTube answers
+HTTP 200 with a signed-out page, so your library parses as zero rows. Re-export
+before assuming a bug — the app also shows a hint when it sees this.
 
 ## Commands
 
 ```bash
 ytm-cli                  # the TUI
 ytm-cli config           # write config.toml with every default, then open it
-ytm-cli login            # OAuth device-code sign-in
-ytm-cli logout           # clear the keyring entry
 ytm-cli playlists        # print playlists and exit — the fastest auth check
 ytm-cli cache clear      # delete cached metadata
 YTM_LOG=debug ytm-cli    # verbose logging (to a file, not the screen)

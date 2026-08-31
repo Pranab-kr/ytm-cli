@@ -36,3 +36,12 @@ tracing-appender = "0.2.5"
 directories = "6.0.0"
 unicode-width = "0.2.2"
 chrono = { version = "0.4", features = ["serde"] }
+
+# Release binaries are for other people's machines, so size and speed matter
+# more than a fast rebuild here.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
