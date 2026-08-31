@@ -3,10 +3,11 @@
 **Read this first. Update it before you stop.** It is the handoff between agents.
 
 Last updated: 2026-08-31 by the implementation agent
-Current phase: **Phase 9 underway. Tasks 1-36 committed.**
-Next action: **Task 37** — README and setup docs. First, the owner should re-test
-**delete** and **add-to-playlist** (see "Live verification"), and check album art
-in kitty **outside tmux** (see "Album art under tmux").
+Current phase: **Phase 9 underway. Tasks 1-36 committed, plus owner-requested navigation.**
+Next action: **Task 37** — README and setup docs, then Task 38 (final verification).
+
+**Nothing is blocked and no owner decision is pending.** Every manual step that
+was outstanding is now done — see "Manual steps".
 
 **Every browse pane works against the live account, and the queue is editable.**
 10 real playlists with track counts, Enter opens one and renders its tracks, `/`
@@ -34,6 +35,17 @@ suite passed.** Both were caught by measuring and driving, not by inspection:
 
 **MPRIS is live-verified.** `playerctl -p ytm_cli` reports `Playing`, title, and
 artist; `play-pause` paused and resumed real audio; `next` was received.
+
+**Album art confirmed by the owner in kitty**, rendering beside the track list
+with the real cover for the playing track. **All playlist CRUD is confirmed too**
+— create, rename, delete, and add/remove entries all work against the live
+account, which closes the last of the three bugs from the earlier session.
+
+**Three owner-requested bindings landed after Task 36** (commit `772b53c`), with
+the design spec and plan amended in place rather than left to drift:
+`h`/`l` open and close a playlist like a folder, `1`-`6` jump to a sidebar
+source, and the art panel gained a 2-column gap so it no longer touches the
+duration column. 318 tests pass.
 
 **Both gates are GREEN.**
 
@@ -217,13 +229,13 @@ one should stop, note it here, and ask.
 | Task | What is needed | Status |
 |---|---|---|
 | 8.5 | Create a Google Cloud OAuth client ("TVs and Limited Input devices"), add the `.../auth/youtube` scope under Data Access, add the music account as a test user, put id/secret in `~/.config/ytm-cli/config.toml`, run `cargo run -p ytm-core --example login_spike` | ✅ done 2026-08-30 — login works |
-| 9.1 | Capture a real fixture: `… cargo run -p ytm-core --example dump_playlists -- --raw > /tmp/raw.json`, scrub account ids/emails/personal browseIds, replace `crates/ytm-core/tests/fixtures/library_playlists.json` (currently **SYNTHETIC**) | ⬜ |
+| 9.1 | (still open, low priority — the only remaining manual step) Capture a real fixture: `… cargo run -p ytm-core --example dump_playlists -- --raw > /tmp/raw.json`, scrub account ids/emails/personal browseIds, replace `crates/ytm-core/tests/fixtures/library_playlists.json` (currently **SYNTHETIC**) | ⬜ |
 | 9.7 | Gate 1: `cargo run -p ytm-core --example dump_playlists` prints real playlist titles | ✅ **done 2026-08-30** — 10 real titles via cookie auth |
 | 9.7b | Cookie auth: save the **raw `Cookie:` header value** from a logged-in `music.youtube.com` request into a file (NOT Netscape cookies.txt — `BrowserToken::from_str` uses the contents verbatim as the header and requires `SAPISID=` in it), then set `auth.kind = "cookie"` and `auth.cookie_file` in config.toml | ✅ done 2026-08-30 — **repeat whenever cookies expire**, see "Cookie expiry" |
 | 12.6 | Confirm audio is audible | ✅ done 2026-08-30 |
-| 30.5 / 31.5 / 32.5 | Verify playlist edits appear in the YouTube Music web UI | ⬜ |
+| 30.5 / 31.5 / 32.5 | Verify playlist edits appear in the YouTube Music web UI | ✅ done 2026-08-31 — owner confirmed create, rename, delete, and entry add/remove all work against the live account |
 | 33.6 | Cold-start budget (NFR-1) | ✅ done 2026-08-31 — 62ms to first frame on a warm cache, measured from the log |
-| 34.5 | Check album art in a graphics-capable terminal — **kitty outside tmux**; halfblocks already render inside tmux | ⬜ owner offered to test this |
+| 34.5 | Check album art in a graphics-capable terminal | ✅ done 2026-08-31 — owner confirmed art renders in **kitty**, real cover beside the track list. Inside tmux it is halfblocks by design (see "Album art under tmux") |
 | 35.5 | Check media keys and `playerctl metadata` | ✅ done 2026-08-31 — `playerctl` reports Playing + title + artist; play-pause and next both work |
 | 36.5 | Verify each subcommand | ✅ done 2026-08-31 — `--help`, `playlists` (11 real titles), `cache clear`; bad input exits 2 |
 
@@ -1211,3 +1223,49 @@ checks; neither needs the log.
 Next: **Task 37** (README and setup docs), then **Task 38** (the requirement
 checklist, which needs the owner pressing keys). Still outstanding for the owner:
 retest delete and add-to-playlist, and check art in kitty outside tmux.
+
+### 2026-08-31 — implementation agent (owner-requested navigation, art gap)
+
+**Owner drove the app in kitty and confirmed two things that were still open:**
+album art renders beside the track list with the real cover, and **all playlist
+CRUD works** — create, rename, delete, and entry add/remove. That closes every
+manual step except 9.1 (the synthetic fixture), and closes out the three live
+bugs from the earlier session. Manual steps 30.5/31.5/32.5 and 34.5 are now ✅.
+
+**Three changes requested from that session, commit `772b53c`.** The design spec
+and the plan were **amended in place** (marked with the date and "owner request")
+rather than left to disagree with the code — see FR-U1a/FR-U1b in the spec and the
+two `AMENDED 2026-08-31` blocks in Tasks 19 and 20.
+
+1. **`h`/`l` read as folder open/close** (FR-U1a). `l` descends into the selected
+   playlist, `h` leaves it. `close_open_playlist` clears `tracks` as well as the
+   id — leaving them would make `list_len` and `selected_track` disagree with
+   what is on screen, which is the same class of bug as the old `list_len`
+   mismatch in Task 19. With no level to leave, both fall back to their previous
+   focus-moving behaviour, so `h` in Songs does not swallow the key. **`l`
+   deliberately does not play a track**: Enter is the key that plays, and a
+   navigation key starting audio would be a nasty surprise.
+2. **`1`-`6` jump to the nth sidebar source** (FR-U1b). `GoTo(u8)` had been in
+   `InputAction` since the original plan and was **never bound** — this is that
+   binding. Matched in `resolve` ahead of the char table so a digit cannot be
+   rebound away by accident. Three deliberate choices, each with a test: out of
+   range is **ignored, not clamped** (clamping would make `9` mean "Queue");
+   digits inside the search field stay characters, so `90's` is typable; and
+   jumping to Search focuses the input, or letters would scroll instead of type.
+   A **sidebar test pins `PANE_ORDER` to the order the widget renders** — if they
+   drift, pressing `3` would highlight one row and open another.
+3. **The art panel gained a 2-column gap.** Flush against the duration column the
+   artwork and the times read as one block. `ART_GAP` counts toward the
+   fits-at-all check, so a frame with room for the panel but not the gap gets no
+   panel rather than stealing a column from the list.
+
+**The help overlay needed explicit rows for `1-6` and `tab`.** Neither is a single
+remappable char, so `KeyMap::bindings` cannot report them and they would have been
+invisible — FR-U2 says the overlay lists what the user can actually press. The
+`Left`/`Right` labels also changed to "back / sidebar" and "open / list".
+
+318 tests pass, gate green.
+
+Next: **Task 37** (README and setup docs), then **Task 38** (the requirement
+checklist — that one needs the owner pressing keys and filling in the FR/NFR
+table). Nothing is blocked.
