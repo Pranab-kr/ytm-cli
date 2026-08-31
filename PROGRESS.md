@@ -3,9 +3,10 @@
 **Read this first. Update it before you stop.** It is the handoff between agents.
 
 Last updated: 2026-08-31 by the implementation agent
-Current phase: **Phase 9 underway. Tasks 1-33 committed.**
-Next action: **Task 34** — album art. First, the owner should re-test **delete**
-and **add-to-playlist** (see "Live verification").
+Current phase: **Phase 9 underway. Tasks 1-36 committed.**
+Next action: **Task 37** — README and setup docs. First, the owner should re-test
+**delete** and **add-to-playlist** (see "Live verification"), and check album art
+in kitty **outside tmux** (see "Album art under tmux").
 
 **Every browse pane works against the live account, and the queue is editable.**
 10 real playlists with track counts, Enter opens one and renders its tracks, `/`
@@ -21,10 +22,18 @@ delete are wired with optimistic updates and per-edit rollback. 230 tests pass.
    `MockSource` test had passed. Create and rename are confirmed working against
    the account. Delete and add-to-playlist are fixed but not yet retested.
 
-**Task 33 landed the cache, and measuring it found a real NFR-1 violation.**
-Cold start to first frame was **2480 ms** against a 300 ms budget, because
-`build_source` awaits a cookie-validation round trip *before* the terminal opens.
-Reordered so the cached frame paints first: **62 ms**. 266 tests pass.
+**Tasks 33-36 are done, and running the real app found two bugs that the whole
+suite passed.** Both were caught by measuring and driving, not by inspection:
+1. **NFR-1 was violated by 8x.** Cold start to first frame was **2480 ms**
+   against a 300 ms budget, because `build_source` awaits a cookie-validation
+   round trip *before* the terminal opens. Reordered: **62 ms**.
+2. **Album art broke playback entirely** — my own Task 34 regression. Probing
+   stdio under tmux leaves crossterm's `EventStream` delivering no key presses,
+   so Enter did nothing and no track could ever play. Fixed; see "Album art
+   under tmux". 297 tests pass.
+
+**MPRIS is live-verified.** `playerctl -p ytm_cli` reports `Playing`, title, and
+artist; `play-pause` paused and resumed real audio; `next` was received.
 
 **Both gates are GREEN.**
 
@@ -99,7 +108,7 @@ guessing, and re-verify against the vendored source if a call does not compile.
 | 6 — Browse | 22–25 | ✅ done | Event loop, lists, search with debounce |
 | 7 — Queue UI | 26–27 | ✅ done | Queue view, toasts, spinner, help overlay |
 | 8 — CRUD | 28–32 | 🟡 create+rename live-verified | Playlist create/rename/delete, add/remove tracks. FR-C5 now works (option A). Delete + add need a retest |
-| 9 — Polish | 33–38 | 🟡 Task 33 done | Cache ✅, album art, MPRIS, CLI, README |
+| 9 — Polish | 33–38 | 🟡 Tasks 33-36 done | Cache ✅, album art ✅, MPRIS ✅, CLI ✅, README next |
 
 ⚠️ = risk phase. See below.
 
@@ -214,8 +223,9 @@ one should stop, note it here, and ask.
 | 12.6 | Confirm audio is audible | ✅ done 2026-08-30 |
 | 30.5 / 31.5 / 32.5 | Verify playlist edits appear in the YouTube Music web UI | ⬜ |
 | 33.6 | Cold-start budget (NFR-1) | ✅ done 2026-08-31 — 62ms to first frame on a warm cache, measured from the log |
-| 34.5 | Check album art in a graphics-capable terminal | ⬜ |
-| 35.5 | Check media keys and `playerctl metadata` | ⬜ |
+| 34.5 | Check album art in a graphics-capable terminal — **kitty outside tmux**; halfblocks already render inside tmux | ⬜ owner offered to test this |
+| 35.5 | Check media keys and `playerctl metadata` | ✅ done 2026-08-31 — `playerctl` reports Playing + title + artist; play-pause and next both work |
+| 36.5 | Verify each subcommand | ✅ done 2026-08-31 — `--help`, `playlists` (11 real titles), `cache clear`; bad input exits 2 |
 
 ---
 
@@ -258,6 +268,45 @@ the window or signing out elsewhere can invalidate the copied cookies.
 in the UI rather than looking like an empty library. There is no auth error to
 catch, so the signal has to be "library call succeeded but returned zero rows"
 -> hint the user to re-export. FR-A6 territory; decide when Task 22 lands.
+
+---
+
+## Album art under tmux — and why it once broke playback
+
+Art works inside tmux, as **halfblocks**. It does not use the kitty protocol
+there, and trying to was actively harmful.
+
+**`Picker::from_query_stdio` is destructive under tmux.** It writes a query
+escape sequence and reads the reply. With `allow-passthrough` off, tmux prints
+the sequence as visible text instead of forwarding it, no reply ever arrives,
+and — the part that cost the time — **crossterm's `EventStream` stops delivering
+key presses afterwards**. The app then looked completely broken in a way that
+pointed nowhere near album art: Enter did nothing, no `yt-dlp` process ever
+spawned, and MPRIS sat at `Stopped`.
+
+Diagnosed by A/B against the same script, not by reading code:
+
+| `ui.album_art` | Result |
+|---|---|
+| `false` | status `Playing`, PulseAudio sink live, title `FREAKED OUT` |
+| `true` | status `Stopped`, no sink, no yt-dlp, ever |
+
+The `Ptmux;_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\` was sitting in the captured screen
+output the whole time, next to "Nothing playing".
+
+`ArtCache::detect` now checks `TMUX`/`TERM` first and uses `Picker::halfblocks()`
+there, which needs no probe and no protocol support. **Do not "restore" the
+stdio probe under tmux to get kitty graphics** — it trades all playback for a
+nicer image.
+
+Two things for the owner's kitty-outside-tmux test (manual step 34.5):
+- Outside tmux the probe runs, so kitty/sixel should be detected and the image
+  should be sharper than halfblocks.
+- The log line `album art enabled protocol=…` names what was detected. Inside
+  tmux it instead reads `tmux detected, using halfblocks without probing stdio`.
+
+Also note `from_fontsize` is deprecated in ratatui-image 11.0.6 in favour of
+`halfblocks()`; the latter is what we call, and it sets `is_tmux` itself.
 
 ---
 
@@ -1094,3 +1143,71 @@ only. Nothing is wrong; a cold Songs pane on the second launch is expected.
 Next: **Task 34** — album art. Note the tmux/`TERM=tmux-256color` caveat recorded
 under "Environment": kitty graphics may be blocked, and the documented response is
 to record it as a known limitation rather than fight it.
+
+### 2026-08-31 — implementation agent (Tasks 34-36, and a self-inflicted regression)
+
+**Tasks 34, 35, and 36 done.** Album art, MPRIS, and the CLI subcommands. Four
+commits, gate green on each, 297 tests pass.
+
+**The headline is Task 34's regression, because it is the second session running
+where "code complete and green" hid a total failure of the app.** Album art broke
+playback outright: probing stdio under tmux leaves crossterm delivering no key
+presses, so Enter reached nothing and no track could ever play. The full suite
+passed throughout — `ArtCache` is unit-tested, and no unit test presses a key in
+a real pty. Written up under "Album art under tmux", including the A/B table that
+found it. What generalises: **a change that touches terminal I/O cannot be
+validated by `TestBackend`**, and the visible `Ptmux;…` escape in the captured
+screen was the clue that pointed at it.
+
+**Task 34 — two corrections to the plan, both read from the vendored source.**
+- The plan says call `Picker::from_query_stdio` *before* entering the alternate
+  screen. Its own doc comment in 11.0.6 says **after**, and that is right — it
+  also must be before the event stream exists, or the reply is read as a key press.
+- It blocks up to **2000 ms** on a terminal that never answers
+  (`STDIN_READ_TIMEOUT_MILLIS`), so it runs after the first draw or it spends the
+  entire NFR-1 budget. `main`'s order is now: cache -> preload -> terminal ->
+  draw -> probe -> source -> loop.
+- `split_for_art` is pure math and unit-tested: no panel unless art is
+  displayable, something is playing, *and* the list keeps 48 columns. One of my
+  own tests contradicted itself (asserted a 60-column area gets a panel when the
+  threshold is 72); the threshold was right and the test was wrong.
+- `image` 0.25.10 is now a direct dep — `new_resize_protocol` takes
+  `image::DynamicImage` and ratatui-image re-exports only `FilterType`.
+
+**Task 35 — MPRIS, live-verified with `playerctl`** (the owner installed it
+mid-session). `playerctl -p ytm_cli` reported `Playing` with title `FREAKED OUT`
+and artist `Fat Papi, prodshushy`; `play-pause` paused and resumed real audio;
+`next` arrived as `media key cmd=Next`. Notes:
+- Metadata rides `TrackChanged`, status rides `StateChanged`, neither rides the
+  tick — 4Hz `Progress` would be constant D-Bus traffic for a position the
+  desktop widget interpolates itself.
+- `SetVolume` is clamped before the `u8` cast. souvlaki documents the value as
+  "intended 0.0-1.0, but other values are also accepted", so a negative wraps.
+- `PlaybackState::Loading` maps to MPRIS `Playing`, not `Stopped`, or a widget
+  flickers on every track change. There is no third MPRIS state.
+- `Seek`/`SeekBy`/`SetPosition`/`OpenUri`/`Raise`/`Quit` stay unmapped on purpose.
+- `playerctl` showing `Stopped` right after `next` is **correct**, not a bug:
+  `PlayNow` leaves a single item in the queue, so Next runs it out.
+- Neither `mpd` nor `mpc` nor `ueberzugpp` is needed — we drive mpv directly, and
+  ratatui-image speaks the graphics protocols itself. Only `playerctl` was.
+
+**Task 36 — subcommands, each one actually run.** `--help` lists all five;
+`playlists` printed 11 real titles with counts; `cache clear` reported success;
+`cache` with no action and an unknown subcommand both exit **2**. The TUI body
+moved into `run_tui` so a subcommand returns before any terminal setup.
+`playlists` treats an empty library as an **error**, not as silence — the same
+expired-cookie trap the TUI hint covers. `logout` uses `TokenStore::clear`
+(documented idempotent) and deliberately leaves a cookie file alone.
+`ytmapi-rs` is now a direct dep of `ytm-cli`: `begin_device_login` takes
+`ytmapi_rs::Client`, not reqwest's.
+
+**Harness notes for whoever drives the app next.** Playback needs generous
+timing: ~10s before the first Enter, ~12s before the second, and the track does
+not reach `Playing` until roughly **45s** in (cookie auth, playlist fetch, then a
+yt-dlp resolve). My first four attempts were simply too impatient and looked like
+a bug. `pactl list sink-inputs` and `playerctl status` are the two cheap external
+checks; neither needs the log.
+
+Next: **Task 37** (README and setup docs), then **Task 38** (the requirement
+checklist, which needs the owner pressing keys). Still outstanding for the owner:
+retest delete and add-to-playlist, and check art in kitty outside tmux.
