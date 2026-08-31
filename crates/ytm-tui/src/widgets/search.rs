@@ -92,6 +92,48 @@ pub fn draw_no_matches(f: &mut Frame, area: Rect, t: &Theme) {
     );
 }
 
+/// The filter row, shown whenever a filter is being typed or is narrowing rows.
+///
+/// It has to be on screen: without it the user types and sees only rows
+/// disappearing, with no way to tell what the filter holds, that a keystroke
+/// went into it rather than to the list, or how to get back. That was reported
+/// as "the filter text not show".
+pub fn draw_filter(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    const FILTER_PROMPT: &str = "Filter: ";
+    let focused = s.focus == Focus::FilterInput;
+    let w = area.width as usize;
+    let budget = w.saturating_sub(FILTER_PROMPT.len() + 1);
+
+    let mut spans = vec![Span::styled(
+        FILTER_PROMPT,
+        Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+    )];
+    spans.push(Span::styled(
+        tail_to_width(&s.filter, budget),
+        Style::default().fg(t.fg_bright),
+    ));
+    if focused {
+        spans.push(Span::styled(CURSOR, Style::default().fg(t.accent)));
+    }
+    // The way out, spelled out: Esc keeps the filter and leaves the field, and a
+    // second Esc clears it. Discoverable beats memorable.
+    let hint = if focused {
+        "  enter/esc: leave field"
+    } else {
+        "  esc: clear filter"
+    };
+    let used = display_width(FILTER_PROMPT)
+        + display_width(&tail_to_width(&s.filter, budget))
+        + usize::from(focused);
+    if used + display_width(hint) <= w {
+        spans.push(Span::styled(hint, Style::default().fg(t.fg_dim)));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{

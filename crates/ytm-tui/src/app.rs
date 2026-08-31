@@ -351,16 +351,16 @@ impl AppState {
                     self.selected = 0;
                     return;
                 }
-                // Esc abandons the filter and restores the full list.
-                InputAction::Cancel => {
-                    self.filter.clear();
-                    self.focus = Focus::Main;
-                    self.selected = 0;
-                    self.scroll_offset = 0;
-                    return;
-                }
-                // Enter keeps the filter and moves to the rows it left.
-                InputAction::Confirm => {
+                // Esc and Enter both just leave the field, keeping the filter.
+                //
+                // Esc used to clear it, which is what made `a` unusable: the user
+                // pressed Esc expecting to be back in the list, the field kept
+                // focus in their mind but the filter was gone, and the next
+                // letter went somewhere they did not expect. Leaving the field
+                // with the filter intact means the rows under the cursor are the
+                // ones they filtered for, and `a` acts on them. A second Esc,
+                // handled below in navigation focus, clears the filter.
+                InputAction::Cancel | InputAction::Confirm => {
                     self.focus = Focus::Main;
                     self.selected = 0;
                     return;
@@ -496,6 +496,21 @@ impl AppState {
             }
             // `zz`, from vim: centre the selected row.
             InputAction::CenterOnCursor => self.center_on_cursor(),
+            // Tab / Shift+Tab cycle sources. These resolved in the keymap from
+            // the very first version but no reducer ever handled them, so both
+            // keys silently did nothing — the owner reported Tab as useless.
+            InputAction::NextPane | InputAction::PrevPane => {
+                let n = PANE_ORDER.len();
+                let cur = PANE_ORDER.iter().position(|p| *p == self.pane).unwrap_or(0);
+                let next = if a == InputAction::NextPane {
+                    (cur + 1) % n
+                } else {
+                    (cur + n - 1) % n
+                };
+                // Reuse the number-key path so Tab and `1`-`7` cannot disagree
+                // about where a source lands you.
+                self.goto_source(next as u8 + 1);
+            }
             InputAction::ToggleVisual => self.toggle_visual(),
             InputAction::OpenHelp => self.modal = Some(Modal::Help),
             InputAction::OpenSearch => {
@@ -522,6 +537,14 @@ impl AppState {
                 }
             }
             InputAction::OpenQueue => self.set_pane(Pane::Queue),
+            // Esc with a filter up clears it and restores the full list. Checked
+            // before visual mode so the more visible state wins: a filtered list
+            // is on screen and labelled, so Esc reads as "get rid of that".
+            InputAction::Cancel if self.is_filtering() => {
+                self.filter.clear();
+                self.selected = 0;
+                self.scroll_offset = 0;
+            }
             // Esc means "undo this selection" while a range is being made.
             // Guarded so it only claims the key during visual mode; outside it,
             // Esc keeps whatever meaning it had.
@@ -620,6 +643,15 @@ impl AppState {
     /// True when a filter is narrowing the rows on screen.
     pub fn is_filtering(&self) -> bool {
         !self.filter.is_empty()
+    }
+
+    /// Whether the filter row is on screen.
+    ///
+    /// Shown while typing *and* while a filter is still narrowing rows after the
+    /// field lost focus — otherwise a filtered list looks like a short list, with
+    /// nothing to say why rows are missing or how to get them back.
+    pub fn filter_row_visible(&self) -> bool {
+        self.focus == Focus::FilterInput || self.is_filtering()
     }
 
     /// Does this text survive the filter? Case-insensitive substring.
@@ -2156,7 +2188,11 @@ mod tests {
     }
 
     #[test]
-    fn escaping_the_filter_restores_the_full_list() {
+    fn escaping_the_filter_field_keeps_the_filter_and_a_second_esc_clears_it() {
+        // Esc used to clear the filter the moment it left the field, which is
+        // what made `a` unusable: the user pressed Esc to get back to the rows
+        // they had filtered for, the rows changed under them, and the next letter
+        // went somewhere unexpected. One Esc leaves the field; a second clears.
         let mut s = AppState {
             pane: Pane::Songs,
             focus: Focus::Main,
@@ -2166,10 +2202,77 @@ mod tests {
         s.apply_input(InputAction::OpenFilter);
         s.apply_input(InputAction::Char('k'));
         assert_eq!(s.list_len(), 1);
+
         s.apply_input(InputAction::Cancel);
-        assert_eq!(s.list_len(), 2, "Esc abandons the filter");
-        assert_eq!(s.focus, Focus::Main);
-        assert!(!s.is_filtering());
+        assert_eq!(s.focus, Focus::Main, "the field is left");
+        assert!(s.is_filtering(), "but the filter survives");
+        assert_eq!(s.list_len(), 1);
+        // The row under the cursor is one the user filtered for, so `a` acts on
+        // it — that is the whole point of not clearing here.
+        assert_eq!(s.selected_track().map(|t| t.title), Some("Keep".to_owned()));
+
+        s.apply_input(InputAction::Cancel);
+        assert!(!s.is_filtering(), "a second Esc clears it");
+        assert_eq!(s.list_len(), 2);
+    }
+
+    #[test]
+    fn the_filter_row_is_visible_while_a_filter_is_narrowing_rows() {
+        // Otherwise a filtered list just looks like a short list, with nothing
+        // to say why rows are missing. The owner reported this as "the filter
+        // text not show".
+        let mut s = AppState {
+            pane: Pane::Songs,
+            focus: Focus::Main,
+            tracks: vec![Track::stub("v1", "Keep"), Track::stub("v2", "Drop")],
+            ..Default::default()
+        };
+        assert!(!s.filter_row_visible(), "nothing to show yet");
+        s.apply_input(InputAction::OpenFilter);
+        assert!(s.filter_row_visible(), "visible while typing");
+        s.apply_input(InputAction::Char('k'));
+        s.apply_input(InputAction::Cancel);
+        assert!(
+            s.filter_row_visible(),
+            "still visible once the field is left, because rows are still hidden"
+        );
+        s.apply_input(InputAction::Cancel);
+        assert!(!s.filter_row_visible(), "gone once the filter is cleared");
+    }
+
+    #[test]
+    fn tab_and_shift_tab_cycle_through_the_sources() {
+        // Both resolved in the keymap from the first version but no reducer
+        // handled either, so the keys did nothing at all.
+        let mut s = AppState::default();
+        assert_eq!(s.pane, Pane::Home);
+        s.apply_input(InputAction::NextPane);
+        assert_eq!(s.pane, Pane::Playlists);
+        s.apply_input(InputAction::NextPane);
+        assert_eq!(s.pane, Pane::Songs);
+        s.apply_input(InputAction::PrevPane);
+        assert_eq!(s.pane, Pane::Playlists);
+    }
+
+    #[test]
+    fn tab_wraps_at_both_ends_rather_than_stopping() {
+        let mut s = AppState::default();
+        // Backwards from the first source reaches the last.
+        s.apply_input(InputAction::PrevPane);
+        assert_eq!(s.pane, Pane::Queue);
+        // And forwards from the last comes back to the first.
+        s.apply_input(InputAction::NextPane);
+        assert_eq!(s.pane, Pane::Home);
+    }
+
+    #[test]
+    fn tab_moves_the_sidebar_highlight_with_the_pane() {
+        // Tab reuses `goto_source`, so the highlight cannot drift from the pane
+        // the way it would with a second, separate code path.
+        let mut s = AppState::default();
+        s.apply_input(InputAction::NextPane);
+        assert_eq!(s.pane, Pane::Playlists);
+        assert_eq!(s.sidebar_selected, 1);
     }
 
     #[test]

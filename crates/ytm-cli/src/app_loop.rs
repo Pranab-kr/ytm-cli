@@ -774,6 +774,7 @@ fn handle_click(
         row,
         state.pane,
         typing || !state.search_query.is_empty(),
+        state.filter_row_visible(),
     ) {
         ClickTarget::Source(i) => {
             // The sidebar draws PANE_ORDER from its first row, so the index maps
@@ -1082,6 +1083,7 @@ pub async fn run(
             terminal.size()?.into(),
             state.pane,
             !state.search_query.is_empty() || state.focus == ytm_tui::app::Focus::SearchInput,
+            state.filter_row_visible(),
         );
         terminal.draw(|f| ytm_tui::render::render(f, &state, &theme, &keymap, &mut art))?;
 

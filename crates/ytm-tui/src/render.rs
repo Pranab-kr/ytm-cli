@@ -59,6 +59,7 @@ pub fn click_target(
     row: u16,
     pane: Pane,
     has_search_input: bool,
+    filter_row: bool,
 ) -> ClickTarget {
     // The now-playing bar is not clickable; neither is anything below the frame.
     let body_height = area.height.saturating_sub(NOWPLAYING_HEIGHT);
@@ -72,7 +73,7 @@ pub fn click_target(
     if col == SIDEBAR_WIDTH {
         return ClickTarget::Nothing;
     }
-    let top = list_top_for(pane, has_search_input);
+    let top = list_top_for(pane, has_search_input, filter_row);
     match row.checked_sub(top) {
         Some(offset) => ClickTarget::Row(offset as usize),
         // The heading row.
@@ -85,16 +86,18 @@ pub fn click_target(
 /// The click handler needs it to turn a mouse position into a row index, and it
 /// has to be derived from the same constants the layout uses or a click lands on
 /// a different row than the one under the pointer.
-pub fn list_top_for(pane: Pane, has_search_input: bool) -> u16 {
-    // Row 0 is the pane heading; the search pane spends row 1 on its query line.
+pub fn list_top_for(pane: Pane, has_search_input: bool, filter_row: bool) -> u16 {
+    // Row 0 is the pane heading; the search pane spends row 1 on its query line;
+    // a visible filter row takes one more. Miss any of these and a click lands
+    // on a different row than the pointer.
+    let mut top = 1;
     if pane == Pane::Search && has_search_input {
-        2
-    } else {
-        1
+        top += 1;
     }
+    top + u16::from(filter_row)
 }
 
-pub fn list_rows_for(area: Rect, pane: Pane, has_search_input: bool) -> usize {
+pub fn list_rows_for(area: Rect, pane: Pane, has_search_input: bool, filter_row: bool) -> usize {
     // Now-playing bar, then the pane heading inside the main area.
     let body = area.height.saturating_sub(NOWPLAYING_HEIGHT);
     let rows = body.saturating_sub(1);
@@ -104,7 +107,7 @@ pub fn list_rows_for(area: Rect, pane: Pane, has_search_input: bool) -> usize {
     } else {
         rows
     };
-    rows as usize
+    rows.saturating_sub(u16::from(filter_row)) as usize
 }
 
 /// Split the main area into list and art panel, or leave it whole.
@@ -197,10 +200,19 @@ fn draw_main(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     }
     let w = area.width as usize;
 
+    // A filter row above the list whenever one is being typed or is narrowing
+    // rows. It must be visible: without it the user types and sees only rows
+    // vanishing, with nothing to say what the filter holds or how to leave it.
+    let show_filter = s.filter_row_visible();
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(u16::from(show_filter)),
+            Constraint::Min(0),
+        ])
         .split(area);
+    let (filter_row, list_row) = (rows[1], rows[2]);
 
     let (heading, badge) = heading_parts(s, w);
     let mut spans = vec![Span::styled(
@@ -219,18 +231,22 @@ fn draw_main(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     // Top-right of the heading row: tied to the pane whose data is loading.
     toast::draw_spinner(f, rows[0], s, t);
 
+    if show_filter {
+        search::draw_filter(f, filter_row, s, t);
+    }
+
     match s.pane {
-        Pane::Home => playlists::draw_home(f, rows[1], s, t),
+        Pane::Home => playlists::draw_home(f, list_row, s, t),
         // An open playlist shows its tracks; the list of playlists otherwise.
-        Pane::Playlists if s.open_playlist.is_some() => tracklist::draw(f, rows[1], s, t),
-        Pane::Playlists => playlists::draw_playlists(f, rows[1], s, t),
-        Pane::Songs => tracklist::draw(f, rows[1], s, t),
-        Pane::Queue => queue::draw(f, rows[1], s, t),
-        Pane::Search => draw_search(f, rows[1], s, t),
-        Pane::Albums => playlists::draw_albums(f, rows[1], s, t),
+        Pane::Playlists if s.open_playlist.is_some() => tracklist::draw(f, list_row, s, t),
+        Pane::Playlists => playlists::draw_playlists(f, list_row, s, t),
+        Pane::Songs => tracklist::draw(f, list_row, s, t),
+        Pane::Queue => queue::draw(f, list_row, s, t),
+        Pane::Search => draw_search(f, list_row, s, t),
+        Pane::Albums => playlists::draw_albums(f, list_row, s, t),
         // An open artist shows their tracks, like an open playlist does.
-        Pane::Artists if s.open_artist.is_some() => tracklist::draw(f, rows[1], s, t),
-        Pane::Artists => playlists::draw_artists(f, rows[1], s, t),
+        Pane::Artists if s.open_artist.is_some() => tracklist::draw(f, list_row, s, t),
+        Pane::Artists => playlists::draw_artists(f, list_row, s, t),
     }
 }
 
@@ -479,9 +495,9 @@ mod tests {
         // bar or the heading, a half-page jump would overshoot the screen.
         let area = Rect::new(0, 0, 80, 24);
         // 24 - 3 (now playing) - 1 (heading) = 20
-        assert_eq!(list_rows_for(area, Pane::Songs, false), 20);
+        assert_eq!(list_rows_for(area, Pane::Songs, false, false), 20);
         // The search pane also spends a row on the query line.
-        assert_eq!(list_rows_for(area, Pane::Search, true), 19);
+        assert_eq!(list_rows_for(area, Pane::Search, true, false), 19);
     }
 
     #[test]
@@ -489,27 +505,30 @@ mod tests {
         // These are u16 subtractions; without saturation a short terminal would
         // wrap to 65535 and every page key would jump to the end of the list.
         let area = Rect::new(0, 0, 80, 2);
-        assert_eq!(list_rows_for(area, Pane::Songs, false), 0);
-        assert_eq!(list_rows_for(Rect::new(0, 0, 80, 0), Pane::Songs, false), 0);
+        assert_eq!(list_rows_for(area, Pane::Songs, false, false), 0);
+        assert_eq!(
+            list_rows_for(Rect::new(0, 0, 80, 0), Pane::Songs, false, false),
+            0
+        );
     }
 
     #[test]
     fn the_list_starts_below_the_heading() {
         // A click handler that assumed row 0 would select one row too high in
         // every pane, and two too high in Search.
-        assert_eq!(list_top_for(Pane::Songs, false), 1);
-        assert_eq!(list_top_for(Pane::Search, true), 2);
+        assert_eq!(list_top_for(Pane::Songs, false, false), 1);
+        assert_eq!(list_top_for(Pane::Search, true, false), 2);
     }
 
     #[test]
     fn a_click_in_the_sidebar_names_its_source() {
         let area = Rect::new(0, 0, 80, 24);
         assert_eq!(
-            click_target(area, 3, 0, Pane::Songs, false),
+            click_target(area, 3, 0, Pane::Songs, false, false),
             ClickTarget::Source(0)
         );
         assert_eq!(
-            click_target(area, 3, 4, Pane::Songs, false),
+            click_target(area, 3, 4, Pane::Songs, false, false),
             ClickTarget::Source(4)
         );
     }
@@ -520,16 +539,16 @@ mod tests {
         // row 1. Off by one here selects the wrong track on every click.
         let area = Rect::new(0, 0, 80, 24);
         assert_eq!(
-            click_target(area, 40, 1, Pane::Songs, false),
+            click_target(area, 40, 1, Pane::Songs, false, false),
             ClickTarget::Row(0)
         );
         assert_eq!(
-            click_target(area, 40, 5, Pane::Songs, false),
+            click_target(area, 40, 5, Pane::Songs, false, false),
             ClickTarget::Row(4)
         );
         // Search spends another row on the query line.
         assert_eq!(
-            click_target(area, 40, 2, Pane::Search, true),
+            click_target(area, 40, 2, Pane::Search, true, false),
             ClickTarget::Row(0)
         );
     }
@@ -539,21 +558,21 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         // The pane heading.
         assert_eq!(
-            click_target(area, 40, 0, Pane::Songs, false),
+            click_target(area, 40, 0, Pane::Songs, false, false),
             ClickTarget::Nothing
         );
         // The rule between sidebar and list.
         assert_eq!(
-            click_target(area, SIDEBAR_WIDTH, 3, Pane::Songs, false),
+            click_target(area, SIDEBAR_WIDTH, 3, Pane::Songs, false, false),
             ClickTarget::Nothing
         );
         // The now-playing bar, and anything past the frame.
         assert_eq!(
-            click_target(area, 40, 21, Pane::Songs, false),
+            click_target(area, 40, 21, Pane::Songs, false, false),
             ClickTarget::Nothing
         );
         assert_eq!(
-            click_target(area, 40, 200, Pane::Songs, false),
+            click_target(area, 40, 200, Pane::Songs, false, false),
             ClickTarget::Nothing
         );
     }
