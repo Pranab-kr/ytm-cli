@@ -10,8 +10,12 @@ use ytmapi_rs::parse::{
 };
 
 /// Playlist ids YouTube Music owns and refuses to let us edit.
+/// Accepts either id form. A library listing reports Liked Music as `VLLM`, so
+/// matching the bare form alone left every system playlist unflagged: no
+/// read-only marker, and the rename/delete guards never fired.
 pub fn is_system_playlist(id: &str) -> bool {
-    matches!(id, "LM" | "SE") || id.starts_with("RDAMPL")
+    let bare = id.strip_prefix("VL").unwrap_or(id);
+    matches!(bare, "LM" | "SE") || bare.starts_with("RDAMPL")
 }
 
 /// ytmapi-rs 0.3.3 reports durations as display strings ("2:29", "1:02:05").
@@ -315,6 +319,18 @@ mod tests {
         assert!(is_system_playlist("LM"));
         assert!(is_system_playlist("SE"));
         assert!(!is_system_playlist("PLxxxx"));
+    }
+
+    #[test]
+    fn a_system_playlist_is_recognised_in_its_browse_form_too() {
+        // The library reports Liked Music as "VLLM", not "LM", so matching the
+        // bare form only left it unflagged: the read-only marker never showed and
+        // the rename/delete guards never fired.
+        assert!(is_system_playlist("VLLM"));
+        assert!(is_system_playlist("VLSE"));
+        assert!(is_system_playlist("VLRDAMPL123"));
+        // And a real playlist stays editable in either form.
+        assert!(!is_system_playlist("VLPLxxxx"));
     }
 
     #[test]

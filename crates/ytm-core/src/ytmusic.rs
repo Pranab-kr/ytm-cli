@@ -111,8 +111,10 @@ macro_rules! impl_music_source {
                     // `ProcessedResult`'s fields are public and `parse_into`
                     // runs on JSON we already hold, so this costs no extra
                     // round trip. Verified against the crate source.
+                    // Browse endpoint: VL-prefixed form (see PlaylistId's docs).
+                    let browse_id = id.browse_form();
                     let query = ytmapi_rs::query::GetPlaylistTracksQuery::new(
-                        ytmapi_rs::common::PlaylistID::from_raw(id.as_str()),
+                        ytmapi_rs::common::PlaylistID::from_raw(&browse_id),
                     );
                     // Turbofished: `impl Borrow<Q>` cannot infer Q from a reference.
                     let json = self
@@ -147,9 +149,11 @@ macro_rules! impl_music_source {
 
             fn playlist_details(&self, id: PlaylistId) -> BoxFut<'_, Playlist> {
                 Box::pin(async move {
+                    // Browse endpoint: VL-prefixed form.
+                    let browse_id = id.browse_form();
                     let raw = self
                         .api
-                        .get_playlist_details(ytmapi_rs::common::PlaylistID::from_raw(id.as_str()))
+                        .get_playlist_details(ytmapi_rs::common::PlaylistID::from_raw(&browse_id))
                         .await
                         .map_err(classify)?;
                     Ok(mapping::playlist_from_details(&raw))
@@ -240,7 +244,10 @@ macro_rules! impl_music_source {
                     if mapping::is_system_playlist(id.as_str()) {
                         return Err(SourceError::NotEditable(id.to_string()));
                     }
-                    let pid = ytmapi_rs::common::PlaylistID::from_raw(id.as_str());
+                    // Mutation endpoint: bare form. The VL form is answered with
+                    // 400 INVALID_ARGUMENT.
+                    let raw_id = id.mutation_form();
+                    let pid = ytmapi_rs::common::PlaylistID::from_raw(&raw_id);
                     // EditPlaylistQuery is built per-change upstream; issue one call per
                     // field the caller actually wants changed.
                     if let Some(t) = new_title.as_deref() {
@@ -266,8 +273,10 @@ macro_rules! impl_music_source {
                     if mapping::is_system_playlist(id.as_str()) {
                         return Err(SourceError::NotEditable(id.to_string()));
                     }
+                    // Mutation endpoint: bare form.
+                    let raw_id = id.mutation_form();
                     self.api
-                        .delete_playlist(ytmapi_rs::common::PlaylistID::from_raw(id.as_str()))
+                        .delete_playlist(ytmapi_rs::common::PlaylistID::from_raw(&raw_id))
                         .await
                         .map_err(classify)
                 })
@@ -282,9 +291,11 @@ macro_rules! impl_music_source {
                         .iter()
                         .map(|v| ytmapi_rs::common::VideoID::from_raw(v.as_str()))
                         .collect();
+                    // Mutation endpoint: bare form.
+                    let raw_id = id.mutation_form();
                     self.api
                         .add_video_items_to_playlist(
-                            ytmapi_rs::common::PlaylistID::from_raw(id.as_str()),
+                            ytmapi_rs::common::PlaylistID::from_raw(&raw_id),
                             ids,
                         )
                         .await
@@ -304,9 +315,11 @@ macro_rules! impl_music_source {
                         .iter()
                         .map(|s| ytmapi_rs::common::SetVideoID::from_raw(s.as_str()))
                         .collect();
+                    // Mutation endpoint: bare form.
+                    let raw_id = id.mutation_form();
                     self.api
                         .remove_playlist_items(
-                            ytmapi_rs::common::PlaylistID::from_raw(id.as_str()),
+                            ytmapi_rs::common::PlaylistID::from_raw(&raw_id),
                             ids,
                         )
                         .await

@@ -45,6 +45,38 @@ id_type!(
      that entry; the VideoId alone is not enough because a track may appear twice."
 );
 id_type!(AlbumId, "A YouTube Music album/browse id.");
+
+/// YouTube identifies one playlist two ways, and the endpoints disagree about
+/// which they want:
+///
+/// - **browse form**, `VL`-prefixed (`VLPLabc…`) — what `browse` endpoints take,
+///   and what a library listing reports as its `browseId`.
+/// - **playlist form**, bare (`PLabc…`) — what the mutation endpoints
+///   (`playlist/edit`, `playlist/delete`, add/remove items) take, and what
+///   `create_playlist` returns.
+///
+/// `ytmapi-rs` 0.3.3 passes whatever it is given straight through — its source
+/// carries four `TODO: Confirm if processing required to add/remove 'VL'` — so
+/// converting is on us. Sending the browse form to a mutation endpoint is
+/// answered with `400 INVALID_ARGUMENT`, which is what made rename, delete, and
+/// add-to-playlist all fail while create worked.
+///
+/// Both accessors are idempotent, so an id from either source is safe to pass.
+impl PlaylistId {
+    /// The `VL`-prefixed form, for `browse` endpoints.
+    pub fn browse_form(&self) -> String {
+        if self.0.starts_with("VL") {
+            self.0.clone()
+        } else {
+            format!("VL{}", self.0)
+        }
+    }
+
+    /// The bare form, for the mutation endpoints.
+    pub fn mutation_form(&self) -> String {
+        self.0.strip_prefix("VL").unwrap_or(&self.0).to_owned()
+    }
+}
 id_type!(ArtistId, "A YouTube Music artist/channel id.");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -208,5 +240,49 @@ mod tests {
             ..Track::stub("v1", "Title")
         };
         assert!(t.is_removable());
+    }
+
+    #[test]
+    fn a_library_id_converts_to_both_endpoint_forms() {
+        // The live bug: the library reports the VL form, and the mutation
+        // endpoints answer it with 400 INVALID_ARGUMENT.
+        let id = PlaylistId::from("VLPLa9OPirWkaJM");
+        assert_eq!(id.browse_form(), "VLPLa9OPirWkaJM");
+        assert_eq!(id.mutation_form(), "PLa9OPirWkaJM");
+    }
+
+    #[test]
+    fn an_id_from_create_converts_to_both_endpoint_forms() {
+        // create_playlist returns the bare form, so the two sources disagree and
+        // neither accessor can assume its input.
+        let id = PlaylistId::from("PLa9OPirWkaJM");
+        assert_eq!(id.browse_form(), "VLPLa9OPirWkaJM");
+        assert_eq!(id.mutation_form(), "PLa9OPirWkaJM");
+    }
+
+    #[test]
+    fn converting_is_idempotent_in_both_directions() {
+        for raw in ["VLPLabc", "PLabc"] {
+            let id = PlaylistId::from(raw);
+            let b = PlaylistId::from(id.browse_form().as_str());
+            assert_eq!(b.browse_form(), id.browse_form(), "browse form doubled VL");
+            let m = PlaylistId::from(id.mutation_form().as_str());
+            assert_eq!(m.mutation_form(), id.mutation_form());
+        }
+    }
+
+    #[test]
+    fn the_liked_music_playlist_converts_too() {
+        // "LM" is browsed as "VLLM"; nothing about the prefix is PL-specific.
+        let id = PlaylistId::from("LM");
+        assert_eq!(id.browse_form(), "VLLM");
+        assert_eq!(PlaylistId::from("VLLM").mutation_form(), "LM");
+    }
+
+    #[test]
+    fn an_id_that_merely_starts_with_v_is_left_alone() {
+        // Stripping two characters blindly would corrupt an id like this.
+        let id = PlaylistId::from("VXYZ123");
+        assert_eq!(id.mutation_form(), "VXYZ123");
     }
 }
