@@ -2,10 +2,16 @@
 
 **Read this first. Update it before you stop.** It is the handoff between agents.
 
-Last updated: 2026-08-31 by the implementation agent
-Current phase: **All 38 tasks done. Phases 0-9 complete.**
-Next action: **Nothing queued.** Owner retest of the new keys is the only open item
-(see "Owner retest" below). Deferred items are listed in the plan's final section.
+Last updated: 2026-08-31 by the implementation agent (session 3)
+Current phase: **All 38 tasks done. Phases 0-9 complete. Session-3 owner requests done.**
+Next action: **Nothing queued.** Owner retest of the session-3 features is the only
+open item (see "Owner retest — session 3"). Deferred items are in the plan's final
+section.
+
+**Session 3 added a Home pane, artist browsing, a list filter, mouse support, and
+`ytm-cli config`; and fixed four bugs, one of which had stopped playback entirely.**
+Read "Session 3" below before touching the browse panes — the filter bug there is a
+pattern that will recur.
 
 **Nothing is blocked and no owner decision is pending.** Every manual step that
 was outstanding is now done — see "Manual steps".
@@ -138,6 +144,8 @@ guessing, and re-verify against the vendored source if a call does not compile.
 | 7 — Queue UI | 26–27 | ✅ done | Queue view, toasts, spinner, help overlay |
 | 8 — CRUD | 28–32 | ✅ done, live-verified | Playlist create/rename/delete, add/remove tracks. FR-C5 works (option A) |
 | 9 — Polish | 33–38 | ✅ done | Cache, album art, MPRIS, CLI, README, final verification |
+| Session 2 | — | ✅ done | Search line-editing, queue toasts, themes, config editing, h/l, 1-6 |
+| Session 3 | — | ✅ done | Home feed, artist tracks + search, `/` filter, mouse, `zz`, paging, `ytm-cli config`, yt-dlp cookies |
 
 ⚠️ = risk phase. See below.
 
@@ -224,6 +232,10 @@ it here as a known limitation rather than fighting it.
 Fill in during Task 38. Mark a requirement done only after pressing the keys
 in the running app — not because the code looks right.
 
+> **Session 3 added FR-B6 (home feed), FR-B7 (artist tracks + search), FR-U8
+> (mouse), and FR-U9 (`ytm-cli config`).** All four are live-verified against the
+> account; the owner retest list above is what remains for them.
+
 **Auth:** A1 ⬜ A2 ⬜ A3 ⬜ A4 ⬜ A5 ⬜ A6 ⬜
   (A5 cookie-auth path proven working by Gate 1; still mark only from the app.)
 **Browse:** B1 ⬜ B2 ⬜ B3 ⬜ B4 ⬜ B5 ⬜
@@ -246,7 +258,7 @@ one should stop, note it here, and ask.
 | Task | What is needed | Status |
 |---|---|---|
 | 8.5 | Create a Google Cloud OAuth client ("TVs and Limited Input devices"), add the `.../auth/youtube` scope under Data Access, add the music account as a test user, put id/secret in `~/.config/ytm-cli/config.toml`, run `cargo run -p ytm-core --example login_spike` | ✅ done 2026-08-30 — login works |
-| 9.1 | (still open, low priority — the only remaining manual step) Capture a real fixture: `… cargo run -p ytm-core --example dump_playlists -- --raw > /tmp/raw.json`, scrub account ids/emails/personal browseIds, replace `crates/ytm-core/tests/fixtures/library_playlists.json` (currently **SYNTHETIC**) | ⬜ |
+| 9.1 | Capture a real fixture and scrub it, replacing the SYNTHETIC `library_playlists.json` | ✅ **done 2026-08-31 (session 3)** — real capture, ids/titles/owners replaced with stable synthetics, tracking params and feedbackTokens stripped, structure untouched. Two more real fixtures added: `home_feed.json` and `home_feed_page2.json`. A test now asserts the fixture is not hand-written |
 | 9.7 | Gate 1: `cargo run -p ytm-core --example dump_playlists` prints real playlist titles | ✅ **done 2026-08-30** — 10 real titles via cookie auth |
 | 9.7b | Cookie auth: save the **raw `Cookie:` header value** from a logged-in `music.youtube.com` request into a file (NOT Netscape cookies.txt — `BrowserToken::from_str` uses the contents verbatim as the header and requires `SAPISID=` in it), then set `auth.kind = "cookie"` and `auth.cookie_file` in config.toml | ✅ done 2026-08-30 — **repeat whenever cookies expire**, see "Cookie expiry" |
 | 12.6 | Confirm audio is audible | ✅ done 2026-08-30 |
@@ -505,13 +517,14 @@ in `$VISUAL`/`$EDITOR`; **keymap and theme reload on exit**, no restart.
 `target/release/ytm`; `Cargo.toml` has always declared `ytm-cli`. The code is the
 truth and the README documents `ytm-cli`, with a symlink note for the short name.
 
-**One pre-existing upstream failure, not introduced here.** The albums pane logs
-`Key /contents/.../gridRenderer not found in Api response` — `ytmapi-rs` 0.3.3's
-`get_library_albums` parser against the current wire format. `ytm-core` was not
-touched this session and the same warning appears in logs from 06:28 and 06:36
-yesterday. Artists, songs, playlists, and search all parse fine. Fixing it means
-a raw-JSON extractor like `playlist_raw`; not done, because it is upstream and
-was not asked for.
+**~~One pre-existing upstream failure~~ — DIAGNOSED AND FIXED in session 3, and
+the diagnosis below was wrong.** The albums pane logged
+`Key /contents/.../gridRenderer not found in Api response`, recorded here as
+`ytmapi-rs` 0.3.3 drifting against the current wire format. That was not the
+cause: **the account has zero saved albums**, and with none YouTube sends a
+`messageRenderer` ("No albums yet") where the parser demands a `gridRenderer`.
+Upstream fails rather than returning an empty list. See "Session 3" for the fix
+and why the same hazard was waiting in the artists pane.
 
 ### Owner retest
 
@@ -528,6 +541,174 @@ suite does not:
   count.
 - `t` a few times, including onto a light theme, in your real terminal.
 - `,` — expect your editor, then "config reloaded" on exit.
+
+---
+
+## Session 3 — Home feed, artist browsing, filter, mouse, and four bugs
+
+Six owner requests plus four bugs. Read the bug notes before touching the browse
+panes: two of them are patterns that will recur.
+
+### The home feed reaches an endpoint `ytmapi-rs` does not have
+
+`ytmapi-rs` 0.3.3 has **no home query at all**. Its `Query`/`PostQuery` traits are
+public and documented as user-implementable, so `GetHomeQuery` in `ytmusic.rs`
+posts `browseId: FEmusic_home` without forking upstream. Three things were
+measured against the live account, and each one changed the code — do not
+"simplify" any of them away:
+
+1. **Page 1 is not the useful page.** It returns "Listen again", "From your
+   library", "Listen together". **"Quick picks", "Covers and remixes", and "Heard
+   in Shorts" — the shelves the web player leads with — are only on the
+   continuation.** A single-page client shows none of the real recommendations.
+   `feed_shelves` walks up to `HOME_PAGES` (3); page failures after the first stop
+   the walk rather than discarding the shelves already in hand.
+2. **The two pages use different item renderers.** Page 1 is
+   `musicTwoRowItemRenderer` (artwork cards). Page 2 is
+   `musicResponsiveListItemRenderer` (list rows), with the title and byline in
+   `flexColumns` and the id in `playlistItemData`. Handling only the first parses
+   page 1 and silently returns nothing for page 2.
+3. **A continuation carries both paths.** It has an empty page-1 shell under
+   `/contents` *and* the real shelves under `/continuationContents`, so the parser
+   takes the first path that **holds shelves**, not the first that exists. Taking
+   the first that exists yields nothing.
+
+Both pages are captured as scrubbed fixtures (`home_feed.json`,
+`home_feed_page2.json`), so the shapes are pinned without the network.
+
+Which shelves arrive is YouTube's decision and varies per account and request, so
+**the shelf title is data** — the UI renders what comes back rather than looking
+for shelves by name. One carousel mixes tracks, playlists, albums, and artists,
+so `HomeTarget` decides what `Enter` does per row. An unreadable feed is an empty
+pane, never an error: nobody asked for recommendations by name, so a toast about
+them would be noise.
+
+### The albums pane was not a wire-format change
+
+PROGRESS.md previously recorded this as upstream drift against the current wire
+format. It is not. **The account has zero saved albums**, and with none YouTube
+sends `itemSectionRenderer` → `messageRenderer` ("No albums yet") where the
+parser demands `gridRenderer`. Upstream fails instead of returning an empty list,
+and the failure reached the user as an error toast on a pane that should have read
+empty.
+
+`library_raw::is_empty_library` answers that one question and nothing else —
+**anything it does not recognise returns false**, so a genuine breakage still
+surfaces as an error rather than being dressed up as an empty library. Artists
+goes through the same check: it only worked because there *are* artists, and would
+have broken identically the day that list emptied.
+
+The empty pane is now filled from the feed's album cards. `year` is left `None`
+deliberately: the feed's second line is a byline ("Someone • EP"), not a year, and
+inferring one would show a wrong date.
+
+### The filter bug: widgets drew a different list than the reducer counted
+
+**The pattern to remember.** `tracklist` read `s.tracks` and the list widgets read
+`s.playlists`/`s.albums`/`s.artists`, while `list_len`, `selected_track`, and the
+visual range all went through the `visible_*` views. Two symptoms, one cause:
+
+- **`/` appeared to do nothing.** The reducer filtered; the widget kept drawing
+  the unfiltered rows.
+- **An open artist scrolled 5 rows and stopped.** `list_len` counted the artist's
+  5 tracks while `tracklist` drew the 9 library songs — the cursor hit the shorter
+  list's bound with longer content on screen.
+
+Every widget now draws `visible_*`. If you add a pane or a row source, make the
+widget and `list_len` read the same function or this returns.
+
+`artist_tracks` is a **separate field** from `tracks` for the same reason: reusing
+`tracks` would clobber the Fav pane's rows and leave `list_len` disagreeing with
+the screen — the same class of bug as the old `selected_track` fall-through.
+
+### yt-dlp needs cookies now, or nothing plays
+
+The owner hit `Sign in to confirm you're not a bot` in the now-playing bar.
+YouTube refuses anonymous stream requests. We already hold cookies for the API,
+but **in a format yt-dlp cannot read**: `ytmapi-rs`'s `BrowserToken` takes the raw
+`Cookie:` header verbatim, while `--cookies` wants a Netscape jar.
+
+`resolver::netscape_from_header` derives one from the other so the user exports
+cookies **once**. Details that matter: tab-separated (yt-dlp silently rejects
+space-separated lines), a far-future expiry (a header carries none, and a past
+date makes yt-dlp discard every line), values keep their `=` padding, the jar is
+written `0600` because it holds live session cookies, and it is written once per
+process rather than per track. A header with no cookies yields **no jar** rather
+than an empty one that would authenticate nothing.
+
+Verified against the failing video: bot check without cookies, a stream URL with
+them.
+
+### Smaller things, each with a reason
+
+- **`h` could not leave an open artist.** `close_open_playlist` had a branch;
+  nothing closed an artist, so `h` focused the sidebar while the artist's tracks
+  stayed on screen — no way back. `l` now descends into an artist row too.
+- **`S` in the Artists pane searches artists.** The library list holds only the
+  artists you follow, so the pane was a closed set. Results replace the list in
+  place; `h` unwinds search → open artist → sidebar in that order. The debounce is
+  shared but dispatches per pane — sending the artist query to `search_songs`
+  would fill the artist list with tracks.
+- **`Ctrl+D`/`Ctrl+U` had never worked.** They resolved to `PageUp`/`PageDown`
+  from the original keymap, but **the reducer never handled either**, so both keys
+  silently did nothing from the beginning.
+- **`zz` needs a pending-prefix state**, because `z` alone must wait rather than
+  act. It lives beside the keymap, not in it: the prefix is session state, not
+  configuration, so `resolve` stays a pure function of (key, focus).
+- **Paging and `zz` need the viewport height**, which only the frame knows and
+  `render` cannot write back (`&AppState`). The loop sets `viewport_rows` from the
+  frame before each draw, and `list_rows_for` derives it beside the layout
+  constants — a copy in the loop would drift the moment the chrome changed.
+- **Home rows include headings, and the cursor steps over them.** A heading has no
+  `Enter` behaviour, so parking on one makes the next key look broken.
+- **`ui.start_pane` is Playlists, not Home.** Home costs a multi-page fetch before
+  the first useful frame. It is an enum, not a free string, so a typo is a load
+  error the user sees rather than a silent fallback. The loop's opening fetch
+  follows `state.pane` — it always loaded playlists, so any other start pane
+  opened empty until a key was pressed.
+- **Clicks select, they never play.** A misplaced click starting audio is worse
+  than one costing a keypress. Hit-testing lives in `render.rs` beside the layout
+  constants: computed elsewhere it drifts and clicks land a row off. Two things it
+  must get right — the list starts below the heading (two below in Search), and
+  the click offset is from the top of the **visible window**, so `scroll_offset`
+  is added back or every click after scrolling selects near the top.
+- **`ui.mouse` was config-only.** Declared, defaulted, never read — turning it off
+  did nothing. Found while documenting it. Now gates capture, because off is a
+  real preference: while capture is on, the terminal hands us the clicks and drags
+  it would otherwise use for its own text selection.
+- **`list_len` was cloning whole track lists.** It went through `visible_tracks`,
+  which clones every row, and it runs several times per frame and on every cursor
+  move — a 400-track playlist copied repeatedly to read a length.
+  `visible_track_count` counts instead, sharing the filter predicate so the count
+  and the list cannot disagree.
+
+### `ytm-cli config`
+
+Owner asked for one command that makes every keybinding and setting editable
+without manual work. It writes `config.toml` with **every setting and keybinding
+at its default, commented out**, opens it in `$EDITOR`, and validates on exit so a
+typo is reported rather than silently ignored. An existing file is never
+overwritten. `--no-edit` writes and prints the path.
+
+All four new actions are remappable — the previous table was half-wired and would
+have ignored them silently. 39 actions total.
+
+### Owner retest — session 3
+
+Everything below passed the suite and a live check, but this project's history is
+that driving the app finds what tests do not:
+
+- **Playback.** The cookie fix is the important one — a track must actually play.
+- `1` (Home) — Quick picks and Covers and remixes should be there, not just
+  "Listen again". Enter on a track plays; Enter on a playlist row opens it.
+- `5` (Artists), Enter on a name — expect their top tracks. Then `h` — expect the
+  artist list back, not a stuck screen.
+- `5`, then `S`, type an artist not in your library — expect results in the same
+  pane.
+- `/` in a playlist — the list should visibly narrow as you type. Esc restores it.
+- `zz` on a row in the middle of a long playlist, and the scroll wheel.
+- Left click a row and a sidebar entry; right click a row (expect a queue toast).
+- `ytm-cli config` — expect your editor, and "config is valid" on exit.
 
 ---
 
@@ -1439,6 +1620,53 @@ checks; neither needs the log.
 Next: **Task 37** (README and setup docs), then **Task 38** (the requirement
 checklist, which needs the owner pressing keys). Still outstanding for the owner:
 retest delete and add-to-playlist, and check art in kitty outside tmux.
+
+### 2026-08-31 — implementation agent (session 3: home feed, browsing, mouse)
+
+Started from a repo where all 38 tasks were done and the gate was green, so the
+work was the gaps PROGRESS.md still flagged plus six owner requests that arrived
+mid-session.
+
+**Closed the two real gaps from the old checklist.** The albums-pane failure was
+recorded here as upstream wire drift; it was not — the account has no saved
+albums and upstream cannot parse the empty-library shape. And step 9.1's SYNTHETIC
+fixture is now a real scrubbed capture, which is what let the fixture test start
+asserting the wire shape instead of only "is JSON".
+
+**Then six owner requests, in the order they arrived:** home recommendations
+instead of landing on nine liked songs, recommended albums, a working Artists
+pane, `/` as a list filter with `S` for search, scroll keys and mouse support,
+`Songs` renamed `Fav`, `zz`, a `config` command, a configurable start pane, mouse
+clicks, artist search, and a README pass. Two decisions went to the owner rather
+than being guessed: Home as a **new** source (keeping Fav, so FR-B2 holds) and
+wheel-plus-keys before clicks were later added on request.
+
+**The one genuinely uncertain thing was whether the home feed was reachable at
+all** — `ytmapi-rs` has no home query. Proved it with a throwaway spike before
+designing anything on top: `FEmusic_home` returned 308KB. Then measurement changed
+the design three times (page 1 lacks Quick picks; the two pages use different item
+renderers; a continuation carries both paths). Full notes in "Session 3".
+
+**Four bugs, and the pattern from earlier sessions repeated exactly.** The filter
+and artist-scroll bugs were one root cause — widgets drawing raw state while the
+reducer counted filtered views — and both passed the entire suite, because no test
+compared what a widget drew against what `list_len` counted. `Ctrl+D`/`Ctrl+U` had
+never worked since the original keymap. `ui.mouse` was config-only, found while
+documenting it. And the owner hit a **playback-stopping** bug mid-session: YouTube
+now refuses anonymous stream requests, so yt-dlp needs the cookies we already
+hold — in a different format.
+
+**One performance fix, from reading my own change rather than a report:**
+`list_len` went through `visible_tracks`, cloning every row, several times per
+frame and on every cursor move.
+
+Cold start 25ms against a 300ms budget. 462 tests, gate green, release binary
+verified against the live account (8 shelves incl. Quick picks, 2 recommended
+albums, 16 artists, artist tracks, 11 playlists).
+
+Next: **nothing queued.** The owner retest list in "Session 3" is the only open
+item, and it needs a human at the keyboard — every item on it passed the suite,
+and this project's history is that driving the app finds what the suite does not.
 
 ### 2026-08-31 — implementation agent (owner-requested navigation, art gap)
 
