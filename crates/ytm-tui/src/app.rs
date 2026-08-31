@@ -604,15 +604,16 @@ impl AppState {
     pub fn list_len(&self) -> usize {
         match self.pane {
             Pane::Home => self.home_rows.len(),
-            Pane::Playlists if self.open_playlist.is_some() => self.visible_tracks().len(),
-            Pane::Playlists => self.visible_playlists().len(),
-            Pane::Songs => self.visible_tracks().len(),
-            Pane::Albums => self.visible_albums().len(),
+            Pane::Playlists if self.open_playlist.is_some() => self.visible_track_count(),
+            Pane::Playlists => self.visible_playlist_count(),
+            Pane::Songs => self.visible_track_count(),
+            Pane::Albums => self.visible_album_count(),
             // An open artist shows their tracks; otherwise the list of artists.
-            Pane::Artists if self.open_artist.is_some() => self.visible_tracks().len(),
-            Pane::Artists => self.visible_artists().len(),
+            Pane::Artists if self.open_artist.is_some() => self.visible_track_count(),
+            Pane::Artists => self.visible_artist_count(),
+            // Search results are never filtered locally: the query already did it.
             Pane::Search => self.search_results.len(),
-            Pane::Queue => self.queue.len(),
+            Pane::Queue => self.visible_track_count(),
         }
     }
 
@@ -624,6 +625,30 @@ impl AppState {
     /// Does this text survive the filter? Case-insensitive substring.
     fn matches_filter(&self, text: &str) -> bool {
         self.filter.is_empty() || text.to_lowercase().contains(&self.filter.to_lowercase())
+    }
+
+    /// How many track rows survive the filter, without building the list.
+    ///
+    /// `list_len` is called several times per frame and on every cursor move, so
+    /// going through `visible_tracks` cloned a 400-track playlist each time for
+    /// nothing but its length. Counting shares `track_matches_filter` with the
+    /// list itself, so the two cannot disagree about which rows are visible.
+    fn visible_track_count(&self) -> usize {
+        let source = self.unfiltered_tracks();
+        if self.filter.is_empty() {
+            return source.len();
+        }
+        source
+            .iter()
+            .filter(|t| self.track_matches_filter(t))
+            .count()
+    }
+
+    /// Does this track survive the filter? Title, artist, or album.
+    fn track_matches_filter(&self, t: &Track) -> bool {
+        self.matches_filter(&t.title)
+            || t.artists.iter().any(|a| self.matches_filter(a))
+            || t.album.as_deref().is_some_and(|a| self.matches_filter(a))
     }
 
     /// The track rows the filter leaves on screen.
@@ -639,11 +664,7 @@ impl AppState {
         }
         source
             .iter()
-            .filter(|t| {
-                self.matches_filter(&t.title)
-                    || t.artists.iter().any(|a| self.matches_filter(a))
-                    || t.album.as_deref().is_some_and(|a| self.matches_filter(a))
-            })
+            .filter(|t| self.track_matches_filter(t))
             .cloned()
             .collect()
     }
@@ -658,6 +679,37 @@ impl AppState {
         }
     }
 
+    fn visible_playlist_count(&self) -> usize {
+        if self.filter.is_empty() {
+            return self.playlists.len();
+        }
+        self.playlists
+            .iter()
+            .filter(|p| self.matches_filter(&p.title))
+            .count()
+    }
+
+    fn visible_album_count(&self) -> usize {
+        if self.filter.is_empty() {
+            return self.albums.len();
+        }
+        self.albums.iter().filter(|a| self.album_matches(a)).count()
+    }
+
+    fn visible_artist_count(&self) -> usize {
+        if self.filter.is_empty() {
+            return self.artists.len();
+        }
+        self.artists
+            .iter()
+            .filter(|a| self.matches_filter(&a.name))
+            .count()
+    }
+
+    fn album_matches(&self, a: &Album) -> bool {
+        self.matches_filter(&a.title) || a.artists.iter().any(|x| self.matches_filter(x))
+    }
+
     pub fn visible_playlists(&self) -> Vec<Playlist> {
         self.playlists
             .iter()
@@ -669,9 +721,7 @@ impl AppState {
     pub fn visible_albums(&self) -> Vec<Album> {
         self.albums
             .iter()
-            .filter(|a| {
-                self.matches_filter(&a.title) || a.artists.iter().any(|x| self.matches_filter(x))
-            })
+            .filter(|a| self.album_matches(a))
             .cloned()
             .collect()
     }
