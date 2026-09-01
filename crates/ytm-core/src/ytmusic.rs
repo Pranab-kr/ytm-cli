@@ -579,6 +579,19 @@ mod tests {
             .collect()
     }
 
+    #[tokio::test]
+    #[ignore = "live InnerTube guest-search gate; run by hand"]
+    async fn unauthenticated_search_returns_songs() {
+        let api = ytmapi_rs::YtMusic::new_unauthenticated()
+            .await
+            .expect("guest handshake succeeds");
+        let songs = api
+            .search_songs("Daft Punk One More Time")
+            .await
+            .expect("guest search succeeds");
+        assert!(!songs.is_empty(), "guest search returned no songs");
+    }
+
     #[test]
     fn the_full_playlist_replaces_the_five_row_preview() {
         // The owner saw only five songs per artist, each with no art and 0:00 —
