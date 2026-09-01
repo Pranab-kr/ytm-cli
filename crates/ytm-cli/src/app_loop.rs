@@ -606,6 +606,19 @@ pub fn dispatch_input(
         return None;
     }
 
+    // Playlist editing needs an account. Refused here rather than deeper down so
+    // no modal opens for an edit that could never be sent — the `x` arm below is
+    // queue-local and must keep working, so it is excluded by pane.
+    let account_action = match &action {
+        A::AddToPlaylist | A::CreatePlaylist | A::RenamePlaylist | A::DeletePlaylist => true,
+        A::RemoveFromPlaylist => state.pane != Pane::Queue,
+        _ => false,
+    };
+    if state.guest && account_action {
+        state.guest_refusal("playlist editing");
+        return None;
+    }
+
     // Transport actions belong to the player; everything else to the state.
     match action {
         A::TogglePause => {
@@ -1534,6 +1547,43 @@ mod tests {
     fn deps() -> (Arc<MockSource>, Arc<MockPlayer>) {
         let (p, _rx) = MockPlayer::new();
         (Arc::new(MockSource::new()), Arc::new(p))
+    }
+
+    #[test]
+    fn guest_account_actions_show_a_toast_without_opening_a_modal() {
+        let (_source, player) = deps();
+        for action in [
+            InputAction::AddToPlaylist,
+            InputAction::CreatePlaylist,
+            InputAction::RenamePlaylist,
+            InputAction::DeletePlaylist,
+            InputAction::RemoveFromPlaylist,
+        ] {
+            let mut state = AppState {
+                guest: true,
+                pane: Pane::Playlists,
+                ..Default::default()
+            };
+            assert!(dispatch_input(action.clone(), &mut state, &*player).is_none());
+            assert!(state.modal.is_none(), "{action:?} must not open a modal");
+            assert_eq!(state.toasts.len(), 1, "{action:?} must explain itself");
+        }
+    }
+
+    #[test]
+    fn guest_queue_removal_still_reaches_the_player() {
+        let (_source, player) = deps();
+        let mut state = AppState {
+            guest: true,
+            pane: Pane::Queue,
+            queue: vec![ytm_core::Track::stub("v1", "Song")],
+            ..Default::default()
+        };
+        dispatch_input(InputAction::RemoveFromPlaylist, &mut state, &*player);
+        assert!(matches!(
+            player.commands().as_slice(),
+            [PlayerCommand::RemoveFromQueue(0)]
+        ));
     }
 
     #[test]

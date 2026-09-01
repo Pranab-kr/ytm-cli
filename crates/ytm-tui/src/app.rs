@@ -1081,7 +1081,8 @@ impl AppState {
         true
     }
 
-    fn guest_refusal(&mut self, label: &str) {
+    /// Say why an account feature is unavailable, naming the exact config key.
+    pub fn guest_refusal(&mut self, label: &str) {
         self.push_toast(
             ToastKind::Error,
             &format!("sign in to use {label}: set auth.cookie_file in config.toml"),
