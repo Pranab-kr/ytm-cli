@@ -9,10 +9,10 @@ pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = Result<T, SourceError>> + S
 
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
-    #[error("not signed in — run `ytm login` first")]
+    #[error("sign in by setting auth.cookie_file in config.toml (see the README)")]
     NotAuthenticated,
 
-    #[error("sign-in expired and could not be renewed — run `ytm login` again")]
+    #[error("sign-in expired — re-export cookies and set auth.cookie_file in config.toml")]
     TokenRefreshFailed,
 
     #[error("too many requests — YouTube is rate limiting; try again in a minute")]
@@ -39,6 +39,10 @@ pub enum SourceError {
 /// Object-safe on purpose: the UI holds `Arc<dyn MusicSource>` so it can be
 /// swapped for `MockSource` in tests with no network.
 pub trait MusicSource: Send + Sync {
+    fn is_authenticated(&self) -> bool {
+        true
+    }
+
     fn library_playlists(&self) -> BoxFut<'_, Vec<Playlist>>;
     fn library_songs(&self) -> BoxFut<'_, Vec<Track>>;
     fn library_albums(&self) -> BoxFut<'_, Vec<Album>>;
@@ -101,7 +105,16 @@ mod tests {
     fn source_error_messages_are_human_readable() {
         // NFR-9: errors reach the user as sentences, never Debug dumps.
         let e = SourceError::NotAuthenticated;
-        assert_eq!(e.to_string(), "not signed in — run `ytm login` first");
+        assert_eq!(
+            e.to_string(),
+            "sign in by setting auth.cookie_file in config.toml (see the README)"
+        );
+
+        let e = SourceError::TokenRefreshFailed;
+        assert_eq!(
+            e.to_string(),
+            "sign-in expired — re-export cookies and set auth.cookie_file in config.toml"
+        );
 
         let e = SourceError::RateLimited;
         assert!(e.to_string().contains("too many requests"));

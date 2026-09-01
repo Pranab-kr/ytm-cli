@@ -3,7 +3,8 @@
 
 use crate::{mapping, model::*, source::*};
 use ytmapi_rs::YtMusic;
-use ytmapi_rs::auth::{BrowserToken, LoggedIn};
+use ytmapi_rs::auth::noauth::NoAuthToken;
+use ytmapi_rs::auth::{AuthToken, BrowserToken, LoggedIn};
 use ytmapi_rs::common::{ApiOutcome, YoutubeID};
 use ytmapi_rs::parse::SearchResultPlaylist;
 use ytmapi_rs::query::playlist::PrivacyStatus;
@@ -12,8 +13,15 @@ use ytmapi_rs::query::{CreatePlaylistQuery, EditPlaylistQuery};
 /// Generic over the token type, though cookie auth is the only one left: the
 /// generic is what keeps `MusicSource` free of any `ytmapi-rs` type, and it costs
 /// nothing to keep.
-pub struct YtMusicSource<A: LoggedIn> {
+pub struct YtMusicSource<A: AuthToken> {
     api: YtMusic<A>,
+}
+
+impl YtMusicSource<NoAuthToken> {
+    pub async fn unauthenticated() -> Result<Self, SourceError> {
+        let api = YtMusic::new_unauthenticated().await.map_err(classify)?;
+        Ok(Self { api })
+    }
 }
 
 impl YtMusicSource<BrowserToken> {
@@ -565,6 +573,167 @@ macro_rules! impl_music_source {
 
 impl_music_source!(BrowserToken);
 
+/// Public browsing works with the visitor token; account methods deliberately
+/// fail locally so callers get a clear error instead of probing private APIs.
+impl MusicSource for YtMusicSource<NoAuthToken> {
+    fn is_authenticated(&self) -> bool {
+        false
+    }
+
+    fn library_playlists(&self) -> BoxFut<'_, Vec<Playlist>> {
+        Box::pin(async { Err(SourceError::NotAuthenticated) })
+    }
+    fn library_songs(&self) -> BoxFut<'_, Vec<Track>> {
+        Box::pin(async { Err(SourceError::NotAuthenticated) })
+    }
+    fn library_albums(&self) -> BoxFut<'_, Vec<Album>> {
+        Box::pin(async { Err(SourceError::NotAuthenticated) })
+    }
+    fn library_artists(&self) -> BoxFut<'_, Vec<Artist>> {
+        Box::pin(async { Err(SourceError::NotAuthenticated) })
+    }
+    fn home_shelves(&self) -> BoxFut<'_, Vec<HomeShelf>> {
+        Box::pin(async { Err(SourceError::NotAuthenticated) })
+    }
+    fn recommended_albums(&self) -> BoxFut<'_, Vec<Album>> {
+        Box::pin(async { Err(SourceError::NotAuthenticated) })
+    }
+
+    fn artist_tracks(&self, id: ArtistId) -> BoxFut<'_, Vec<Track>> {
+        Box::pin(async move {
+            let raw = self
+                .api
+                .get_artist(ytmapi_rs::common::ArtistChannelID::from_raw(id.as_str()))
+                .await
+                .map_err(classify)?;
+            let Some(songs) = raw.top_releases.songs else {
+                return Ok(Vec::new());
+            };
+            let preview = songs
+                .results
+                .iter()
+                .map(mapping::track_from_artist_song)
+                .collect();
+            Ok(preview)
+        })
+    }
+
+    fn playlist_tracks(&self, id: PlaylistId) -> BoxFut<'_, Vec<Track>> {
+        Box::pin(async move {
+            let browse_id = id.browse_form();
+            let query = ytmapi_rs::query::GetPlaylistTracksQuery::new(
+                ytmapi_rs::common::PlaylistID::from_raw(&browse_id),
+            );
+            let json = self
+                .api
+                .raw_json_query::<ytmapi_rs::query::GetPlaylistTracksQuery>(&query)
+                .await
+                .map_err(classify)?;
+            let value =
+                serde_json::from_str(&json).map_err(|e| SourceError::Parse(e.to_string()))?;
+            let items: Vec<ytmapi_rs::parse::PlaylistItem> = ytmapi_rs::parse::ProcessedResult {
+                query: &query,
+                source: json.clone(),
+                json: value,
+            }
+            .parse_into()
+            .map_err(classify)?;
+            let tracks = items
+                .iter()
+                .filter_map(mapping::track_from_playlist_item)
+                .collect();
+            let rows = crate::playlist_raw::entry_ids_from_raw(&json);
+            Ok(crate::playlist_raw::attach_entry_ids(tracks, &rows))
+        })
+    }
+
+    fn playlist_details(&self, id: PlaylistId) -> BoxFut<'_, Playlist> {
+        Box::pin(async move {
+            let browse_id = id.browse_form();
+            let raw = self
+                .api
+                .get_playlist_details(ytmapi_rs::common::PlaylistID::from_raw(&browse_id))
+                .await
+                .map_err(classify)?;
+            Ok(mapping::playlist_from_details(&raw))
+        })
+    }
+
+    fn search_songs(&self, query: String) -> BoxFut<'_, Vec<Track>> {
+        Box::pin(async move {
+            let raw = self
+                .api
+                .search_songs(query.as_str())
+                .await
+                .map_err(classify)?;
+            Ok(raw.iter().map(mapping::track_from_search_song).collect())
+        })
+    }
+    fn search_albums(&self, query: String) -> BoxFut<'_, Vec<Album>> {
+        Box::pin(async move {
+            let raw = self
+                .api
+                .search_albums(query.as_str())
+                .await
+                .map_err(classify)?;
+            Ok(raw.iter().map(mapping::album_from_search).collect())
+        })
+    }
+    fn search_artists(&self, query: String) -> BoxFut<'_, Vec<Artist>> {
+        Box::pin(async move {
+            let raw = self
+                .api
+                .search_artists(query.as_str())
+                .await
+                .map_err(classify)?;
+            Ok(raw.iter().map(mapping::artist_from_search).collect())
+        })
+    }
+    fn search_playlists(&self, query: String) -> BoxFut<'_, Vec<Playlist>> {
+        Box::pin(async move {
+            let raw = self
+                .api
+                .search_playlists(query.as_str())
+                .await
+                .map_err(classify)?;
+            Ok(raw
+                .iter()
+                .filter_map(|p| match p {
+                    SearchResultPlaylist::Featured(f) => {
+                        Some(mapping::playlist_from_search_featured(f))
+                    }
+                    SearchResultPlaylist::Community(c) => {
+                        Some(mapping::playlist_from_search_community(c))
+                    }
+                    _ => None,
+                })
+                .collect())
+        })
+    }
+
+    fn create_playlist(&self, _: String, _: Option<String>, _: Privacy) -> BoxFut<'_, PlaylistId> {
+        Box::pin(async { Err(SourceError::NotAuthenticated) })
+    }
+    fn edit_playlist(
+        &self,
+        _: PlaylistId,
+        _: Option<String>,
+        _: Option<String>,
+        _: Option<Privacy>,
+    ) -> BoxFut<'_, ()> {
+        Box::pin(async { Err(SourceError::NotAuthenticated) })
+    }
+    fn delete_playlist(&self, _: PlaylistId) -> BoxFut<'_, ()> {
+        Box::pin(async { Err(SourceError::NotAuthenticated) })
+    }
+    fn add_tracks(&self, _: PlaylistId, _: Vec<VideoId>) -> BoxFut<'_, ()> {
+        Box::pin(async { Err(SourceError::NotAuthenticated) })
+    }
+    fn remove_tracks(&self, _: PlaylistId, _: Vec<SetVideoId>) -> BoxFut<'_, ()> {
+        Box::pin(async { Err(SourceError::NotAuthenticated) })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,6 +746,49 @@ mod tests {
                 ..Track::stub(&format!("v{i}"), "T")
             })
             .collect()
+    }
+
+    #[tokio::test]
+    #[ignore = "constructs the real upstream guest visitor token"]
+    async fn guest_source_reports_not_authenticated() {
+        let source = YtMusicSource::unauthenticated().await.unwrap();
+        assert!(!source.is_authenticated());
+    }
+
+    #[tokio::test]
+    #[ignore = "constructs the real upstream guest visitor token"]
+    async fn guest_account_methods_return_not_authenticated() {
+        let source = YtMusicSource::unauthenticated().await.unwrap();
+        for error in [
+            source.library_playlists().await.unwrap_err(),
+            source.library_songs().await.unwrap_err(),
+            source.library_albums().await.unwrap_err(),
+            source.library_artists().await.unwrap_err(),
+            source.home_shelves().await.unwrap_err(),
+            source.recommended_albums().await.unwrap_err(),
+            source
+                .create_playlist("x".into(), None, Privacy::Private)
+                .await
+                .unwrap_err(),
+            source
+                .edit_playlist(PlaylistId::from("PLx"), None, None, None)
+                .await
+                .unwrap_err(),
+            source
+                .delete_playlist(PlaylistId::from("PLx"))
+                .await
+                .unwrap_err(),
+            source
+                .add_tracks(PlaylistId::from("PLx"), vec![])
+                .await
+                .unwrap_err(),
+            source
+                .remove_tracks(PlaylistId::from("PLx"), vec![])
+                .await
+                .unwrap_err(),
+        ] {
+            assert!(matches!(error, SourceError::NotAuthenticated));
+        }
     }
 
     #[tokio::test]

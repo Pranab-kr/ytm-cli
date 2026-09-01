@@ -14,6 +14,7 @@ struct Inner {
     calls: Vec<String>,
     fail_next: Option<SourceError>,
     next_id: u32,
+    authenticated: bool,
 }
 
 #[derive(Default)]
@@ -23,6 +24,15 @@ pub struct MockSource {
 
 impl MockSource {
     pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(Inner {
+                authenticated: true,
+                ..Default::default()
+            }),
+        }
+    }
+
+    pub fn guest() -> Self {
         Self::default()
     }
 
@@ -84,6 +94,10 @@ macro_rules! mock_read {
 }
 
 impl MusicSource for MockSource {
+    fn is_authenticated(&self) -> bool {
+        self.inner.lock().unwrap().authenticated
+    }
+
     mock_read!(library_playlists, Playlist, playlists);
     mock_read!(library_songs, Track, tracks);
     mock_read!(library_albums, Album, albums);
@@ -234,6 +248,12 @@ impl MusicSource for MockSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mock_source_is_authenticated_unless_configured_as_guest() {
+        assert!(MockSource::new().is_authenticated());
+        assert!(!MockSource::guest().is_authenticated());
+    }
 
     #[tokio::test]
     async fn returns_seeded_playlists() {
