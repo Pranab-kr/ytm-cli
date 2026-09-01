@@ -13,9 +13,13 @@
 # Keybindings and the theme reload when you save and exit — no restart.
 
 [auth]
-# Browser cookies are the only auth path. (The OAuth device flow was removed:
-# Google stopped honouring device-flow tokens on the endpoints this app uses, so
-# it could never reach your library.)
+# Browser cookies are the only way to reach your own account. (The OAuth device
+# flow was removed: Google stopped honouring device-flow tokens on the endpoints
+# this app uses, so it could never reach your library.)
+#
+# They are optional. Without them the app starts in guest mode: search, the
+# queue, and playback work, while Home/Playlists/Fav/Albums/Artists and playlist
+# editing are dimmed until a cookie file is set.
 kind = "cookie"
 
 # A file holding the raw `Cookie:` request header value from a signed-in

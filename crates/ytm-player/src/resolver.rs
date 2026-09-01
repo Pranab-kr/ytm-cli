@@ -176,11 +176,7 @@ impl StreamResolver {
             // the user to browser cookies, which is not what this app needs — it
             // needs auth.cookie_file, which it may already have.
             if stderr.contains("not a bot") || stderr.contains("Sign in to confirm") {
-                return Err(ResolveError::Failed(
-                    "YouTube requires cookies to stream — set auth.cookie_file in \
-                     config.toml (see the README) and restart"
-                        .to_owned(),
-                ));
+                return Err(ResolveError::Failed(bot_check_error()));
             }
             return Err(ResolveError::Failed(
                 stderr.lines().last().unwrap_or("unknown").to_owned(),
@@ -192,6 +188,15 @@ impl StreamResolver {
             .map(str::to_owned)
             .ok_or(ResolveError::NoAudioStream)
     }
+}
+
+/// What to say when YouTube demands a sign-in before it will stream.
+///
+/// Deliberately not "YouTube requires cookies to stream": guest playback works
+/// on plenty of connections, and the old wording told those users their setup was
+/// broken. It is this connection being challenged, and cookies are the way out.
+fn bot_check_error() -> String {
+    "YouTube asked this connection to sign in before streaming; set auth.cookie_file in config.toml and restart".to_owned()
 }
 
 fn now_unix() -> i64 {
@@ -238,6 +243,14 @@ mod tests {
         r.insert_for_test(&VideoId::from("v1"), "https://example.com/a", 1_000);
         r.invalidate(&VideoId::from("v1"));
         assert!(r.cached_at(&VideoId::from("v1"), 1_001).is_none());
+    }
+
+    #[test]
+    fn bot_check_error_offers_optional_cookie_upgrade() {
+        assert_eq!(
+            bot_check_error(),
+            "YouTube asked this connection to sign in before streaming; set auth.cookie_file in config.toml and restart"
+        );
     }
 
     #[test]

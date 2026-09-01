@@ -242,9 +242,22 @@ add_to_queue = "a"
 
 ## Authentication
 
-Browser cookies. That is the only path — the OAuth device flow was removed
+Browser cookies, and they are optional — see "Without signing in" below. Cookies
+are the only way to reach your own account; the OAuth device flow was removed
 because Google stopped honouring device-flow tokens on the endpoints this app
 uses, so it could never reach your library.
+
+### Without signing in
+
+Run `ytm-cli` with no config file, or with no `auth.cookie_file`, and it starts in
+**guest mode**. You can search YouTube Music, play what you find, and use the
+queue. Home, Playlists, Fav, Albums, Artists, and playlist editing need an
+account: they are dimmed in the sidebar, and pressing `1`-`5` says so rather than
+opening an empty pane. Add a cookie file later and everything appears — nothing
+else to change.
+
+Guest playback depends on YouTube not bot-checking your IP. If it does, the app
+says so when you press Enter on a track; export cookies as below and restart.
 
 ### Use a private / incognito window
 
