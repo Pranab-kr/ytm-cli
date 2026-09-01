@@ -38,6 +38,15 @@ pub const PANE_ORDER: [Pane; 7] = [
     Pane::Queue,
 ];
 
+impl Pane {
+    pub fn requires_auth(self) -> bool {
+        matches!(
+            self,
+            Self::Home | Self::Playlists | Self::Songs | Self::Albums | Self::Artists
+        )
+    }
+}
+
 /// Home row; headings are displayed but skipped by selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HomeRow {
@@ -183,6 +192,7 @@ pub struct AppState {
     /// Edits applied locally that the server has not confirmed yet (FR-C6).
     pub pending: MutationLog,
     pub loading: bool,
+    pub guest: bool,
     pub toasts: Vec<Toast>,
     pub modal: Option<Modal>,
     pub should_quit: bool,
@@ -475,14 +485,19 @@ impl AppState {
             InputAction::NextPane | InputAction::PrevPane => {
                 let n = PANE_ORDER.len();
                 let cur = PANE_ORDER.iter().position(|p| *p == self.pane).unwrap_or(0);
-                let next = if a == InputAction::NextPane {
-                    (cur + 1) % n
-                } else {
-                    (cur + n - 1) % n
-                };
-                // Reuse the number-key path so Tab and `1`-`7` cannot disagree
-                // about where a source lands you.
-                self.goto_source(next as u8 + 1);
+                for step in 1..=n {
+                    let next = if a == InputAction::NextPane {
+                        (cur + step) % n
+                    } else {
+                        (cur + n - (step % n)) % n
+                    };
+                    if !self.guest || !PANE_ORDER[next].requires_auth() {
+                        // Reuse the number-key path so Tab and `1`-`7` cannot
+                        // disagree about where a source lands you.
+                        self.goto_source(next as u8 + 1);
+                        break;
+                    }
+                }
             }
             InputAction::ToggleVisual => self.toggle_visual(),
             InputAction::OpenHelp => self.modal = Some(Modal::Help),
@@ -1066,6 +1081,14 @@ impl AppState {
         true
     }
 
+    fn guest_refusal(&mut self, label: &str) {
+        self.push_toast(
+            ToastKind::Error,
+            &format!("sign in to use {label}: set auth.cookie_file in config.toml"),
+            self.elapsed_ms,
+        );
+    }
+
     /// Jump to the nth source; out-of-range numbers are ignored, not clamped.
     pub fn goto_source(&mut self, n: u8) {
         let Some(idx) = (n as usize).checked_sub(1) else {
@@ -1074,6 +1097,10 @@ impl AppState {
         let Some(pane) = PANE_ORDER.get(idx).copied() else {
             return;
         };
+        if self.guest && pane.requires_auth() {
+            self.guest_refusal(crate::widgets::sidebar::SOURCES[idx].1);
+            return;
+        }
         self.sidebar_selected = idx;
         self.set_pane(pane);
         // Land in the list, not on the sidebar — the number key already said
@@ -1087,6 +1114,9 @@ impl AppState {
     }
 
     pub fn set_pane(&mut self, p: Pane) {
+        if self.guest && p.requires_auth() {
+            return;
+        }
         // Artists borrows Search's query buffer, so restore it when leaving.
         if self.pane == Pane::Artists && p != Pane::Artists {
             self.close_artist_search();
@@ -1354,6 +1384,50 @@ impl AppState {
 mod tests {
     use super::*;
     use ytm_core::{Playlist, Track};
+
+    #[test]
+    fn guest_cannot_open_an_account_pane() {
+        let mut state = AppState {
+            guest: true,
+            pane: Pane::Search,
+            sidebar_selected: 5,
+            ..Default::default()
+        };
+        state.goto_source(2);
+        assert_eq!(state.pane, Pane::Search);
+        assert_eq!(state.sidebar_selected, 5);
+        assert_eq!(
+            state.toasts.last().unwrap().text,
+            "sign in to use Playlists: set auth.cookie_file in config.toml"
+        );
+    }
+
+    #[test]
+    fn guest_can_open_search_and_queue() {
+        let mut state = AppState {
+            guest: true,
+            ..Default::default()
+        };
+        state.goto_source(6);
+        assert_eq!(state.pane, Pane::Search);
+        state.goto_source(7);
+        assert_eq!(state.pane, Pane::Queue);
+    }
+
+    #[test]
+    fn guest_tab_cycles_only_between_search_and_queue() {
+        let mut state = AppState {
+            guest: true,
+            pane: Pane::Search,
+            ..Default::default()
+        };
+        state.apply_input(InputAction::NextPane);
+        assert_eq!(state.pane, Pane::Queue);
+        state.apply_input(InputAction::NextPane);
+        assert_eq!(state.pane, Pane::Search);
+        state.apply_input(InputAction::PrevPane);
+        assert_eq!(state.pane, Pane::Queue);
+    }
 
     #[test]
     fn starts_focused_on_the_sidebar_with_nothing_loaded() {

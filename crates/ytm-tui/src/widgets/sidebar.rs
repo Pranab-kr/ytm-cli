@@ -71,6 +71,25 @@ pub fn source_at_row(row: usize) -> Option<usize> {
 /// one digit, and a trailing space.
 const PREFIX_WIDTH: usize = 3;
 
+/// The label colour for one source row.
+///
+/// A guest cannot enter the account panes, so they read as dimmed rather than
+/// selectable. Everything else keeps the existing active/inactive contrast.
+pub fn source_label_color(
+    pane: Pane,
+    active: bool,
+    s: &AppState,
+    t: &Theme,
+) -> ratatui::style::Color {
+    if s.guest && pane.requires_auth() {
+        t.fg_dim
+    } else if active {
+        t.fg_bright
+    } else {
+        t.fg
+    }
+}
+
 pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -94,7 +113,7 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
                 let on_cursor = selected && s.focus == Focus::Sidebar;
                 let bg = |st: Style| if on_cursor { st.bg(t.bg_sel) } else { st };
 
-                let mut label_style = Style::default().fg(if active { t.fg_bright } else { t.fg });
+                let mut label_style = Style::default().fg(source_label_color(pane, active, s, t));
                 if active {
                     label_style = label_style.add_modifier(Modifier::BOLD);
                 }
@@ -121,6 +140,39 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_account_source_style_is_dim() {
+        let theme = Theme::default();
+        let state = AppState {
+            guest: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            source_label_color(Pane::Playlists, false, &state, &theme),
+            theme.fg_dim,
+            "an account pane a guest cannot enter reads as dimmed"
+        );
+        assert_eq!(
+            source_label_color(Pane::Search, false, &state, &theme),
+            theme.fg,
+            "Search stays available to a guest"
+        );
+    }
+
+    #[test]
+    fn signed_in_sources_keep_their_normal_contrast() {
+        let theme = Theme::default();
+        let state = AppState::default();
+        assert_eq!(
+            source_label_color(Pane::Playlists, true, &state, &theme),
+            theme.fg_bright
+        );
+        assert_eq!(
+            source_label_color(Pane::Playlists, false, &state, &theme),
+            theme.fg
+        );
+    }
 
     #[test]
     fn the_number_keys_match_the_order_the_sidebar_renders() {
