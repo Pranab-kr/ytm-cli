@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use ytm_core::MusicSource;
 use ytm_player::player::{Player, PlayerCommand};
 use ytm_tui::{
-    app::{AppState, ConfirmAction, Modal, Pane, PromptAction, ToastKind},
+    app::{AppState, ConfirmAction, Focus, Modal, Pane, PromptAction, ToastKind},
     event::{AppEvent, InputAction},
     keymap::KeyMap,
     mutation::Mutation,
@@ -134,6 +134,36 @@ const VOLUME_STEP: i64 = 5;
 /// moment there is nothing to fetch with. Actions that need the network are
 /// declined with a toast rather than queued: replaying them seconds later would
 /// fire requests the user has already moved on from.
+/// What a guest is told at startup, and again if a cookie turns out to be dead.
+pub const GUEST_NOTICE: &str =
+    "guest mode — search and queue are available; set auth.cookie_file for your library";
+
+/// Settle the UI against what the source can actually do.
+///
+/// Called when the handshake returns, which is the only moment an *expired*
+/// cookie becomes visible: YouTube answers one with HTTP 200, so the config
+/// looked fine and `run_tui` started on a library pane. Left alone, that pane
+/// would sit there permanently empty, showing rows from the cache that belong to
+/// an account this session cannot reach.
+fn source_ready(state: &mut AppState, authenticated: bool) {
+    state.guest = !authenticated;
+    if !state.guest || !state.pane.requires_auth() {
+        return;
+    }
+    // Cleared before the pane changes: these came from the cache, and they are
+    // another account's rows as far as this session is concerned (FR-G9).
+    state.playlists.clear();
+    state.tracks.clear();
+    state.albums.clear();
+    state.artists.clear();
+    state.home_rows.clear();
+    state.open_playlist = None;
+    state.pane = Pane::Search;
+    state.sidebar_selected = 5;
+    state.focus = Focus::SearchInput;
+    state.push_toast(ToastKind::Info, GUEST_NOTICE, state.elapsed_ms);
+}
+
 fn try_spawn(
     task: Task,
     source: &Option<Arc<dyn MusicSource>>,
@@ -1253,6 +1283,10 @@ pub async fn run(
                 pending_first_fetch = false;
                 match built {
                     Ok(src) => {
+                        // Before `pane_task`: a guest on a library pane is moved
+                        // to Search first, so the task started is Search's and
+                        // not a library fetch that can only fail.
+                        source_ready(&mut state, src.is_authenticated());
                         // The starting pane's rows, now that there is something to
                         // fetch them with.
                         if let Some(task) = pane_task(state.pane) {
@@ -1547,6 +1581,51 @@ mod tests {
     fn deps() -> (Arc<MockSource>, Arc<MockPlayer>) {
         let (p, _rx) = MockPlayer::new();
         (Arc::new(MockSource::new()), Arc::new(p))
+    }
+
+    #[test]
+    fn unauthenticated_source_ready_redirects_locked_pane_to_search() {
+        let mut state = AppState {
+            pane: Pane::Playlists,
+            sidebar_selected: 1,
+            playlists: vec![ytm_core::Playlist::stub("p1", "Cached")],
+            ..Default::default()
+        };
+        source_ready(&mut state, false);
+        assert!(state.guest);
+        assert_eq!(state.pane, Pane::Search);
+        assert_eq!(state.sidebar_selected, 5);
+        assert_eq!(state.focus, Focus::SearchInput);
+        assert!(
+            state.playlists.is_empty(),
+            "cached account rows must not survive into guest mode"
+        );
+    }
+
+    #[test]
+    fn authenticated_source_ready_preserves_selected_pane() {
+        let mut state = AppState {
+            pane: Pane::Playlists,
+            sidebar_selected: 1,
+            ..Default::default()
+        };
+        source_ready(&mut state, true);
+        assert!(!state.guest);
+        assert_eq!(state.pane, Pane::Playlists);
+    }
+
+    #[test]
+    fn a_guest_already_on_search_is_not_told_twice() {
+        // `run_tui` shows the notice when it starts a guest on Search; repeating
+        // it here would stack two identical toasts on the first frame.
+        let mut state = AppState {
+            pane: Pane::Search,
+            sidebar_selected: 5,
+            ..Default::default()
+        };
+        source_ready(&mut state, false);
+        assert!(state.guest);
+        assert!(state.toasts.is_empty());
     }
 
     #[test]

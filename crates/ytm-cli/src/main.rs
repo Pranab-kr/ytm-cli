@@ -89,7 +89,9 @@ fn expand_tilde(p: &std::path::Path) -> std::path::PathBuf {
 /// device-flow tokens on the InnerTube endpoints this app uses, so it could never
 /// reach the library. `AuthKind::OAuth` still parses so an old config loads, and
 /// says so rather than failing obscurely.
-async fn build_source(cfg: &config::Config) -> color_eyre::Result<Arc<dyn MusicSource>> {
+async fn build_authenticated_source(
+    cfg: &config::Config,
+) -> color_eyre::Result<Arc<dyn MusicSource>> {
     use ytm_core::ytmusic::YtMusicSource;
 
     if cfg.auth.kind == config::AuthKind::OAuth {
@@ -122,6 +124,44 @@ async fn build_source(cfg: &config::Config) -> color_eyre::Result<Arc<dyn MusicS
             )
         })?;
     Ok(Arc::new(source))
+}
+
+/// The TUI's source: cookies when they work, otherwise a guest session.
+///
+/// A missing or stale cookie file is no longer fatal — search, the queue, and
+/// playback all work unauthenticated, so the app opens and says what is
+/// unavailable rather than refusing to start. `auth.kind = "oauth"` is still an
+/// error: it names a path that cannot work at all.
+async fn build_source_or_guest(cfg: &config::Config) -> color_eyre::Result<Arc<dyn MusicSource>> {
+    if cfg.auth.kind == config::AuthKind::OAuth {
+        return build_authenticated_source(cfg).await;
+    }
+    match build_authenticated_source(cfg).await {
+        Ok(source) => Ok(source),
+        Err(error) => {
+            // The error itself, not the cookie contents.
+            tracing::warn!(error = %error, "cookie auth unavailable; starting guest mode");
+            Ok(Arc::new(
+                ytm_core::ytmusic::YtMusicSource::unauthenticated().await?,
+            ))
+        }
+    }
+}
+
+/// Whether the first frame should already be a guest's.
+///
+/// Answered from the config alone, before anything touches the network, because
+/// the start pane and the cache preload are both chosen before the source
+/// exists. An expired cookie cannot be seen from here — `source_ready` catches
+/// that case when the handshake comes back.
+fn guest_startup(cfg: &config::Config) -> bool {
+    cfg.auth.kind == config::AuthKind::Cookie
+        && cfg
+            .auth
+            .cookie_file
+            .as_deref()
+            .map(expand_tilde)
+            .is_none_or(|path| !path.is_file())
 }
 
 /// Theme from config: an explicit file wins, otherwise just the accent override.
@@ -192,7 +232,7 @@ pub enum CacheAction {
 /// business.
 /// One playlist title per line — the fastest auth check there is, and scriptable.
 async fn run_playlists(cfg: &config::Config) -> color_eyre::Result<()> {
-    let source = build_source(cfg).await?;
+    let source = build_authenticated_source(cfg).await?;
     let playlists = source.library_playlists().await?;
     if playlists.is_empty() {
         // Same trap as the TUI's empty-library hint: an expired cookie answers
@@ -616,27 +656,63 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
     let volume = cfg.playback.volume.min(100) as u8;
     let (theme, theme_name) = build_theme(&cfg)?;
 
+    // Decided before the first frame: the start pane, the cache preload, and
+    // whether yt-dlp gets cookies all depend on it, and all three happen before
+    // the source's handshake returns.
+    let guest = guest_startup(&cfg);
+
     // Fails cleanly here rather than mid-frame if libmpv is missing.
     // The same cookie file the API uses: yt-dlp needs cookies too, or YouTube
-    // answers every stream request with its bot check.
-    let cookie_file = cfg.auth.cookie_file.clone();
+    // answers every stream request with its bot check. A guest has none to give;
+    // yt-dlp then runs bare, which works unless YouTube bot-checks the IP.
+    let cookie_file = if guest {
+        None
+    } else {
+        cfg.auth.cookie_file.clone()
+    };
     let (player, player_events) = ytm_player::actor::spawn_player(volume, cookie_file)?;
 
+    // A guest cannot enter the account panes, so `ui.start_pane` would strand
+    // them on an empty one. Search is where they can actually do something.
+    let start_pane = if guest {
+        ytm_tui::app::Pane::Search
+    } else {
+        cfg.ui.start_pane.pane()
+    };
     let mut state = AppState {
         volume,
         shuffle: cfg.playback.shuffle,
+        guest,
         // Playlists by default rather than Home: your own playlists are what
         // most sessions start from, and Home costs a multi-page fetch before the
         // first useful frame. `ui.start_pane` changes it.
-        pane: cfg.ui.start_pane.pane(),
+        pane: start_pane,
         sidebar_selected: ytm_tui::app::PANE_ORDER
             .iter()
-            .position(|p| *p == cfg.ui.start_pane.pane())
+            .position(|p| *p == start_pane)
             .unwrap_or(0),
+        focus: if guest {
+            // Straight into the query field: typing is the first useful thing a
+            // guest can do.
+            ytm_tui::app::Focus::SearchInput
+        } else {
+            ytm_tui::app::Focus::default()
+        },
         ..Default::default()
     };
-    if let Some(c) = cache.as_ref() {
+    // Skipped for a guest: the cache holds the previous session's library, and
+    // those rows belong to panes a guest cannot open (FR-G9).
+    if let Some(c) = cache.as_ref()
+        && !guest
+    {
         app_loop::preload_from_cache(c, &mut state);
+    }
+    if guest {
+        state.push_toast(
+            ytm_tui::app::ToastKind::Info,
+            app_loop::GUEST_NOTICE,
+            state.elapsed_ms,
+        );
     }
 
     install_panic_hook();
@@ -683,7 +759,7 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
     // frame already on screen: keys went into the terminal's buffer and all fired
     // at once when it returned. The loop awaits this concurrently with input, so
     // navigation works from the first frame.
-    let source_fut = build_source(&cfg);
+    let source_fut = build_source_or_guest(&cfg);
     let result = app_loop::run(
         &mut guard.terminal,
         state,
@@ -693,7 +769,9 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
         keymap,
         theme,
         cfg.ui.tick_ms,
-        cfg.auth.kind == config::AuthKind::Cookie,
+        // The empty-library hint is about an expired cookie, so it only applies
+        // when there was a cookie to expire.
+        cfg.auth.kind == config::AuthKind::Cookie && !guest,
         cache,
         art,
         media,
@@ -713,6 +791,33 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn absent_cookie_starts_the_tui_in_guest_search() {
+        let cfg = config::Config::default();
+        assert!(guest_startup(&cfg));
+    }
+
+    #[test]
+    fn configured_cookie_keeps_the_normal_startup_path() {
+        // A file that really exists: the check is about reachability, not the
+        // presence of a config key that may point at nothing.
+        let dir = std::env::temp_dir().join("ytm-cli-guest-startup-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cookies.txt");
+        std::fs::write(&path, "SAPISID=example").unwrap();
+        let mut cfg = config::Config::default();
+        cfg.auth.cookie_file = Some(path.clone());
+        assert!(!guest_startup(&cfg));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_cookie_path_that_does_not_exist_still_starts_as_a_guest() {
+        let mut cfg = config::Config::default();
+        cfg.auth.cookie_file = Some("/nonexistent/ytm-cli/cookies.txt".into());
+        assert!(guest_startup(&cfg));
+    }
 
     #[test]
     fn no_arguments_launches_the_tui() {
