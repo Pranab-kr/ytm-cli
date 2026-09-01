@@ -52,6 +52,16 @@ against YouTube's Terms of Service, whether or not you pay for Premium.** It is
 built as a personal tool for a single account. There is no telemetry and nothing
 leaves your machine. Use it knowing that, or don't use it.
 
+### Educational-use declaration
+
+This project is provided for educational and personal-use purposes: learning
+about Rust, terminal user interfaces, media playback, and API integration. It is
+not built or intended to bypass access controls, abuse YouTube's services,
+infringe copyright, collect user data, or enable commercial exploitation. Users
+are responsible for complying with applicable laws, YouTube's Terms of Service,
+and the rights of content owners. The maintainers do not encourage or accept
+responsibility for misuse of this software.
+
 ## Requirements
 
 | What | Version verified | Why |
