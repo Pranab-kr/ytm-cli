@@ -249,8 +249,8 @@ so the export keeps working for far longer.
 4. **Hold Shift and click the reload button.** Without this the request list is
    often served from cache and shows no `Cookie:` header at all — this is the
    step people get stuck on.
-5. Click any request to `/youtubei/v1/...`, find **Request Headers**, and copy
-   the **entire value** of the `Cookie:` header.
+5. Select the `music.youtube.com` request in the **Name** column, open
+   **Request Headers**, and copy the **entire value** of the `Cookie:` header.
 6. Paste it into a file, e.g. `~/.config/ytm-cli/cookies.txt`.
 7. **Close the private window — do not sign out.** Signing out invalidates the
    session you just exported. Closing it leaves the cookies valid.
