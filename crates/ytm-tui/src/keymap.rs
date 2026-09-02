@@ -20,7 +20,17 @@ pub enum Pending {
 }
 
 impl Default for KeyMap {
+    /// `ui.vim_keys` defaults to true.
     fn default() -> Self {
+        Self::new(true)
+    }
+}
+
+impl KeyMap {
+    /// The built-in bindings. `vim_keys = false` drops `h`/`j`/`k`/`l`, leaving
+    /// the arrow keys to navigate; `g`/`G` stay Home/End, and `J`/`K` stay
+    /// MoveEntryDown/Up since those are not navigation.
+    pub fn new(vim_keys: bool) -> Self {
         let mut chars = HashMap::new();
         for (c, a) in [
             ('j', InputAction::Down),
@@ -64,6 +74,11 @@ impl Default for KeyMap {
             ('L', InputAction::Refresh),
         ] {
             chars.insert(c, a);
+        }
+        if !vim_keys {
+            for c in ['h', 'j', 'k', 'l'] {
+                chars.remove(&c);
+            }
         }
         Self { chars }
     }
@@ -191,8 +206,15 @@ impl KeyMap {
     /// Override defaults from `[keys]` in config. Key names are snake_case
     /// action names; values are single characters.
     pub fn from_toml_str(s: &str) -> Result<Self, toml::de::Error> {
+        Self::from_toml_str_with(s, true)
+    }
+
+    /// `[keys]` applied on top of the built-in map. Overrides run *after* the
+    /// vim-key removal, so `down = "j"` with `vim_keys = false` still binds `j` —
+    /// the explicit instruction is the more specific one.
+    pub fn from_toml_str_with(s: &str, vim_keys: bool) -> Result<Self, toml::de::Error> {
         let table: HashMap<String, String> = toml::from_str(s)?;
-        let mut m = Self::default();
+        let mut m = Self::new(vim_keys);
         for (action_name, ch) in table {
             let Some(c) = ch.chars().next() else { continue };
             if let Some(action) = action_from_name(&action_name) {
@@ -311,6 +333,76 @@ mod tests {
 
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn vim_keys_off_unbinds_hjkl_but_leaves_the_arrows() {
+        let m = KeyMap::new(false);
+        for ch in ['h', 'j', 'k', 'l'] {
+            assert_eq!(
+                m.resolve(key(ch), Focus::Main),
+                None,
+                "{ch} must be unbound when ui.vim_keys = false"
+            );
+        }
+        assert_eq!(
+            m.resolve(
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                Focus::Main
+            ),
+            Some(InputAction::Down),
+            "the arrow keys are how you navigate without vim keys"
+        );
+        assert_eq!(
+            m.resolve(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), Focus::Main),
+            Some(InputAction::Up)
+        );
+    }
+
+    #[test]
+    fn vim_keys_off_leaves_g_and_the_other_letters_alone() {
+        // Owner decision: h/j/k/l only. g/G stay Home/End.
+        let m = KeyMap::new(false);
+        assert_eq!(m.resolve(key('g'), Focus::Main), Some(InputAction::Home));
+        assert_eq!(m.resolve(key('G'), Focus::Main), Some(InputAction::End));
+        // And nothing else was collateral damage.
+        assert_eq!(m.resolve(key('q'), Focus::Main), Some(InputAction::Quit));
+        assert_eq!(
+            m.resolve(key('s'), Focus::Main),
+            Some(InputAction::ToggleShuffle)
+        );
+        // J/K are MoveEntryDown/Up, not navigation — they must survive.
+        assert_eq!(
+            m.resolve(key('J'), Focus::Main),
+            Some(InputAction::MoveEntryDown)
+        );
+        assert_eq!(
+            m.resolve(key('K'), Focus::Main),
+            Some(InputAction::MoveEntryUp)
+        );
+    }
+
+    #[test]
+    fn default_still_means_vim_keys_on() {
+        let m = KeyMap::default();
+        assert_eq!(
+            m.resolve(key('j'), Focus::Main),
+            Some(InputAction::Down),
+            "vim_keys defaults to true; default() must not change meaning"
+        );
+    }
+
+    #[test]
+    fn an_explicit_rebind_wins_over_vim_keys_off() {
+        // The user turned vim keys off and then deliberately bound j. The
+        // explicit binding is the more specific instruction.
+        let m = KeyMap::from_toml_str_with(r#"down = "j""#, false).unwrap();
+        assert_eq!(m.resolve(key('j'), Focus::Main), Some(InputAction::Down));
+        assert_eq!(
+            m.resolve(key('k'), Focus::Main),
+            None,
+            "k was not rebound, so it stays unbound"
+        );
     }
 
     #[test]

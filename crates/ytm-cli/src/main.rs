@@ -725,9 +725,9 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
     // Built from `[keys]` so a rebind applies on the first frame, not after a
     // reload. An unparseable table is reported rather than silently ignored.
     let keymap = if cfg.keys.is_empty() {
-        KeyMap::default()
+        KeyMap::new(cfg.ui.vim_keys)
     } else {
-        KeyMap::from_toml_str(&toml::to_string(&cfg.keys)?)?
+        KeyMap::from_toml_str_with(&toml::to_string(&cfg.keys)?, cfg.ui.vim_keys)?
     };
     // The pre-probe frame cannot draw art: the picker does not exist yet.
     let mut art_probe = ytm_tui::widgets::art::ArtCache::disabled();

@@ -103,7 +103,7 @@ pub fn edit_config_in_editor(
 pub fn reload_config(text: &str) -> color_eyre::Result<ReloadedConfig> {
     let cfg = crate::config::Config::from_toml_str(text)?;
     let keys_toml = toml::to_string(&cfg.keys)?;
-    let keymap = KeyMap::from_toml_str(&keys_toml)?;
+    let keymap = KeyMap::from_toml_str_with(&keys_toml, cfg.ui.vim_keys)?;
     let (theme, theme_name) = crate::config::resolve_theme(&cfg)?;
     Ok(ReloadedConfig {
         keymap,
