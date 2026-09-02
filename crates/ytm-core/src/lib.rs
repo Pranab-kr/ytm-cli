@@ -15,4 +15,5 @@ pub mod mapping;
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
 pub mod playlist_raw;
+pub mod search_raw;
 pub mod ytmusic;

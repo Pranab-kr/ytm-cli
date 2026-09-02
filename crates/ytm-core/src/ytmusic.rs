@@ -8,6 +8,7 @@ use ytmapi_rs::auth::{AuthToken, BrowserToken, LoggedIn};
 use ytmapi_rs::common::{ApiOutcome, YoutubeID};
 use ytmapi_rs::parse::SearchResultPlaylist;
 use ytmapi_rs::query::playlist::PrivacyStatus;
+use ytmapi_rs::query::search::{FilteredSearch, SearchQuery, SongsFilter};
 use ytmapi_rs::query::{CreatePlaylistQuery, EditPlaylistQuery};
 
 /// Generic over the token type, though cookie auth is the only one left: the
@@ -69,6 +70,28 @@ where
     }
     .parse_into()
     .map_err(classify)
+}
+
+/// The one song-search path, shared by the authenticated and the guest source.
+///
+/// This exists because `ytmapi-rs` 0.3.3's typed `search_songs` mistakes a UGC
+/// music video's `artist • 43K views • 3:26` byline for `artist • album •
+/// duration`, demands an album `browseId` the view-count run does not carry, and
+/// aborts the *entire* response on that one row (PROGRESS.md 2026-09-02). We
+/// send the same filtered query through `raw_json_query` and let `search_raw`
+/// parse each row independently, so a single odd row cannot erase its neighbours.
+async fn song_search_from_raw<A: AuthToken>(
+    api: &YtMusic<A>,
+    query: &str,
+) -> Result<Vec<Track>, SourceError> {
+    // The query owns its text (Cow::Owned), so it can be 'static — pinned so the
+    // turbofish below has a concrete type; `impl Borrow<Q>` cannot infer it.
+    let q: SearchQuery<'static, FilteredSearch<SongsFilter>> = SearchQuery::from(query.to_owned());
+    let json = api
+        .raw_json_query::<SearchQuery<'static, FilteredSearch<SongsFilter>>>(&q)
+        .await
+        .map_err(classify)?;
+    Ok(crate::search_raw::tracks_from_raw(&json))
 }
 
 /// YouTube answers a mutation with an outcome rather than an HTTP error, so a
@@ -402,14 +425,7 @@ macro_rules! impl_music_source {
             }
 
             fn search_songs(&self, query: String) -> BoxFut<'_, Vec<Track>> {
-                Box::pin(async move {
-                    let raw = self
-                        .api
-                        .search_songs(query.as_str())
-                        .await
-                        .map_err(classify)?;
-                    Ok(raw.iter().map(mapping::track_from_search_song).collect())
-                })
+                Box::pin(async move { song_search_from_raw(&self.api, &query).await })
             }
 
             fn search_albums(&self, query: String) -> BoxFut<'_, Vec<Album>> {
@@ -660,14 +676,7 @@ impl MusicSource for YtMusicSource<NoAuthToken> {
     }
 
     fn search_songs(&self, query: String) -> BoxFut<'_, Vec<Track>> {
-        Box::pin(async move {
-            let raw = self
-                .api
-                .search_songs(query.as_str())
-                .await
-                .map_err(classify)?;
-            Ok(raw.iter().map(mapping::track_from_search_song).collect())
-        })
+        Box::pin(async move { song_search_from_raw(&self.api, &query).await })
     }
     fn search_albums(&self, query: String) -> BoxFut<'_, Vec<Album>> {
         Box::pin(async move {
@@ -793,15 +802,41 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "live InnerTube guest-search gate; run by hand"]
-    async fn unauthenticated_search_returns_songs() {
-        let api = ytmapi_rs::YtMusic::new_unauthenticated()
+    async fn guest_song_search_returns_tracks() {
+        // Exercises the real guest path: the source's search_songs, which now
+        // runs raw_json_query through search_raw rather than upstream's typed
+        // parser. "freak" is the query whose UGC view-count rows used to abort
+        // the whole response.
+        let source = YtMusicSource::unauthenticated()
             .await
             .expect("guest handshake succeeds");
-        let songs = api
-            .search_songs("Daft Punk One More Time")
+        let tracks = source
+            .search_songs("freak".into())
             .await
             .expect("guest search succeeds");
-        assert!(!songs.is_empty(), "guest search returned no songs");
+        assert!(!tracks.is_empty(), "guest search returned no tracks");
+    }
+
+    #[test]
+    fn the_typed_parser_the_bug_was_in_aborts_where_our_raw_parser_recovers() {
+        // Locks the regression to the fixture without touching the network: the
+        // scrubbed capture below is exactly the shape upstream could not parse,
+        // so ytmapi-rs's typed search must still reject it — if this stops
+        // failing, the fixture no longer reproduces the 2026-09-02 bug. Ours must
+        // keep the three usable songs.
+        let json = include_str!("../tests/fixtures/search_songs_ugc.json");
+        let query = SearchQuery::<FilteredSearch<SongsFilter>>::from("freak");
+        let typed =
+            parse_json::<_, Vec<ytmapi_rs::parse::SearchResultSong>>(&query, json.to_owned());
+        assert!(
+            typed.is_err(),
+            "upstream mistakes the UGC view-count byline for an album and aborts the response"
+        );
+        assert_eq!(
+            crate::search_raw::tracks_from_raw(json).len(),
+            3,
+            "our raw parser keeps the usable songs the typed parser erased"
+        );
     }
 
     #[test]
