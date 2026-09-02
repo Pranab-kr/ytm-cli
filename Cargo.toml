@@ -34,7 +34,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2.5"
 directories = "6.0.0"
 unicode-width = "0.2.2"
-chrono = { version = "0.4", features = ["serde"] }
 
 # Release binaries are for other people's machines, so size and speed matter
 # more than a fast rebuild here.

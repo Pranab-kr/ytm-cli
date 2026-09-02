@@ -10,8 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 ytm-core = { path = "../ytm-core" }
-# `ytm login` needs ytmapi_rs::Client, which is what begin_device_login takes.
-ytmapi-rs.workspace = true
 ytm-player = { path = "../ytm-player" }
 ytm-tui = { path = "../ytm-tui" }
 clap.workspace = true

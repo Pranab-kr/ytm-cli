@@ -4430,16 +4430,13 @@ dependencies = [
  "ytm-core",
  "ytm-player",
  "ytm-tui",
- "ytmapi-rs",
 ]
 
 [[package]]
 name = "ytm-core"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "directories",
- "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
@@ -4459,7 +4456,6 @@ dependencies = [
  "rand 0.9.5",
  "thiserror 2.0.20",
  "tokio",
- "tracing",
  "ytm-core",
 ]
 
