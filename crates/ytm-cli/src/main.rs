@@ -22,12 +22,9 @@ pub struct TerminalGuard {
 }
 
 impl TerminalGuard {
-    /// `mouse` follows `ui.mouse`.
-    ///
-    /// Off is a real preference, not a nicety: while capture is on, the terminal
-    /// hands us the clicks and drags it would otherwise use for its own text
-    /// selection, so anyone who selects text out of the app more than they scroll
-    /// wants it disabled.
+    /// `mouse` follows `ui.mouse`. Off is a real preference: while capture is on,
+    /// the terminal hands us the clicks and drags it would otherwise use for its
+    /// own text selection.
     pub fn new(mouse: bool) -> io::Result<Self> {
         enable_raw_mode()?;
         let mut out = io::stdout();
@@ -70,14 +67,9 @@ fn install_panic_hook() {
     }));
 }
 
-/// Build whichever `MusicSource` config selects.
-///
-/// Browser cookies are the only auth path.
-///
-/// The OAuth device flow was removed on 2026-08-31: Google stopped honouring
-/// device-flow tokens on the InnerTube endpoints this app uses, so it could never
-/// reach the library. `AuthKind::OAuth` still parses so an old config loads, and
-/// says so rather than failing obscurely.
+/// Build whichever `MusicSource` config selects — browser cookies are the only
+/// working auth path. The OAuth device flow was removed on 2026-08-31 (Google
+/// stopped honouring those tokens on InnerTube); `AuthKind::OAuth` still parses.
 async fn build_authenticated_source(
     cfg: &config::Config,
 ) -> color_eyre::Result<Arc<dyn MusicSource>> {
@@ -115,12 +107,9 @@ async fn build_authenticated_source(
     Ok(Arc::new(source))
 }
 
-/// The TUI's source: cookies when they work, otherwise a guest session.
-///
-/// A missing or stale cookie file is no longer fatal — search, the queue, and
-/// playback all work unauthenticated, so the app opens and says what is
-/// unavailable rather than refusing to start. `auth.kind = "oauth"` is still an
-/// error: it names a path that cannot work at all.
+/// The TUI's source: cookies when they work, otherwise a guest session. A missing
+/// or stale cookie is no longer fatal — search, queue, and playback work without
+/// auth; `auth.kind = "oauth"` remains an error because that path cannot work.
 async fn build_source_or_guest(cfg: &config::Config) -> color_eyre::Result<Arc<dyn MusicSource>> {
     if cfg.auth.kind == config::AuthKind::OAuth {
         return build_authenticated_source(cfg).await;
@@ -137,12 +126,9 @@ async fn build_source_or_guest(cfg: &config::Config) -> color_eyre::Result<Arc<d
     }
 }
 
-/// Whether the first frame should already be a guest's.
-///
-/// Answered from the config alone, before anything touches the network, because
-/// the start pane and the cache preload are both chosen before the source
-/// exists. An expired cookie cannot be seen from here — `source_ready` catches
-/// that case when the handshake comes back.
+/// Whether the first frame should already be a guest's. Answered from config alone,
+/// because the start pane and cache preload are chosen before the source exists.
+/// An expired cookie is invisible here — `source_ready` catches that later.
 fn guest_startup(cfg: &config::Config) -> bool {
     cfg.auth.kind == config::AuthKind::Cookie
         && cfg
@@ -199,9 +185,6 @@ pub enum CacheAction {
     Clear,
 }
 
-/// Forget the stored token. Deliberately does not touch the cookie file: that
-/// is the user's own export, and deleting someone's file is not this command's
-/// business.
 /// One playlist title per line — the fastest auth check there is, and scriptable.
 async fn run_playlists(cfg: &config::Config) -> color_eyre::Result<()> {
     let source = build_authenticated_source(cfg).await?;
@@ -229,12 +212,9 @@ struct ExampleSection {
     text: String,
 }
 
-/// Split `EXAMPLE_TOML` into its top-level sections.
-///
-/// Comment lines directly above a header travel with it — that is where the
-/// example says what the section is for, and appending bare keys without their
-/// documented defaults would defeat the point of the command. A blank line ends
-/// the run, which is what keeps the file's own header comment out of `[auth]`.
+/// Split `EXAMPLE_TOML` into its top-level sections. Comment lines directly above a
+/// header travel with it — that is where the example says what the section is for.
+/// A blank line ends the run, keeping the file's own header out of `[auth]`.
 fn example_sections() -> Vec<ExampleSection> {
     let lines: Vec<&str> = config::EXAMPLE_TOML.lines().collect();
 
@@ -297,12 +277,8 @@ struct ExampleEntry {
 }
 
 /// The settings of one example section, in the order the example lists them.
-///
-/// The definition is commented out because this text goes into a section the
-/// user has already written: their omissions look deliberate, so the default is
-/// documented where they can see and uncomment it rather than pinned into their
-/// file. A whole absent section is different — it is appended verbatim, in the
-/// example's own form.
+/// Commented out, because this goes into a section the user already wrote: their
+/// omissions look deliberate. A wholly absent section is appended verbatim instead.
 fn example_entries(section: &ExampleSection) -> Vec<ExampleEntry> {
     let header = format!("[{}]", section.name);
     let mut body = section.text.lines().skip_while(|l| l.trim() != header);
@@ -339,11 +315,9 @@ fn example_entries(section: &ExampleSection) -> Vec<ExampleEntry> {
     out
 }
 
-/// Put `entries` at the end of `section`'s existing block.
-///
-/// They have to land under the header they belong to: TOML forbids a second
-/// `[ui]`, so appending them to the file would attach them to whichever section
-/// happens to be last.
+/// Put `entries` at the end of `section`'s existing block. They have to land under
+/// the header they belong to: TOML forbids a second `[ui]`, so appending to the end
+/// of the file would attach them to whichever section happens to be last.
 fn insert_into_section(text: &str, section: &str, entries: &[ExampleEntry]) -> Option<String> {
     let header = format!("[{section}]");
     let lines: Vec<&str> = text.lines().collect();
@@ -378,12 +352,9 @@ struct Gaps {
     partial: Vec<(String, Vec<ExampleEntry>)>,
 }
 
-/// Compare an existing config against the bundled example.
-///
-/// `None` means the file does not parse, which is a different report — nothing
-/// in it is in effect at all. Both halves are derived from `EXAMPLE_TOML` rather
-/// than a hand-written list, so neither can drift from it the way the README
-/// drifted from the code.
+/// Compare an existing config against the bundled example. `None` means the file
+/// does not parse, which is a different report. Both halves derive from
+/// `EXAMPLE_TOML`, so neither can drift from it the way the README did.
 fn gaps(text: &str) -> Option<Gaps> {
     let have: toml::Table = text.parse().ok()?;
     let want: toml::Table = config::EXAMPLE_TOML
@@ -404,10 +375,9 @@ fn gaps(text: &str) -> Option<Gaps> {
         let Some(theirs) = want.get(&section.name).and_then(toml::Value::as_table) else {
             continue;
         };
-        // A key this command already wrote is commented out, so it is absent
-        // from `mine` — matching on the parsed table alone would append it again
-        // on every run until the file no longer parsed. The raw lines are what
-        // say whether the default is already there to uncomment.
+        // A key this command already wrote is commented out, so it is absent from
+        // the parsed table — matching on that alone re-appended it every run. The
+        // raw lines say whether the default is already there to uncomment.
         let mentioned: Vec<&str> = section_body(text, &section.name)
             .into_iter()
             .filter_map(toml_key_of)
@@ -427,20 +397,9 @@ fn gaps(text: &str) -> Option<Gaps> {
     Some(g)
 }
 
-/// Bring an existing config up to the documented example.
-///
-/// The promise `ytm config` makes is that the file carries every setting and
-/// every binding at its default, so changing one is uncommenting a line. That
-/// held only for a file that did not exist yet: an existing one was opened as it
-/// was, so a config written before a setting existed stayed permanently without
-/// it — no `[keys]` section at all, every binding at a default the user could
-/// not see in the file they had just been handed.
-///
-/// Their own lines are never touched. Absent sections are appended in the
-/// example's own form; settings absent from a section they wrote go into it
-/// commented out, so what the file *does* is unchanged either way. The result is
-/// parsed before it is written — handing back a config that no longer loads
-/// would be worse than the gap it closed.
+/// Bring an existing config up to the documented example: preserve user lines,
+/// append absent sections verbatim, and add missing settings as comments under
+/// their existing headers. Parse the result before writing it.
 fn top_up(path: &std::path::Path) -> color_eyre::Result<()> {
     let text = std::fs::read_to_string(path)?;
     let Some(g) = gaps(&text) else {
@@ -492,16 +451,9 @@ fn top_up(path: &std::path::Path) -> color_eyre::Result<()> {
     Ok(())
 }
 
-/// Write the documented config and open it in `$EDITOR` (FR-U9).
-///
-/// The point is that nothing has to be written by hand: the file that lands
-/// carries every setting and every keybinding at its default value, commented
-/// out, so changing one is uncommenting a line. Without this the user had to
-/// know the file's location, its schema, and the action names before they could
-/// rebind anything.
-///
-/// An existing file is never overwritten — that would discard the user's own
-/// settings, which is the opposite of helpful. It is opened as it is.
+/// Write the documented config and open it in `$EDITOR` (FR-U9). The file that lands
+/// carries every setting and keybinding at its default, commented out, so changing
+/// one is uncommenting a line. An existing file is opened as it is, never overwritten.
 fn run_config(path_override: Option<&std::path::Path>, no_edit: bool) -> color_eyre::Result<()> {
     let path = path_override
         .map(std::path::Path::to_path_buf)
@@ -524,10 +476,9 @@ fn run_config(path_override: Option<&std::path::Path>, no_edit: bool) -> color_e
         path.display()
     );
 
-    // An existing file is never overwritten, but it can be older than the
-    // settings it does not mention, so it is topped up rather than merely
-    // reported on. Done before the editor opens so what was added is on screen
-    // to edit.
+    // An existing file is never overwritten, but it can be older than the settings
+    // it does not mention, so it is topped up rather than merely reported on. Done
+    // before the editor opens so what was added is on screen to edit.
     if existed {
         top_up(&path)?;
     }
@@ -639,10 +590,9 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
     // the source's handshake returns.
     let guest = guest_startup(&cfg);
 
-    // Fails cleanly here rather than mid-frame if libmpv is missing.
-    // The same cookie file the API uses: yt-dlp needs cookies too, or YouTube
-    // answers every stream request with its bot check. A guest has none to give;
-    // yt-dlp then runs bare, which works unless YouTube bot-checks the IP.
+    // Fails cleanly here rather than mid-frame if libmpv is missing. yt-dlp gets the
+    // same cookie file the API uses, or YouTube bot-checks every stream request. A
+    // guest has none to give and runs bare, which works unless the IP is checked.
     let cookie_file = if guest {
         None
     } else {
@@ -695,9 +645,8 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
     }
 
     // The writer owns its connection: `rusqlite::Connection` is `Send` but not
-    // `Sync`, so the loop cannot share one. Opening the playlist preload's
-    // reader separately is what WAL mode is for — concurrent readers are fine,
-    // and a failure here only costs the preload, not the writes.
+    // `Sync`, so the loop cannot share one. A second reader handle is what WAL mode
+    // is for, and a failure here costs only the preload, not the writes.
     let cache_reader = if cache.is_some() && !guest {
         match ytm_core::cache::Cache::open(&cache_path) {
             Ok(c) => Some(c),
@@ -716,12 +665,9 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
     install_panic_hook();
     let mut guard = TerminalGuard::new(cfg.ui.mouse)?;
 
-    // The cached frame goes up before anything touches the network (NFR-1).
-    // `build_source` is an `.await` on a cookie-validation round trip — running
-    // it first put a blank terminal on screen for ~2.4s. Keys typed during the
-    // wait are buffered by the terminal and handled once the loop starts.
-    // Built from `[keys]` so a rebind applies on the first frame, not after a
-    // reload. An unparseable table is reported rather than silently ignored.
+    // The cached frame goes up before anything touches the network (NFR-1): building
+    // the source awaits a cookie round trip, which put a blank terminal on screen for
+    // ~2.4s. The keymap is built from `[keys]` so a rebind applies on the first frame.
     let keymap = if cfg.keys.is_empty() {
         KeyMap::new(cfg.ui.vim_keys)
     } else {
@@ -738,10 +684,9 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
         "first frame drawn"
     );
 
-    // Probed after the alternate screen is entered (what `from_query_stdio`'s own
-    // docs require) and after the first draw (it blocks up to 2s on a terminal
-    // that never answers, which would eat the whole NFR-1 budget). Still before
-    // the event stream exists, or the reply would be read as a key press.
+    // Probed after entering the alternate screen (what `from_query_stdio`'s docs
+    // require) and after the first draw — it blocks up to 2s on a terminal that never
+    // answers. Still before the event stream, or the reply reads as a key press.
     let art = if cfg.ui.album_art {
         ytm_tui::widgets::art::ArtCache::detect()
     } else {
@@ -752,11 +697,7 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
     let (media_tx, media_keys) = tokio::sync::mpsc::unbounded_channel();
     let media = mpris::attach(media_tx);
 
-    // NOT awaited here. Cookie auth validates over the network, and awaiting it
-    // before the loop starts left the app frozen for seconds with the cached
-    // frame already on screen: keys went into the terminal's buffer and all fired
-    // at once when it returned. The loop awaits this concurrently with input, so
-    // navigation works from the first frame.
+    // NOT awaited here — see `app_loop::run`'s `source_fut` parameter.
     let source_fut = build_source_or_guest(&cfg);
     let result = app_loop::run(
         &mut guard.terminal,
