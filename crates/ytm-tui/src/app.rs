@@ -779,7 +779,31 @@ impl AppState {
             Pane::Artists => self.open_artist.is_some(),
             Pane::Home | Pane::Albums => false,
         };
-        track_shaped && self.list_len() > 0
+        // `list_len() > 0` walked and counted the whole filtered list; `any` stops
+        // at the first surviving row. Called twice per frame.
+        track_shaped && self.has_any_row()
+    }
+
+    /// Whether the current pane has at least one visible row. Stops at the first.
+    fn has_any_row(&self) -> bool {
+        match self.pane {
+            Pane::Home => !self.home_rows.is_empty(),
+            Pane::Search => !self.search_results.is_empty(),
+            Pane::Playlists if self.open_playlist.is_some() => self.any_track_visible(),
+            Pane::Artists if self.open_artist.is_some() => self.any_track_visible(),
+            Pane::Songs | Pane::Queue => self.any_track_visible(),
+            Pane::Playlists => self.playlists.iter().any(|p| self.matches_filter(&p.title)),
+            Pane::Albums => self.albums.iter().any(|a| self.album_matches(a)),
+            Pane::Artists => self.artists.iter().any(|a| self.matches_filter(&a.name)),
+        }
+    }
+
+    fn any_track_visible(&self) -> bool {
+        let source = self.unfiltered_tracks();
+        if self.filter.is_empty() {
+            return !source.is_empty();
+        }
+        source.iter().any(|t| self.track_matches_filter(t))
     }
 
     /// Whether a query row is drawn; Artists uses it only for online search.
@@ -794,8 +818,15 @@ impl AppState {
     }
 
     /// Does this text survive the filter? Case-insensitive substring.
+    ///
+    /// The previous version built two Strings per call — one of them the same
+    /// needle every time — and the render path calls this three or more times
+    /// per track, per frame, while the user is typing.
     fn matches_filter(&self, text: &str) -> bool {
-        self.filter.is_empty() || text.to_lowercase().contains(&self.filter.to_lowercase())
+        if self.filter.is_empty() {
+            return true;
+        }
+        contains_ignore_case(text, &self.filter)
     }
 
     /// Count filtered tracks without cloning the list on every frame.
@@ -1430,6 +1461,23 @@ impl AppState {
             })
             .flatten()
     }
+}
+
+/// Case-insensitive substring test that does not allocate per comparison.
+///
+/// `char::to_lowercase` yields an iterator because one char can fold to several
+/// (ẛ, İ); comparing fold-to-fold rather than char-to-char is what keeps
+/// non-ASCII titles matching the way `to_lowercase().contains()` did.
+fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let hay: Vec<char> = haystack.chars().flat_map(char::to_lowercase).collect();
+    let ndl: Vec<char> = needle.chars().flat_map(char::to_lowercase).collect();
+    if ndl.len() > hay.len() {
+        return false;
+    }
+    hay.windows(ndl.len()).any(|w| w == ndl.as_slice())
 }
 
 #[cfg(test)]
@@ -3096,6 +3144,92 @@ mod tests {
             std::ptr::eq(rows[0], &s.tracks[2]),
             "a filtered row must still be a borrow into the source"
         );
+    }
+
+    #[test]
+    fn the_filter_is_case_insensitive_in_both_directions() {
+        // Pins the behaviour before the implementation changes underneath it.
+        let mut s = AppState {
+            filter: "GAM".to_owned(),
+            ..Default::default()
+        };
+        assert!(s.matches_filter("gamma"));
+        s.filter = "gam".to_owned();
+        assert!(s.matches_filter("GAMMA"));
+        s.filter = "MmA".to_owned();
+        assert!(s.matches_filter("gamma"));
+        s.filter = "zzz".to_owned();
+        assert!(!s.matches_filter("gamma"));
+        s.filter = String::new();
+        assert!(s.matches_filter("anything"), "an empty filter matches all");
+    }
+
+    #[test]
+    fn the_filter_matches_at_the_start_end_and_whole_of_a_string() {
+        let mut s = AppState::default();
+        for (needle, hay, want) in [
+            ("ga", "gamma", true),
+            ("ma", "gamma", true),
+            ("gamma", "gamma", true),
+            ("gammaa", "gamma", false),
+            ("", "gamma", true),
+            ("a", "", false),
+        ] {
+            s.filter = needle.to_owned();
+            assert_eq!(s.matches_filter(hay), want, "{needle:?} in {hay:?}");
+        }
+    }
+
+    #[test]
+    fn a_non_ascii_filter_still_matches_case_insensitively() {
+        // Titles are CJK and accented Latin often enough that an ASCII-only
+        // lowercase would be a real regression.
+        let mut s = AppState {
+            filter: "É".to_owned(),
+            ..Default::default()
+        };
+        assert!(s.matches_filter("café"), "accented match must survive");
+        s.filter = "café".to_owned();
+        assert!(s.matches_filter("CAFÉ AU LAIT"));
+    }
+
+    #[test]
+    fn has_any_row_agrees_with_list_len_being_nonzero() {
+        // Two ways of asking the same question; a divergence would draw the
+        // column header over an empty list or hide it over a full one.
+        let mut s = AppState::default();
+        for pane in ytm_tui_panes() {
+            s.pane = pane;
+            assert_eq!(
+                s.has_any_row(),
+                s.list_len() > 0,
+                "empty state disagrees in {pane:?}"
+            );
+        }
+        s.tracks = vec![Track {
+            artists: Vec::new(),
+            ..Track::stub("v1", "gamma")
+        }];
+        for pane in ytm_tui_panes() {
+            s.pane = pane;
+            assert_eq!(
+                s.has_any_row(),
+                s.list_len() > 0,
+                "one-track state disagrees in {pane:?}"
+            );
+            s.filter = "zzz".to_owned();
+            assert_eq!(
+                s.has_any_row(),
+                s.list_len() > 0,
+                "filtered-to-nothing disagrees in {pane:?}"
+            );
+            s.filter = String::new();
+        }
+    }
+
+    /// Every pane, so a new one cannot be added without this test noticing.
+    fn ytm_tui_panes() -> Vec<Pane> {
+        PANE_ORDER.to_vec()
     }
 
     #[test]
