@@ -57,6 +57,7 @@ impl Cache {
     fn migrate(&self) -> Result<(), CacheError> {
         self.conn.execute_batch(
             "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
              CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS playlists (
                 id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT,
@@ -98,6 +99,15 @@ impl Cache {
                 ])?;
             }
         }
+        // Tracks are keyed per playlist id while this table is wiped and
+        // rewritten, so a playlist that left the library would keep its rows
+        // forever. Library songs have a NULL playlist_id and are not touched.
+        tx.execute(
+            "DELETE FROM tracks
+             WHERE playlist_id IS NOT NULL
+               AND playlist_id NOT IN (SELECT id FROM playlists)",
+            [],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -333,6 +343,50 @@ mod tests {
         c.clear().unwrap();
         assert!(c.load_playlists().unwrap().is_empty());
         assert!(c.load_library_songs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_playlist_leaving_the_library_takes_its_cached_tracks_with_it() {
+        // save_playlists wipes and rewrites the playlists table, but tracks are
+        // keyed per playlist id, so rows for a deleted playlist stayed forever.
+        let c = Cache::open_in_memory().unwrap();
+        let keep = PlaylistId::from("keep");
+        let gone = PlaylistId::from("gone");
+        c.save_playlists(&[
+            Playlist::stub("keep", "Keep"),
+            Playlist::stub("gone", "Gone"),
+        ])
+        .unwrap();
+        c.save_playlist_tracks(&keep, &[Track::stub("a", "A")])
+            .unwrap();
+        c.save_playlist_tracks(&gone, &[Track::stub("b", "B")])
+            .unwrap();
+        assert_eq!(c.load_playlist_tracks(&gone).unwrap().len(), 1);
+
+        // The next refresh no longer includes `gone`.
+        c.save_playlists(&[Playlist::stub("keep", "Keep")]).unwrap();
+
+        assert_eq!(
+            c.load_playlist_tracks(&keep).unwrap().len(),
+            1,
+            "a surviving playlist keeps its tracks"
+        );
+        assert!(
+            c.load_playlist_tracks(&gone).unwrap().is_empty(),
+            "a departed playlist must not keep track rows forever"
+        );
+    }
+
+    #[test]
+    fn reaping_orphans_does_not_touch_the_library_songs() {
+        let c = Cache::open_in_memory().unwrap();
+        c.save_library_songs(&[Track::stub("lib", "Lib")]).unwrap();
+        c.save_playlists(&[Playlist::stub("keep", "Keep")]).unwrap();
+        assert_eq!(
+            c.load_library_songs().unwrap().len(),
+            1,
+            "library songs have playlist_id IS NULL and must survive the reap"
+        );
     }
 
     #[test]

@@ -1088,7 +1088,7 @@ pub async fn run(
     tick_ms: u64,
     mut behaviour: crate::config::BehaviourConfig,
     cookie_auth: bool,
-    cache: Option<ytm_core::cache::Cache>,
+    cache_writer: Option<std::sync::mpsc::Sender<CacheWork>>,
     mut art: ytm_tui::widgets::art::ArtCache,
     mut media: Option<souvlaki::MediaControls>,
     // `config_path` is where `,` opens an editor and what a reload re-reads;
@@ -1300,8 +1300,13 @@ pub async fn run(
                 if let Some(hint) = empty_library_hint(cookie_auth, &ae) {
                     state.push_toast(ToastKind::Info, &hint, state.elapsed_ms);
                 }
-                if let Some(c) = cache.as_ref() {
-                    cache_write_through(c, &ae);
+                // A DELETE plus one INSERT per track, then a commit that fsyncs:
+                // 44 ms for a 10k-song library, measured, with no key processed
+                // and no frame drawn. The writer thread owns the connection.
+                if let Some(tx) = cache_writer.as_ref()
+                    && let Some(work) = cache_work(&ae)
+                {
+                    let _ = tx.send(work);
                 }
                 // Art lives in the cache, not in state: protocol objects are
                 // not comparable or cloneable, so a pure reducer cannot hold them.
@@ -1538,18 +1543,69 @@ pub fn preload_from_cache(cache: &ytm_core::cache::Cache, state: &mut AppState) 
 ///
 /// Albums and artists have no tables (the schema caches playlists and tracks),
 /// so they pass through untouched.
-fn cache_write_through(cache: &ytm_core::cache::Cache, ev: &AppEvent) {
-    let result = match ev {
-        AppEvent::PlaylistsLoaded(v) if !v.is_empty() => cache.save_playlists(v),
-        AppEvent::LibrarySongsLoaded(v) if !v.is_empty() => cache.save_library_songs(v),
+fn cache_work(ev: &AppEvent) -> Option<CacheWork> {
+    match ev {
+        AppEvent::PlaylistsLoaded(v) if !v.is_empty() => Some(CacheWork::Playlists(v.clone())),
+        AppEvent::LibrarySongsLoaded(v) if !v.is_empty() => {
+            Some(CacheWork::LibrarySongs(v.clone()))
+        }
         // A playlist genuinely can be empty, and its rows are keyed by id, so
         // there is no wipe-the-library risk in writing that through.
-        AppEvent::PlaylistTracksLoaded { id, tracks } => cache.save_playlist_tracks(id, tracks),
-        _ => return,
-    };
-    if let Err(e) = result {
-        tracing::warn!(error = %e, event = event_name(ev), "could not write to the cache");
+        AppEvent::PlaylistTracksLoaded { id, tracks } => Some(CacheWork::PlaylistTracks {
+            id: id.clone(),
+            tracks: tracks.clone(),
+        }),
+        _ => None,
     }
+}
+
+/// A pending cache write, owned so it can cross a thread boundary.
+pub enum CacheWork {
+    Playlists(Vec<ytm_core::Playlist>),
+    LibrarySongs(Vec<ytm_core::Track>),
+    PlaylistTracks {
+        id: ytm_core::PlaylistId,
+        tracks: Vec<ytm_core::Track>,
+    },
+}
+
+impl CacheWork {
+    fn run(self, c: &ytm_core::cache::Cache) -> Result<(), ytm_core::cache::CacheError> {
+        match self {
+            Self::Playlists(v) => c.save_playlists(&v),
+            Self::LibrarySongs(v) => c.save_library_songs(&v),
+            Self::PlaylistTracks { id, tracks } => c.save_playlist_tracks(&id, &tracks),
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Playlists(_) => "playlists",
+            Self::LibrarySongs(_) => "songs",
+            Self::PlaylistTracks { .. } => "playlist_tracks",
+        }
+    }
+}
+
+/// The cache lives on its own thread; the loop only ever sends.
+///
+/// Matches the player actor's shape, and keeps rusqlite's non-`Sync`
+/// `Connection` in one place — an `Arc<Cache>` will not compile, and a `Mutex`
+/// on the event loop would put the stall back under contention.
+pub fn spawn_cache_writer(cache: ytm_core::cache::Cache) -> std::sync::mpsc::Sender<CacheWork> {
+    let (tx, rx) = std::sync::mpsc::channel::<CacheWork>();
+    std::thread::Builder::new()
+        .name("ytm-cache".into())
+        .spawn(move || {
+            while let Ok(work) = rx.recv() {
+                let name = work.name();
+                if let Err(e) = work.run(&cache) {
+                    tracing::warn!(error = %e, event = name, "could not write to the cache");
+                }
+            }
+        })
+        .expect("spawning the cache writer");
+    tx
 }
 
 /// The URL to fetch art for, if any, exactly once per URL.
@@ -3024,10 +3080,19 @@ mod tests {
         assert!(s.tracks.is_empty());
     }
 
+    /// The write path the loop takes, minus the thread: `cache_work` decides
+    /// what to persist and `CacheWork::run` performs it, so a test that skips
+    /// `cache_work` would not prove the loop writes anything.
+    fn write_through(cache: &ytm_core::cache::Cache, ev: &AppEvent) {
+        if let Some(work) = cache_work(ev) {
+            work.run(cache).unwrap();
+        }
+    }
+
     #[test]
     fn a_playlists_event_is_written_through_to_the_cache() {
         let cache = ytm_core::cache::Cache::open_in_memory().unwrap();
-        cache_write_through(
+        write_through(
             &cache,
             &AppEvent::PlaylistsLoaded(vec![ytm_core::Playlist::stub("p1", "Focus")]),
         );
@@ -3038,7 +3103,7 @@ mod tests {
     fn playlist_tracks_are_written_through_under_their_playlist_id() {
         let cache = ytm_core::cache::Cache::open_in_memory().unwrap();
         let id = ytm_core::PlaylistId::from("p1");
-        cache_write_through(
+        write_through(
             &cache,
             &AppEvent::PlaylistTracksLoaded {
                 id: id.clone(),
@@ -3061,7 +3126,7 @@ mod tests {
         cache
             .save_playlists(&[ytm_core::Playlist::stub("p1", "Focus")])
             .unwrap();
-        cache_write_through(&cache, &AppEvent::PlaylistsLoaded(vec![]));
+        write_through(&cache, &AppEvent::PlaylistsLoaded(vec![]));
         assert_eq!(cache.load_playlists().unwrap().len(), 1);
     }
 
@@ -3070,7 +3135,7 @@ mod tests {
         // Search is not library state; caching it would show stale matches for
         // a query the user has not typed yet.
         let cache = ytm_core::cache::Cache::open_in_memory().unwrap();
-        cache_write_through(
+        write_through(
             &cache,
             &AppEvent::SearchResults {
                 query: "q".into(),
@@ -3078,6 +3143,41 @@ mod tests {
             },
         );
         assert!(cache.load_library_songs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_cache_writer_thread_performs_the_write_the_loop_sends_it() {
+        // The loop only ever sends; if the thread did not run the work, every
+        // write would silently vanish and only a cold start would reveal it.
+        let dir = std::env::temp_dir().join(format!("ytm-writer{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("c.db");
+
+        let tx = spawn_cache_writer(ytm_core::cache::Cache::open(&path).unwrap());
+        let work = cache_work(&AppEvent::PlaylistsLoaded(vec![ytm_core::Playlist::stub(
+            "p1", "Focus",
+        )]))
+        .expect("a non-empty playlists event is worth persisting");
+        tx.send(work).unwrap();
+        // Dropping the sender ends the thread's recv loop after it drains.
+        drop(tx);
+
+        // Reopened rather than shared: the writer owns its connection.
+        let mut seen = Vec::new();
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            seen = ytm_core::cache::Cache::open(&path)
+                .unwrap()
+                .load_playlists()
+                .unwrap();
+            if !seen.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(seen.len(), 1, "the writer thread must perform the write");
+        assert_eq!(seen[0].title, "Focus");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

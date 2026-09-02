@@ -694,6 +694,11 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
         );
     }
 
+    // The reads are all done; the connection moves onto its own thread so the
+    // event loop never waits on a commit. `rusqlite::Connection` is `Send` but
+    // not `Sync`, so a writer thread is the shape that works here.
+    let cache_writer = cache.map(app_loop::spawn_cache_writer);
+
     install_panic_hook();
     let mut guard = TerminalGuard::new(cfg.ui.mouse)?;
 
@@ -752,7 +757,7 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
         // The empty-library hint is about an expired cookie, so it only applies
         // when there was a cookie to expire.
         cfg.auth.kind == config::AuthKind::Cookie && !guest,
-        cache,
+        cache_writer,
         art,
         media,
         media_keys,
