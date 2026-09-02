@@ -3,6 +3,11 @@
 YouTube Music in your terminal. A Rust TUI over YouTube Music's internal API,
 with playback through `mpv`.
 
+**Cookies are optional.** With none, it runs in guest mode: search, playback, and
+the queue all work. Your own library — Home, Playlists, Fav, Albums, Artists, and
+any playlist editing — needs cookie auth, so signing in is the recommended setup.
+See [Without signing in](#without-signing-in).
+
 ## Features
 
 **Browse**
