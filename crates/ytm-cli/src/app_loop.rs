@@ -25,16 +25,9 @@ pub struct ReloadedConfig {
     pub behaviour: crate::config::BehaviourConfig,
 }
 
-/// Suspend the TUI, open `$EDITOR` on the config, and reload on exit (`,`).
-///
-/// Returns `Ok(None)` when there is nothing to apply — no editor configured, or
-/// the user quit without saving. A parse error is returned rather than applied,
-/// so a typo leaves the running keymap and theme intact instead of resetting
-/// them to defaults mid-session.
-///
-/// The alternate screen and raw mode have to be released around the child: an
-/// editor drawing into our screen buffer inherits a terminal it cannot use, and
-/// leaving raw mode on means it never sees a newline.
+/// Suspend the TUI, open `$EDITOR` on the config, reload on exit (`,`). A parse
+/// error is returned rather than applied, so a typo cannot reset the live keymap
+/// and theme. Raw mode and the alternate screen are released around the child.
 pub fn edit_config_in_editor(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     path: &std::path::Path,
@@ -125,23 +118,13 @@ pub fn editor_command() -> Option<String> {
     None
 }
 
-/// Start a fetch, or say why it cannot run yet.
-///
-/// The source is built concurrently with the loop (see `run`), so for the first
-/// moment there is nothing to fetch with. Actions that need the network are
-/// declined with a toast rather than queued: replaying them seconds later would
-/// fire requests the user has already moved on from.
 /// What a guest is told at startup, and again if a cookie turns out to be dead.
 pub const GUEST_NOTICE: &str =
     "guest mode — search and queue are available; set auth.cookie_file for your library";
 
-/// Settle the UI against what the source can actually do.
-///
-/// Called when the handshake returns, which is the only moment an *expired*
-/// cookie becomes visible: YouTube answers one with HTTP 200, so the config
-/// looked fine and `run_tui` started on a library pane. Left alone, that pane
-/// would sit there permanently empty, showing rows from the cache that belong to
-/// an account this session cannot reach.
+/// Settle the UI against what the source can actually do. The handshake is the
+/// only moment an *expired* cookie shows: YouTube answers one with HTTP 200, so
+/// `run_tui` had already opened a library pane that would stay forever empty.
 fn source_ready(state: &mut AppState, authenticated: bool) {
     state.guest = !authenticated;
     if !state.guest || !state.pane.requires_auth() {
@@ -161,11 +144,9 @@ fn source_ready(state: &mut AppState, authenticated: bool) {
     state.push_toast(ToastKind::Info, GUEST_NOTICE, state.elapsed_ms);
 }
 
-/// Start background work, showing whatever the cache already holds first.
-///
-/// Opening a playlist is the one task with rows on disk to show meanwhile: they
-/// were written on every previous open and never read back, so the pane sat
-/// blank until the network answered.
+/// Start background work, declining with a toast if the source is not built yet
+/// — replaying it later would fire a request the user moved on from. Opening a
+/// playlist shows its cached rows first; nothing read them back before.
 fn try_spawn(
     task: Task,
     source: &Option<Arc<dyn MusicSource>>,
@@ -184,10 +165,9 @@ fn try_spawn(
     }
 }
 
-/// How close two clicks must be to count as a double-click.
-///
-/// 400ms is the common desktop default. Too short and a deliberate double-click
-/// reads as two singles; too long and two unrelated clicks play something.
+/// How close two clicks must be to count as a double-click. 400ms is the common
+/// desktop default: shorter reads a deliberate double-click as two singles,
+/// longer lets two unrelated clicks play something.
 const DOUBLE_CLICK_MS: u64 = 400;
 
 /// Work the loop should start in the background as a result of an input.
@@ -220,11 +200,9 @@ pub enum Task {
     },
 }
 
-/// Background work that changes server state.
-///
-/// Separate from `Task` because these carry a mutation token: the response has
-/// to name the optimistic edit it settles, or a late failure would revert
-/// whichever edit happened to be newest (FR-C6).
+/// Background work that changes server state. Separate from `Task` because these
+/// carry a mutation token: the response has to name the optimistic edit it
+/// settles, or a late failure reverts whichever edit was newest (FR-C6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 // Delete is wired in Task 31, AddTracks/RemoveTracks in Tasks 31-32. Declared
 // now because `run_mutation` handles all five, and a partial enum would mean
@@ -315,9 +293,8 @@ fn temp_playlist_id(token: u64) -> ytm_core::PlaylistId {
 }
 
 /// Apply an open prompt and return the edit plus the API call it needs.
-///
-/// Validation happens here rather than in the modal: an empty name is refused
-/// before any optimistic row appears, so there is nothing to roll back.
+/// Validation happens here, not in the modal: an empty name is refused before any
+/// optimistic row appears, so there is nothing to roll back.
 pub fn submit_prompt(state: &mut AppState) -> Option<(u64, MutationTask)> {
     let Some(Modal::Prompt { value, action, .. }) = state.modal.clone() else {
         return None;
@@ -372,10 +349,8 @@ pub fn open_create_prompt(state: &mut AppState) {
 }
 
 /// Open the rename prompt for the selected playlist, pre-filled with its title.
-///
-/// Refuses a system playlist before any API call: FR-C2 does not apply to them,
-/// and YouTube would reject the edit anyway — better to say so immediately than
-/// to show an optimistic rename that snaps back a second later.
+/// Refuses a system playlist before any API call: FR-C2 does not apply to them and
+/// YouTube rejects the edit, so an optimistic rename would snap back.
 pub fn open_rename_prompt(state: &mut AppState) -> Option<ytm_core::PlaylistId> {
     let p = state.selected_playlist()?;
     if p.is_system {
@@ -461,10 +436,9 @@ pub fn confirm_action(state: &mut AppState) -> Option<(u64, MutationTask)> {
     }
 }
 
-/// Marked tracks if any, otherwise the selected one (FR-C4).
-///
-/// Ordered by the rows on screen, not by `marked`'s iteration order: it is a
-/// `HashSet`, so returning it directly sent a marked run to the API scrambled.
+/// Marked tracks if any, otherwise the selected one (FR-C4). Ordered by the rows
+/// on screen, not by `marked`'s iteration order: it is a `HashSet`, so returning
+/// it directly sent a marked run to the API scrambled.
 pub fn targets_for_add(state: &AppState) -> Vec<ytm_core::VideoId> {
     if !state.marked.is_empty() {
         return state
@@ -481,9 +455,8 @@ pub fn targets_for_add(state: &AppState) -> Vec<ytm_core::VideoId> {
 }
 
 /// Full tracks for a queue action: the marked rows, else the selected one.
-///
-/// Returns tracks rather than ids because the player queues `Track`s, and
-/// re-looking them up by id would be a second source of truth.
+/// Tracks rather than ids because the player queues `Track`s, and re-looking them
+/// up by id would be a second source of truth.
 fn queue_targets(state: &AppState) -> Vec<ytm_core::Track> {
     if !state.marked.is_empty() {
         return state
@@ -510,10 +483,9 @@ fn enqueue_message(tracks: &[ytm_core::Track], next: bool) -> String {
     }
 }
 
-/// Open the target-playlist picker for the marked or selected tracks.
-///
-/// Only editable playlists are offered: YouTube rejects an add to a system
-/// playlist, so listing them would be offering an action that cannot work.
+/// Open the target-playlist picker for the marked or selected tracks. Only
+/// editable playlists are offered: YouTube rejects an add to a system playlist,
+/// so listing one would be offering an action that cannot work.
 pub fn open_add_to_playlist(state: &mut AppState) {
     let targets = targets_for_add(state);
     if targets.is_empty() {
@@ -541,11 +513,9 @@ pub fn open_add_to_playlist(state: &mut AppState) {
     });
 }
 
-/// The user picked a playlist. Hand back the add to run.
-///
-/// There is no optimistic row to show: the tracks go into a playlist that is
-/// not necessarily the one on screen, so `Mutation::AddTracks` records the edit
-/// for the toast and nothing else changes locally.
+/// The user picked a playlist. Hand back the add to run. No optimistic row to
+/// show — the tracks go to a playlist that need not be the one on screen, so
+/// `Mutation::AddTracks` records the edit for the toast and nothing else changes.
 pub fn submit_pick(state: &mut AppState) -> Option<(u64, MutationTask)> {
     let Some(Modal::PickPlaylist {
         targets,
@@ -572,12 +542,9 @@ pub fn submit_pick(state: &mut AppState) -> Option<(u64, MutationTask)> {
     ))
 }
 
-/// Confirm before removing (FR-C5). Refuses when the entries are unidentifiable.
-///
-/// Playlist reads do carry `set_video_id` now — `playlist_raw` extracts it from
-/// the wire JSON, which `ytmapi-rs` 0.3.3 drops (PROGRESS.md open question 1,
-/// resolved via option A). The refusal is the fallback for when extraction finds
-/// nothing: better to say so than to send a request that cannot work.
+/// Confirm before removing (FR-C5). Playlist reads do carry `set_video_id` now —
+/// `playlist_raw` extracts what `ytmapi-rs` 0.3.3 drops — so the refusal is the
+/// fallback for when extraction finds nothing rather than the normal path.
 pub fn open_remove_confirm(state: &mut AppState) {
     let Some(playlist) = state.open_playlist.clone() else {
         state.push_toast(ToastKind::Error, "open a playlist first", state.elapsed_ms);
@@ -742,10 +709,9 @@ pub fn dispatch_input(
             // through PlayNow (which inserts) put a second copy of a finished
             // track in beside the first.
             if state.pane == Pane::Queue {
-                // `selected` counts *visible* rows and JumpTo takes a queue index.
-                // Passing it through played the queue's nth track instead of the
-                // filtered row under the cursor. `None` means the row is past the
-                // end, where a command would index past the queue in the actor.
+                // `selected` counts visible rows; `JumpTo` takes a queue index.
+                // Translate the filtered row, and send nothing when it is past the
+                // end rather than indexing past the queue in the actor.
                 if let Some(i) = state.queue_index_of_selected() {
                     send(player, PlayerCommand::JumpTo(i));
                 }
@@ -810,21 +776,13 @@ pub fn dispatch_input(
             state.push_toast(ToastKind::Success, &msg, state.elapsed_ms);
             state.marked.clear();
         }
-        // Queue edits. All three are queue-pane-only: `x` means
-        // remove-from-playlist elsewhere (Task 32), and there is no server-side
-        // track reordering to bind `J`/`K` to (out of scope).
-        //
-        // None of them touch `state.queue`. The actor owns queue truth and
-        // answers with `QueueChanged`; a local edit would leave the view
-        // showing an order the player disagrees with.
+        // Queue edits are local to this pane; the actor owns queue truth and
+        // answers with `QueueChanged`. `x` removes from a playlist elsewhere, and
+        // server-side track reordering is out of scope.
         A::RemoveFromPlaylist if state.pane == Pane::Queue => {
-            // Marked rows if any, else the cursor — so `V` over a run then `x`
-            // clears the range instead of one row. Removed highest-index first:
-            // each removal shifts everything after it, so ascending order would
-            // delete the wrong entries after the first.
-            // The marked path matches by video id against the real queue, so it was
-            // always right; the cursor path needs the same visible-to-queue
-            // translation Enter does.
+            // Marked rows if any, else the cursor — `V` then `x` clears the range.
+            // Remove highest-index first because each removal shifts what follows;
+            // the cursor path uses the same visible-to-queue translation as Enter.
             let mut targets: Vec<usize> = if state.marked.is_empty() {
                 state.queue_index_of_selected().into_iter().collect()
             } else {
@@ -847,10 +805,9 @@ pub fn dispatch_input(
         }
         A::MoveEntryUp | A::MoveEntryDown if state.pane == Pane::Queue => {
             let down = action == A::MoveEntryDown;
-            // Marked rows move as one block, the way `x` removes them as one.
-            // Without this a `V` range could be selected and deleted but never
-            // reordered, which is what the owner hit. Matched by video id
-            // against the real queue, so the set is right under a filter too.
+            // Marked rows move as one block, the way `x` removes them as one —
+            // without this a `V` range could be selected and deleted but never
+            // reordered. Matched by video id, so the set is right under a filter.
             let mut targets: Vec<usize> = if state.marked.is_empty() {
                 state.queue_index_of_selected().into_iter().collect()
             } else {
@@ -882,10 +839,9 @@ pub fn dispatch_input(
                     let to = if down { from + 1 } else { from - 1 };
                     send(player, PlayerCommand::MoveInQueue { from: *from, to });
                 }
-                // Follow the entry rather than the row, or a held key would walk
-                // the selection back over the track it just moved. The marks are
-                // video ids, so they ride along with their entries and `J` can be
-                // held to keep going.
+                // Follow the entry, not the row, or a held key walks the selection
+                // back over the track it just moved. The marks are video ids, so
+                // they ride along and `J` can be held.
                 let follows = state.marked.is_empty()
                     || state
                         .queue
@@ -922,21 +878,16 @@ pub fn dispatch_input(
         A::Refresh => {
             return start(state, pane_task(state.pane)?);
         }
-        // The forward half of the h/l pair: `l` descends into the selected
-        // playlist, `h` comes back out. Opening needs a fetch, so it cannot
-        // live in the reducer with the rest of Left/Right.
-        //
-        // Only descends from the playlist list. On a track pane there is
-        // nothing below, and playing here would make a navigation key start
-        // audio — Enter is the key that plays.
+        // The forward half of the h/l pair, here rather than in the reducer because
+        // opening needs a fetch. Only descends from the playlist list: on a track
+        // pane it would make a navigation key start audio, and Enter is that key.
         A::Right => {
             if let Some(p) = state.selected_playlist() {
                 return start(state, Task::OpenPlaylist(p.id.clone()));
             }
             // An artist row descends into their tracks, the same as Enter. The
-            // reducer's Right arm already assumed the loop did this ("the loop
-            // turns this into the fetch") but nothing here checked, so `l` on an
-            // artist silently did nothing while `l` on a playlist worked.
+            // reducer's Right arm assumed the loop did this and nothing here
+            // checked, so `l` on an artist silently did nothing.
             if let Some(a) = state.selected_artist() {
                 return start(
                     state,
@@ -962,11 +913,8 @@ pub fn dispatch_input(
 }
 
 /// Move the selection to whatever was clicked, returning a fetch if the click
-/// changed pane.
-///
-/// Selection only: clicking never plays. A misplaced click that starts audio is
-/// a worse failure than one that costs a keypress, and Enter or `a` is one key
-/// away once the row is selected.
+/// changed pane. Selection only — a misplaced click that starts audio is worse
+/// than one costing a keypress, and Enter or `a` is one key away.
 fn handle_click(
     col: u16,
     row: u16,
@@ -1007,8 +955,7 @@ fn handle_click(
             }
             None
         }
-        // Seeking is the one thing a click does that is not selection: the bar
-        // *is* a position, so clicking it anywhere else would be the surprise.
+        // Seeking is the one click that is not selection: the bar *is* a position.
         // `nowplaying` owns the geometry, so a wider flags column cannot make a
         // click land on a different second than the pointer.
         ClickTarget::Progress(col) => {
@@ -1026,9 +973,8 @@ fn handle_click(
 }
 
 /// The fetch a pane needs to fill itself, or `None` when it has nothing to load.
-///
-/// Queue is local state owned by the actor, and Search waits for a query — a
-/// fetch for either would be a request the user never made.
+/// Queue is local state owned by the actor and Search waits for a query — a fetch
+/// for either would be a request the user never made.
 fn pane_task(pane: Pane) -> Option<Task> {
     Some(match pane {
         Pane::Home => Task::LoadHome,
@@ -1041,11 +987,8 @@ fn pane_task(pane: Pane) -> Option<Task> {
 }
 
 /// Record the current query on every keystroke, restarting the debounce timer.
-///
-/// Reads the query from `AppState` rather than taking the character, so the
-/// buffer stays owned by the reducer and this cannot disagree with it.
-/// Keystrokes outside the search pane are ignored — nothing else edits the
-/// query, and noting them would schedule a search the user never asked for.
+/// Reads the query from `AppState` rather than taking the character, so the buffer
+/// stays owned by the reducer. Keystrokes outside the search pane are ignored.
 pub fn note_search_input(d: &mut SearchDebounce, state: &AppState, now_ms: u64) {
     // The Artists pane has its own search field, so typing there must debounce
     // too — otherwise the query built up and nothing was ever sent.
@@ -1077,20 +1020,16 @@ fn send(player: &impl Player, cmd: PlayerCommand) {
     }
 }
 
-/// Run until the user quits. Four event sources, one owner of state.
-///
-/// Nothing in this function awaits network or audio work: every slow thing is
-/// handed to `spawn_task` or the player actor and comes back as an `AppEvent`
-/// (NFR-2). The `select!` arms are all cheap.
+/// Run until the user quits. Four event sources, one owner of state. Nothing here
+/// awaits network or audio work: every slow thing goes to `spawn_task` or the
+/// player actor and returns as an `AppEvent` (NFR-2), so every arm is cheap.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     mut state: AppState,
-    // Not built yet on purpose. Cookie auth validates over the network, and
-    // awaiting that *before* the loop starts froze the app for seconds with the
-    // cached frame already on screen — keys went into the terminal's buffer and
-    // all fired at once when it finally returned. The loop starts first and awaits
-    // this concurrently with reading input.
+    // Not built yet on purpose: awaiting cookie validation before the loop froze
+    // the app for seconds with the cached frame up, and buffered keys then all
+    // fired at once. The loop awaits this concurrently with input.
     source_fut: impl std::future::Future<Output = color_eyre::Result<Arc<dyn MusicSource>>>,
     player: impl Player,
     mut player_events: mpsc::UnboundedReceiver<ytm_player::player::PlayerEvent>,
@@ -1134,9 +1073,8 @@ pub async fn run(
     state.loading = true;
 
     // `None` until the source is ready. Every key still works meanwhile —
-    // navigation, the queue, playback of anything cached — and the handful of
-    // actions that need the network are skipped rather than queued, because
-    // replaying them later would fire commands the user has moved on from.
+    // navigation, the queue, playback of anything cached — and the actions needing
+    // the network are skipped, not queued to fire after the user moved on.
     let mut source: Option<Arc<dyn MusicSource>> = None;
     let mut source_fut = std::pin::pin!(source_fut);
     let mut pending_first_fetch = true;
@@ -1158,11 +1096,9 @@ pub async fn run(
                             MouseEventKind::ScrollUp => {
                                 state.apply(AppEvent::Input(InputAction::ScrollUp));
                             }
-                            // Left click selects: a sidebar entry switches source,
-                            // a list row moves the cursor there. Deliberately does
-                            // not play — a stray click starting audio is worse than
-                            // one that costs a keypress, and `a`/Enter are one key
-                            // away once the row is selected.
+                            // Left click selects — a sidebar entry switches source,
+                            // a list row moves the cursor. Deliberately does not
+                            // play: `a`/Enter are one key away once selected.
                             MouseEventKind::Down(MouseButton::Left) if state.modal.is_none() => {
                                 let before = state.selected;
                                 let task = handle_click(
@@ -1180,12 +1116,9 @@ pub async fn run(
                                     // on a row.
                                     last_click = None;
                                 } else {
-                                    // Second click on the same row inside the
-                                    // window: activate it, exactly as Enter would.
-                                    // Routed through `dispatch_input` rather than
-                                    // sending PlayNow here, so a double-click on a
-                                    // playlist or artist row opens it instead of
-                                    // trying to play a row that is not a track.
+                                    // Second click on the same row activates it,
+                                    // via `dispatch_input` so a playlist or artist
+                                    // row opens instead of playing a non-track.
                                     let now = state.elapsed_ms;
                                     let same = last_click
                                         .is_some_and(|(row, at)| {
@@ -1499,15 +1432,9 @@ fn event_rows(ev: &AppEvent) -> usize {
     }
 }
 
-/// A successful library call that returned zero rows, under cookie auth, is the
-/// only signal an expired cookie gives us (FR-A6).
-///
-/// There is no auth error to catch: InnerTube answers an expired cookie with
-/// HTTP 200 and a signed-out page, which `ytmapi-rs` parses faithfully into an
-/// empty list. So "empty" and "expired" are indistinguishable from here, and the
-/// honest thing is to name both possibilities rather than show a bare empty
-/// list. Restricted to cookie auth because telling an OAuth user to re-export
-/// cookies they do not have would be noise.
+/// A library call that succeeded with zero rows, under cookie auth, is the only
+/// signal an expired cookie gives (FR-A6): InnerTube answers one with HTTP 200 and
+/// a signed-out page, so "empty" and "expired" are indistinguishable from here.
 pub fn empty_library_hint(cookie_auth: bool, ev: &AppEvent) -> Option<String> {
     if !cookie_auth {
         return None;
@@ -1524,11 +1451,9 @@ pub fn empty_library_hint(cookie_auth: bool, ev: &AppEvent) -> Option<String> {
     })
 }
 
-/// Fill state from the cache before the first frame (NFR-1).
-///
-/// A cache read is a local SQLite query, so it is cheap enough to do before the
-/// draw; the network refresh follows and overwrites. Failures are logged and
-/// ignored — the cache is disposable, and a bad one must never block startup.
+/// Fill state from the cache before the first frame (NFR-1). A local SQLite read
+/// is cheap enough to do before the draw; the network refresh overwrites it.
+/// Failures are logged — the cache is disposable and must never block startup.
 pub fn preload_from_cache(cache: &ytm_core::cache::Cache, state: &mut AppState) {
     match cache.load_playlists() {
         Ok(v) if !v.is_empty() => state.playlists = v,
@@ -1542,15 +1467,9 @@ pub fn preload_from_cache(cache: &ytm_core::cache::Cache, state: &mut AppState) 
     }
 }
 
-/// Show a playlist's cached tracks while the fetch is in flight.
-///
-/// A miss leaves the pane alone rather than clearing it: blanking the screen on
-/// the way to a fetch is worse than briefly showing the playlist list.
-///
-/// A hit does what `AppEvent::PlaylistTracksLoaded` does, minus clearing
-/// `loading` — the spinner is the honest signal that the fetch is still out.
-/// Filling `tracks` alone would change nothing on screen: the Playlists pane
-/// draws the playlist list until `open_playlist` is set.
+/// Show a playlist's cached tracks while the fetch is in flight. A miss leaves
+/// the pane alone rather than blanking it. A hit also sets `open_playlist` —
+/// filling `tracks` alone would leave the playlist list on screen.
 pub fn preload_playlist_tracks(
     cache: &ytm_core::cache::Cache,
     state: &mut AppState,
@@ -1570,19 +1489,9 @@ pub fn preload_playlist_tracks(
     }
 }
 
-/// Persist a fresh library response so the next cold start has content.
-///
-/// Two deliberate exclusions:
-/// - **An empty library list is not written.** Under cookie auth an expired
-///   cookie answers HTTP 200 with zero rows, and writing that through would turn
-///   a one-off auth lapse into a wiped cache — the next launch would come up
-///   blank. An account that really is empty just keeps a stale cache, which is
-///   the cheaper mistake.
-/// - **Search results are not cached.** They belong to a query, not to the
-///   library, and the schema has no place to key them.
-///
-/// Albums and artists have no tables (the schema caches playlists and tracks),
-/// so they pass through untouched.
+/// Persist non-empty library responses for the next cold start. Empty responses
+/// are skipped because an expired cookie answers HTTP 200 with zero rows and
+/// would wipe a good cache; search, albums, and artists are not cached.
 fn cache_work(ev: &AppEvent) -> Option<CacheWork> {
     match ev {
         AppEvent::PlaylistsLoaded(v) if !v.is_empty() => Some(CacheWork::Playlists(v.clone())),
@@ -1627,11 +1536,9 @@ impl CacheWork {
     }
 }
 
-/// The cache lives on its own thread; the loop only ever sends.
-///
-/// Matches the player actor's shape, and keeps rusqlite's non-`Sync`
-/// `Connection` in one place — an `Arc<Cache>` will not compile, and a `Mutex`
-/// on the event loop would put the stall back under contention.
+/// The cache lives on its own thread; the loop only ever sends. Keeps rusqlite's
+/// non-`Sync` `Connection` in one place — an `Arc<Cache>` will not compile, and a
+/// `Mutex` on the event loop would put the stall back under contention.
 pub fn spawn_cache_writer(cache: ytm_core::cache::Cache) -> std::sync::mpsc::Sender<CacheWork> {
     let (tx, rx) = std::sync::mpsc::channel::<CacheWork>();
     std::thread::Builder::new()
@@ -1648,21 +1555,17 @@ pub fn spawn_cache_writer(cache: ytm_core::cache::Cache) -> std::sync::mpsc::Sen
     tx
 }
 
-/// The URL to fetch art for, if any, exactly once per URL.
-///
-/// Called from the tick arm rather than on `TrackChanged`, so a track whose art
-/// failed to decode, or that started playing before the picker finished probing,
-/// still gets one attempt. `should_fetch` is what makes "every tick" cheap.
+/// The URL to fetch art for, if any, exactly once per URL. From the tick arm, not
+/// `TrackChanged`, so a track whose art failed or that started before the picker
+/// finished probing still gets one attempt; `should_fetch` keeps that cheap.
 fn art_tick(art: &mut ytm_tui::widgets::art::ArtCache, state: &AppState) -> Option<String> {
     let url = state.art_url()?;
     art.should_fetch(&url).then_some(url)
 }
 
-/// Fetch and decode one thumbnail off the UI thread (NFR-2).
-///
-/// Decoding is CPU work, so it goes to `spawn_blocking` rather than holding a
-/// runtime worker. Every failure path posts `ArtFailed`, which is what stops the
-/// URL being retried on every tick; a silent drop would retry forever.
+/// Fetch and decode one thumbnail off the UI thread (NFR-2). Decoding is CPU work,
+/// so it goes to `spawn_blocking`. Every failure path posts `ArtFailed`, which is
+/// what stops the URL being retried on every tick; a silent drop retries forever.
 fn spawn_art_fetch(url: String, tx: mpsc::UnboundedSender<AppEvent>) {
     tokio::spawn(async move {
         let ev = match fetch_art(&url).await {
@@ -2359,10 +2262,9 @@ mod tests {
 
     #[test]
     fn a_marked_block_moves_down_together() {
-        // FR-Q3 with FR-C4: `J` moved only the cursor row, so a `V` range could
-        // be selected and removed but never reordered. Highest index first —
-        // each move shifts what follows it, so ascending order would drag the
-        // block apart.
+        // FR-Q3 with FR-C4: `J` moved only the cursor row, so a `V` range could be
+        // selected and removed but never reordered. Highest index first — each move
+        // shifts what follows, so ascending order drags the block apart.
         let (_src, player) = deps();
         let mut s = queue_of_four_with_middle_marked();
         dispatch_input(InputAction::MoveEntryDown, &mut s, &*player, &beh());
@@ -2399,11 +2301,9 @@ mod tests {
         );
     }
 
-    /// Replay a dispatch's reorder commands through the real queue.
-    ///
-    /// The pairs alone do not prove the result: each `MoveInQueue` is a remove
-    /// then an insert, so every command shifts the indices the next one means.
-    /// This runs them through the actor's own `Queue` and reads the order out.
+    /// Replay a dispatch's reorder commands through the real queue. The pairs alone
+    /// do not prove the result: each `MoveInQueue` is a remove then an insert, so
+    /// every command shifts the indices the next one means.
     fn order_after(action: InputAction, state: &mut AppState) -> Vec<String> {
         let (_src, player) = deps();
         let mut q = ytm_player::queue::Queue::default();
@@ -3367,10 +3267,9 @@ mod tests {
 
     #[test]
     fn right_on_an_artist_opens_their_tracks_like_enter() {
-        // `l` on a playlist row opened it, but on an artist row it did nothing:
-        // the reducer's Right arm says "the loop turns this into the fetch" and
-        // the loop only ever checked for a playlist. Enter worked, so the pane
-        // was reachable but the h/l pair was half-missing.
+        // `l` on a playlist row opened it, but on an artist row it did nothing: the
+        // reducer says "the loop turns this into the fetch" and the loop only
+        // checked for a playlist, so the h/l pair was half-missing.
         let (_src, player) = deps();
         let mut s = AppState {
             pane: Pane::Artists,
