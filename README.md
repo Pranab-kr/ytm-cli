@@ -355,9 +355,11 @@ dir under `ytm-cli/logs/` — read them when the UI misbehaves.
 
 ## Keybindings
 
-Press `?` in the app for the live list, which reflects your rebinds. Defaults:
+Press `?` in the app for the live list, which reflects your rebinds. Defaults,
+grouped — click a group to expand it:
 
-### Navigation
+<details>
+<summary><b>Navigation</b> — moving around, switching source, quitting</summary>
 
 | Key | Action |
 |---|---|
@@ -376,7 +378,10 @@ Press `?` in the app for the live list, which reflects your rebinds. Defaults:
 | `Enter` | play a track, or open a playlist / artist |
 | `q` / `Ctrl+c` | quit |
 
-### Playback
+</details>
+
+<details>
+<summary><b>Playback</b> — transport, volume, shuffle, repeat</summary>
 
 | Key | Action |
 |---|---|
@@ -388,7 +393,10 @@ Press `?` in the app for the live list, which reflects your rebinds. Defaults:
 | `s` | shuffle |
 | `r` | repeat off / one / all |
 
-### Queue
+</details>
+
+<details>
+<summary><b>Queue</b> — adding, reordering, clearing</summary>
 
 | Key | Action |
 |---|---|
@@ -399,7 +407,10 @@ Press `?` in the app for the live list, which reflects your rebinds. Defaults:
 | `x` | remove the selected entry (in the queue) |
 | `C` | clear the queue |
 
-### Playlists and selection
+</details>
+
+<details>
+<summary><b>Playlists and selection</b> — marking rows, visual block, playlist CRUD</summary>
 
 | Key | Action |
 |---|---|
@@ -413,10 +424,13 @@ Press `?` in the app for the live list, which reflects your rebinds. Defaults:
 | `D` | delete playlist |
 | `L` | reload the current pane |
 
-### Search and filter
+</details>
 
-Two different things: `/` narrows the rows already on screen without asking the
-server, and `S` searches YouTube Music.
+<details>
+<summary><b>Search and filter</b> — two different things, plus line editing</summary>
+
+`/` narrows the rows already on screen without asking the server; `S` searches
+YouTube Music.
 
 | Key | Action |
 |---|---|
@@ -428,13 +442,18 @@ server, and `S` searches YouTube Music.
 | `Ctrl+←` / `Ctrl+→` | move a word at a time |
 | `Ctrl+a` / `Ctrl+e` | start / end of line |
 
-### Appearance
+</details>
+
+<details>
+<summary><b>Appearance</b> — theme, config, help</summary>
 
 | Key | Action |
 |---|---|
 | `t` | cycle theme |
 | `,` | edit config in `$EDITOR`, reloading on exit |
 | `?` | help overlay |
+
+</details>
 
 ## Mouse
 
