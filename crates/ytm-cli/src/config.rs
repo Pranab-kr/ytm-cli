@@ -247,14 +247,26 @@ impl Config {
 /// the two do not drift.
 pub const EXAMPLE_TOML: &str = include_str!("../../../config.example.toml");
 
+/// Minimal `~` expansion so `cookie_file = "~/.config/..."` works. Not worth a
+/// dependency.
+pub fn expand_tilde(p: &Path) -> PathBuf {
+    let Some(rest) = p.to_str().and_then(|s| s.strip_prefix("~/")) else {
+        return p.to_path_buf();
+    };
+    match std::env::var_os("HOME") {
+        Some(home) => PathBuf::from(home).join(rest),
+        None => p.to_path_buf(),
+    }
+}
+
 /// The theme to start with, plus the preset name so `t` knows where the cycle
 /// is. A `theme_file` still wins over a preset — it is the more specific answer.
 pub fn resolve_theme(cfg: &Config) -> Result<(ytm_tui::theme::Theme, String), ConfigError> {
     use ytm_tui::theme::Theme;
 
-    if let Some(path) = cfg.ui.theme_file.as_deref() {
-        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
-            path: path.to_path_buf(),
+    if let Some(path) = cfg.ui.theme_file.as_deref().map(expand_tilde) {
+        let text = std::fs::read_to_string(&path).map_err(|source| ConfigError::Io {
+            path: path.clone(),
             source,
         })?;
         let t = Theme::from_toml_str(&text).map_err(|e| ConfigError::Theme(e.to_string()))?;
@@ -319,6 +331,41 @@ pub mod paths {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_theme_file_path_with_a_tilde_resolves_on_reload_too() {
+        // The bug: build_theme (startup) expanded ~ and resolve_theme (reload,
+        // pressed with `,`) did not, so a ~ path loaded at launch and then
+        // failed the moment the user saved the config.
+        let home = std::env::var("HOME").expect("HOME is set in tests");
+        let path = std::path::PathBuf::from(&home).join(".ytm-test-theme.toml");
+        std::fs::write(&path, "preset = \"gruvbox\"\naccent = \"#ff0000\"\n")
+            .expect("write the temp theme");
+
+        let cfg = Config::from_toml_str("[ui]\ntheme_file = \"~/.ytm-test-theme.toml\"")
+            .expect("config parses");
+        let resolved = resolve_theme(&cfg);
+        let _ = std::fs::remove_file(&path);
+
+        let (theme, name) = resolved.expect("a ~ path must resolve");
+        assert_eq!(name, "custom");
+        assert_eq!(theme.accent, ytm_tui::theme::parse_hex("#ff0000").unwrap());
+    }
+
+    #[test]
+    fn expand_tilde_leaves_other_paths_alone() {
+        use std::path::Path;
+        assert_eq!(
+            expand_tilde(Path::new("/etc/absolute.toml")),
+            Path::new("/etc/absolute.toml")
+        );
+        assert_eq!(
+            expand_tilde(Path::new("relative.toml")),
+            Path::new("relative.toml")
+        );
+        // A bare `~` with no slash is not a home reference we handle.
+        assert_eq!(expand_tilde(Path::new("~weird")), Path::new("~weird"));
+    }
 
     #[test]
     fn defaults_apply_when_file_is_absent() {

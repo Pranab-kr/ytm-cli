@@ -13,7 +13,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io::{self, Stdout};
 use std::sync::Arc;
 use ytm_core::MusicSource;
-use ytm_tui::{app::AppState, keymap::KeyMap, theme::Theme};
+use ytm_tui::{app::AppState, keymap::KeyMap};
 
 /// Restores the terminal on drop, including during a panic unwind (NFR-5).
 pub struct TerminalGuard {
@@ -69,18 +69,6 @@ fn install_panic_hook() {
     }));
 }
 
-/// Minimal `~` expansion so `cookie_file = "~/.config/..."` works. Not worth a
-/// dependency.
-fn expand_tilde(p: &std::path::Path) -> std::path::PathBuf {
-    let Some(rest) = p.to_str().and_then(|s| s.strip_prefix("~/")) else {
-        return p.to_path_buf();
-    };
-    match std::env::var("HOME") {
-        Ok(home) => std::path::PathBuf::from(home).join(rest),
-        Err(_) => p.to_path_buf(),
-    }
-}
-
 /// Build whichever `MusicSource` config selects.
 ///
 /// Browser cookies are the only auth path.
@@ -107,7 +95,7 @@ async fn build_authenticated_source(
         .auth
         .cookie_file
         .as_deref()
-        .map(expand_tilde)
+        .map(config::expand_tilde)
         .ok_or_else(|| {
             eyre!(
                 "auth.cookie_file is not set in {} — see the README for how to export \
@@ -160,7 +148,7 @@ fn guest_startup(cfg: &config::Config) -> bool {
             .auth
             .cookie_file
             .as_deref()
-            .map(expand_tilde)
+            .map(config::expand_tilde)
             .is_none_or(|path| !path.is_file())
 }
 
@@ -171,32 +159,6 @@ fn apply_startup_shuffle(player: &impl ytm_player::player::Player, shuffle: bool
     if shuffle && let Err(e) = player.send(ytm_player::player::PlayerCommand::SetShuffle(true)) {
         tracing::warn!(error = %e, "could not enable shuffle at startup");
     }
-}
-
-/// Theme from config: an explicit file wins, otherwise just the accent override.
-/// The theme to start with, plus the preset name so `t` knows where the cycle
-/// is. A `theme_file` is the most specific answer and wins over `ui.theme`.
-fn build_theme(cfg: &config::Config) -> color_eyre::Result<(Theme, String)> {
-    if let Some(path) = cfg.ui.theme_file.as_deref().map(expand_tilde) {
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("could not read the theme file at {}", path.display()))?;
-        return Ok((Theme::from_toml_str(&text)?, "custom".to_owned()));
-    }
-    let name = match &cfg.ui.theme {
-        config::ThemeChoice::Auto => config::auto_theme_name(),
-        config::ThemeChoice::Named(n) => n.clone(),
-    };
-    let mut theme = Theme::preset(&name).ok_or_else(|| {
-        eyre!(
-            "ui.theme names no built-in theme: {name:?} (try one of: {})",
-            Theme::preset_names().join(", ")
-        )
-    })?;
-    if let Some(hex) = &cfg.ui.accent {
-        theme.accent = ytm_tui::theme::parse_hex(hex)
-            .ok_or_else(|| eyre!("ui.accent is not a hex color like \"#7aa2f7\": {hex:?}"))?;
-    }
-    Ok((theme, name))
 }
 
 /// `ytm` with no subcommand launches the TUI; the subcommands are the
@@ -663,7 +625,7 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
     };
 
     let volume = cfg.playback.volume.min(100) as u8;
-    let (theme, theme_name) = build_theme(&cfg)?;
+    let (theme, theme_name) = config::resolve_theme(&cfg)?;
 
     // Decided before the first frame: the start pane, the cache preload, and
     // whether yt-dlp gets cookies all depend on it, and all three happen before
