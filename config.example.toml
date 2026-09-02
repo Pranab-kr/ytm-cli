@@ -40,7 +40,7 @@ volume = 70        # 0-100, the starting level; +/- changes are remembered
 shuffle = false    # start shuffled
 
 [ui]
-vim_keys = true    # h/j/k/l navigation alongside the arrow keys
+vim_keys = true    # h/j/k/l navigation alongside the arrows; false drops those four only
 mouse = true       # scroll wheel scrolls; left click selects, right click queues
 
 # Which source the app opens on: "playlists" (default), "home", "fav",
