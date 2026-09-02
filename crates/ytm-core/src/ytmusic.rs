@@ -72,6 +72,21 @@ where
     .map_err(classify)
 }
 
+fn classify_raw_api_error(json: &str) -> Option<SourceError> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let error = value.get("error")?;
+    let code = error.get("code").and_then(serde_json::Value::as_i64);
+    let message = error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("YouTube API error");
+    Some(match code {
+        Some(401) => SourceError::NotAuthenticated,
+        Some(429) => SourceError::RateLimited,
+        _ => SourceError::Other(format!("YouTube API error ({message})")),
+    })
+}
+
 /// The one song-search path, shared by the authenticated and the guest source.
 ///
 /// This exists because `ytmapi-rs` 0.3.3's typed `search_songs` mistakes a UGC
@@ -91,6 +106,9 @@ async fn song_search_from_raw<A: AuthToken>(
         .raw_json_query::<SearchQuery<'static, FilteredSearch<SongsFilter>>>(&q)
         .await
         .map_err(classify)?;
+    if let Some(error) = classify_raw_api_error(&json) {
+        return Err(error);
+    }
     Ok(crate::search_raw::tracks_from_raw(&json))
 }
 
@@ -815,6 +833,19 @@ mod tests {
             .await
             .expect("guest search succeeds");
         assert!(!tracks.is_empty(), "guest search returned no tracks");
+    }
+
+    #[test]
+    fn song_search_error_bodies_become_classified_source_errors() {
+        let unauthorized =
+            classify_raw_api_error("{\"error\":{\"code\":401,\"message\":\"expired\"}}");
+        assert!(matches!(unauthorized, Some(SourceError::NotAuthenticated)));
+
+        let rate_limited =
+            classify_raw_api_error("{\"error\":{\"code\":429,\"message\":\"quota\"}}");
+        assert!(matches!(rate_limited, Some(SourceError::RateLimited)));
+
+        assert!(classify_raw_api_error("{\"contents\":{}}").is_none());
     }
 
     #[test]
