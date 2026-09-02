@@ -59,26 +59,13 @@ impl ArtCache {
 }
 
 impl ArtCache {
-    /// Probes the terminal. Returns a disabled cache when images are unsupported.
-    ///
-    /// **Call this after entering the alternate screen but before reading
-    /// terminal events** — it writes a query sequence and reads the reply, so an
-    /// event stream already draining stdin would eat the answer. (The plan says
-    /// "before entering the alternate screen"; `Picker::from_query_stdio`'s own
-    /// doc comment in ratatui-image 11.0.6 says after, and it is the one that
-    /// has to be right.)
-    ///
-    /// It also blocks for up to 2s waiting on a terminal that never answers, so
-    /// it must run *after* the first frame is drawn or it spends the whole NFR-1
-    /// budget on a probe.
+    /// Probes the terminal, returning a disabled cache when unsupported. Call
+    /// after entering the alternate screen but before reading events: the query
+    /// consumes stdin, can block up to 2s, and must follow the first frame (NFR-1).
     pub fn detect() -> Self {
-        // Under tmux the stdio query is destructive: with `allow-passthrough`
-        // off, tmux prints the escape sequence as text instead of forwarding
-        // it, no reply ever comes, and the terminal is left in a state where
-        // crossterm's EventStream stops delivering key presses — Enter did
-        // nothing and no track would play. Measured against the live app: art
-        // on = no playback, art off = plays. So under tmux we never touch
-        // stdio, and fall back to halfblocks, which needs no protocol support.
+        // Probing stdio under tmux left crossterm delivering no key presses, so
+        // Enter did nothing and nothing played at all. Measured live: art on = no
+        // playback, art off = plays. Halfblocks need no probe, so use them here.
         if in_tmux() {
             tracing::info!("tmux detected, using halfblocks without probing stdio");
             return Self::with_picker(Some(Picker::halfblocks()));
@@ -135,10 +122,9 @@ impl ArtCache {
         self.failed.insert(url.to_owned());
     }
 
-    /// Build the protocol object for a decoded image. A disabled cache drops it:
-    /// there is nothing that could render it, and keeping it would leak memory
-    /// for every track played. An enabled one evicts the oldest past the cap,
-    /// for the same reason.
+    /// Build the protocol object for a decoded image. A disabled cache drops it —
+    /// nothing could render it, and it would leak ~1 MiB per track played. An
+    /// enabled one evicts the oldest past the cap, for the same reason.
     pub fn insert(&mut self, url: &str, image: image::DynamicImage) {
         self.in_flight.remove(url);
         let Some(picker) = self.picker.as_ref() else {
@@ -158,10 +144,9 @@ impl ArtCache {
     }
 }
 
-/// Draw the art for whatever is playing, or nothing at all.
-///
-/// Takes `&mut ArtCache` because the protocol objects re-encode themselves when
-/// the area changes — that is what makes the image survive a resize.
+/// Draw the art for whatever is playing, or nothing at all. Takes `&mut ArtCache`
+/// because the protocol objects re-encode themselves when the area changes — that
+/// is what makes the image survive a resize.
 pub fn draw(f: &mut Frame, area: Rect, url: Option<&str>, art: &mut ArtCache) {
     if !should_draw(area) || !art.is_enabled() {
         return;

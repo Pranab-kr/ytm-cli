@@ -27,11 +27,9 @@ impl SearchDebounce {
         self.last_input_ms = now_ms;
     }
 
-    /// Call on every tick. Returns the query to search, at most once each.
-    ///
-    /// Compares against the *last* query fired rather than a history, so
-    /// deleting back and retyping the same text searches again — by then the
-    /// results pane is showing something else.
+    /// Call on every tick. Returns the query to search, at most once each. Compares
+    /// against the *last* query fired rather than a history, so deleting back and
+    /// retyping the same text searches again — the pane is showing something else.
     pub fn should_fire(&mut self, now_ms: u64) -> Option<String> {
         let q = self.pending.as_ref()?;
         if q.trim().is_empty() {
@@ -61,12 +59,9 @@ mod tests {
 
     #[test]
     fn debounce_interval_is_at_least_280ms() {
-        // NFR-7 / FR-S2: firing per keystroke risks a rate limit.
-        //
-        // A `const` block rather than a plain `assert!`: clippy rejects
-        // asserting on a constant at runtime, and this is stronger anyway —
-        // lowering DEFAULT_DEBOUNCE_MS now fails to compile rather than
-        // failing a test run.
+        // NFR-7 / FR-S2: firing per keystroke risks a rate limit. A `const` block
+        // rather than a plain `assert!` — clippy rejects that, and this is stronger:
+        // lowering DEFAULT_DEBOUNCE_MS fails to compile rather than failing a test.
         const { assert!(DEFAULT_DEBOUNCE_MS >= 280) }
     }
 

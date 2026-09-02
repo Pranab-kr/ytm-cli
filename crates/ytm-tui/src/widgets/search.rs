@@ -67,11 +67,9 @@ pub fn draw_input(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Split the query at the caret, clamped and snapped to a char boundary.
-///
-/// The offset can be stale — the query is replaced from outside the field — and
-/// slicing a stale or mid-codepoint index panics, which in a TUI takes the whole
-/// session down rather than merely looking wrong.
+/// Split the query at the caret, clamped and snapped to a char boundary. The offset
+/// can be stale — the query is replaced from outside the field — and slicing a stale
+/// or mid-codepoint index panics, which in a TUI takes the session down.
 fn split_at_cursor(q: &str, cursor: usize) -> (&str, &str) {
     let mut at = cursor.min(q.len());
     while at > 0 && !q.is_char_boundary(at) {
@@ -92,12 +90,9 @@ pub fn draw_no_matches(f: &mut Frame, area: Rect, t: &Theme) {
     );
 }
 
-/// The filter row, shown whenever a filter is being typed or is narrowing rows.
-///
-/// It has to be on screen: without it the user types and sees only rows
-/// disappearing, with no way to tell what the filter holds, that a keystroke
-/// went into it rather than to the list, or how to get back. That was reported
-/// as "the filter text not show".
+/// The filter row, shown whenever a filter is being typed or is narrowing rows. It
+/// has to be on screen: without it the user sees only rows disappearing, with no way
+/// to tell what the filter holds or how to get back ("the filter text not show").
 pub fn draw_filter(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     if area.width == 0 || area.height == 0 {
         return;

@@ -51,12 +51,9 @@ fn classify(e: ytmapi_rs::Error) -> SourceError {
     }
 }
 
-/// Run upstream's typed parse over a response we already hold.
-///
-/// `raw_json_query` + this is equivalent to the typed call but lets us inspect
-/// the JSON first — needed because upstream's parsers fail on an empty library
-/// section instead of yielding an empty list. `ProcessedResult`'s fields are
-/// public and `parse_into` runs on JSON in hand, so this costs no extra request.
+/// Run upstream's typed parse over a response we already hold, so we can inspect
+/// the JSON first — upstream's parsers fail on an empty library section instead
+/// of yielding an empty list. `parse_into` runs on JSON in hand: no extra request.
 fn parse_json<Q, O>(query: &Q, json: String) -> Result<O, SourceError>
 where
     O: ytmapi_rs::parse::ParseFrom<Q>,
@@ -87,14 +84,9 @@ fn classify_raw_api_error(json: &str) -> Option<SourceError> {
     })
 }
 
-/// The one song-search path, shared by the authenticated and the guest source.
-///
-/// This exists because `ytmapi-rs` 0.3.3's typed `search_songs` mistakes a UGC
-/// music video's `artist • 43K views • 3:26` byline for `artist • album •
-/// duration`, demands an album `browseId` the view-count run does not carry, and
-/// aborts the *entire* response on that one row (PROGRESS.md 2026-09-02). We
-/// send the same filtered query through `raw_json_query` and let `search_raw`
-/// parse each row independently, so a single odd row cannot erase its neighbours.
+/// The one song-search path, shared by the authenticated and the guest source:
+/// `ytmapi-rs` 0.3.3's typed `search_songs` reads a UGC `artist • 43K views •
+/// 3:26` byline as an album and aborts the whole response (PROGRESS.md 2026-09-02).
 async fn song_search_from_raw<A: AuthToken>(
     api: &YtMusic<A>,
     query: &str,
@@ -129,15 +121,9 @@ fn to_privacy_status(p: Privacy) -> PrivacyStatus {
     }
 }
 
-/// YouTube Music's home feed (FR-B6).
-///
-/// `ytmapi-rs` 0.3.3 exposes no home query, but `Query`/`PostQuery` are public
-/// and documented as user-implementable, so `browseId: FEmusic_home` is
-/// reachable without forking upstream. Verified live on 2026-08-31.
-///
-/// The output is deliberately raw: upstream's parsers cannot help with a feed it
-/// has no types for, so `home_feed::shelves_from_raw` does the work and this
-/// type exists only to satisfy the trait bound.
+/// YouTube Music's home feed (FR-B6). `ytmapi-rs` 0.3.3 has no home query, but
+/// `Query`/`PostQuery` are user-implementable, so `browseId: FEmusic_home` needs
+/// no fork (verified live 2026-08-31). Raw output; `home_feed` does the parsing.
 #[derive(Debug)]
 pub struct HomeRaw;
 
@@ -169,12 +155,9 @@ impl ytmapi_rs::query::PostQuery for GetHomeQuery {
     }
 }
 
-/// The next page of the home feed.
-///
-/// Needed because the first page is not the useful one: measured live, page 1 is
+/// The next page of the home feed — the useful one. Measured live: page 1 is
 /// "Listen again" / "From your library" / "Listen together", while page 2 holds
-/// "Quick picks", "Covers and remixes", and "Heard in Shorts" — the shelves the
-/// web player leads with.
+/// "Quick picks", "Covers and remixes", "Heard in Shorts" — what the web leads with.
 #[derive(Debug, Clone)]
 pub struct GetHomeContinuationQuery(pub String);
 
@@ -206,20 +189,14 @@ impl ytmapi_rs::query::PostQuery for GetHomeContinuationQuery {
     }
 }
 
-/// How many home-feed pages to walk.
-///
-/// Page 1 carries none of the shelves the web player leads with, so one page is
-/// not enough; three pages is where the returns flatten and each page is a
-/// round trip the user waits on. Measured live 2026-08-31.
+/// How many home-feed pages to walk. Page 1 carries none of the shelves the web
+/// player leads with, and three pages is where the returns flatten — each page is
+/// a round trip the user waits on. Measured live 2026-08-31.
 const HOME_PAGES: usize = 3;
 
 /// Which song list to show for an artist: the full playlist, or the page preview.
-///
-/// The artist page's shelf is a ~5-row preview whose entries carry no thumbnail
-/// and no duration. Its `browse_id` playlist carries both, so the full list wins
-/// whenever it actually arrived with at least as many rows. A failed or shorter
-/// follow-up keeps the preview: five playable rows beat an error for something
-/// the user can already see on screen.
+/// The shelf is a ~5-row preview with no thumbnail and no duration; its
+/// `browse_id` playlist has both, so it wins when it arrived with as many rows.
 fn better_artist_tracks(preview: Vec<Track>, full: Result<Vec<Track>, SourceError>) -> Vec<Track> {
     match full {
         // `>=` rather than `>`: at equal length the playlist rows are still the
@@ -238,11 +215,9 @@ fn better_artist_tracks(preview: Vec<Track>, full: Result<Vec<Track>, SourceErro
 macro_rules! impl_feed {
     ($token:ty) => {
         impl YtMusicSource<$token> {
-            /// Walk the home feed, following continuations (FR-B6).
-            ///
-            /// Errors on the *first* page propagate — that is a real failure to
-            /// reach YouTube. A later page failing is not worth losing the
-            /// shelves already in hand, so it just stops the walk.
+            /// Walk the home feed, following continuations (FR-B6). A first-page
+            /// error propagates — YouTube is unreachable. A later page failing
+            /// just stops the walk rather than losing the shelves in hand.
             async fn feed_shelves(&self) -> Result<Vec<HomeShelf>, SourceError> {
                 let first = self
                     .api
@@ -273,12 +248,9 @@ macro_rules! impl_feed {
 
 impl_feed!(BrowserToken);
 
-/// One `MusicSource` impl per concrete token type.
-///
-/// This cannot be a single `impl<A: LoggedIn>`: upstream's
+/// One `MusicSource` impl per concrete token type, not one `impl<A: LoggedIn>`:
 /// `AuthToken::headers` returns an opaque `impl IntoIterator` with no `Send`
-/// bound, so `Send` is unprovable through a generic `A` and the `BoxFut` cast
-/// fails. With a concrete `A`, auto-trait leakage supplies `Send`.
+/// bound, so the `BoxFut` cast needs auto-trait leakage from a concrete `A`.
 macro_rules! impl_music_source {
     ($token:ty) => {
         impl MusicSource for YtMusicSource<$token> {
@@ -298,13 +270,9 @@ macro_rules! impl_music_source {
 
             fn library_albums(&self) -> BoxFut<'_, Vec<Album>> {
                 Box::pin(async move {
-                    // Parsed from raw JSON rather than via `get_library_albums`
-                    // because upstream cannot parse an *empty* library: with no
-                    // saved albums YouTube sends a `messageRenderer` ("No albums
-                    // yet") where the parser demands a `gridRenderer`, and the
-                    // failure reached the user as an error toast on a pane that
-                    // should just have read empty (FR-B3). Measured against the
-                    // live account 2026-08-31; fixture in library_raw.rs.
+                    // Raw JSON, not `get_library_albums`: with no saved albums
+                    // YouTube sends a `messageRenderer` where the parser demands
+                    // a `gridRenderer`, and that reached the user as a toast (FR-B3).
                     let query = ytmapi_rs::query::GetLibraryAlbumsQuery::default();
                     let json = self
                         .api
@@ -365,12 +333,9 @@ macro_rules! impl_music_source {
                         return Ok(Vec::new());
                     };
 
-                    // That shelf is the *preview* the web UI shows above "Show
-                    // all" — about five rows — and `ArtistSong` carries neither a
-                    // thumbnail nor a duration, so those rows render with no art
-                    // and 0:00. Its `browse_id` is the artist's full songs
-                    // playlist, and playlist entries carry both. One extra
-                    // request buys the whole list, the art, and real times.
+                    // That shelf is the web UI's ~5-row preview above "Show all",
+                    // and `ArtistSong` carries no thumbnail or duration, so those
+                    // rows render bare. One request on `browse_id` buys both.
                     let preview: Vec<Track> = songs
                         .results
                         .iter()
@@ -387,13 +352,9 @@ macro_rules! impl_music_source {
 
             fn playlist_tracks(&self, id: PlaylistId) -> BoxFut<'_, Vec<Track>> {
                 Box::pin(async move {
-                    // One request, parsed twice: upstream's typed parse for the
-                    // track data, and our own pass for `setVideoId`, which
-                    // `ytmapi-rs` 0.3.3 discards but removal requires (FR-C5).
-                    // `ProcessedResult`'s fields are public and `parse_into`
-                    // runs on JSON we already hold, so this costs no extra
-                    // round trip. Verified against the crate source.
-                    // Browse endpoint: VL-prefixed form (see PlaylistId's docs).
+                    // One request, parsed twice — no extra round trip: upstream's
+                    // typed parse for track data, ours for `setVideoId`, which
+                    // 0.3.3 discards but removal needs (FR-C5). Browse: VL form.
                     let browse_id = id.browse_form();
                     let query = ytmapi_rs::query::GetPlaylistTracksQuery::new(
                         ytmapi_rs::common::PlaylistID::from_raw(&browse_id),
@@ -821,10 +782,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "live InnerTube guest-search gate; run by hand"]
     async fn guest_song_search_returns_tracks() {
-        // Exercises the real guest path: the source's search_songs, which now
-        // runs raw_json_query through search_raw rather than upstream's typed
-        // parser. "freak" is the query whose UGC view-count rows used to abort
-        // the whole response.
+        // Exercises the real guest path: search_songs now runs raw_json_query
+        // through search_raw, not upstream's typed parser. "freak" is the query
+        // whose UGC view-count rows used to abort the whole response.
         let source = YtMusicSource::unauthenticated()
             .await
             .expect("guest handshake succeeds");
@@ -850,11 +810,9 @@ mod tests {
 
     #[test]
     fn the_typed_parser_the_bug_was_in_aborts_where_our_raw_parser_recovers() {
-        // Locks the regression to the fixture without touching the network: the
-        // scrubbed capture below is exactly the shape upstream could not parse,
-        // so ytmapi-rs's typed search must still reject it — if this stops
-        // failing, the fixture no longer reproduces the 2026-09-02 bug. Ours must
-        // keep the three usable songs.
+        // The scrubbed fixture is exactly the shape upstream could not parse, so
+        // its typed search must still reject it — if this stops failing, the
+        // fixture no longer reproduces the 2026-09-02 bug. Ours keeps 3 songs.
         let json = include_str!("../tests/fixtures/search_songs_ugc.json");
         let query = SearchQuery::<FilteredSearch<SongsFilter>>::from("freak");
         let typed =

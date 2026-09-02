@@ -17,10 +17,9 @@ pub enum AuthChoice {
     Cookie(PathBuf),
 }
 
-/// Locate the cookie file `auth.cookie_file` names.
-///
-/// Errors name the fix rather than the failure: these examples are what you run
-/// when nothing else works, so "set this key in this file" is the useful message.
+/// Locate the cookie file `auth.cookie_file` names. Errors name the fix rather
+/// than the failure: these examples are what you run when nothing else works, so
+/// "set this key in this file" is the useful message.
 pub fn auth_choice() -> Result<AuthChoice, String> {
     let path = config_path();
     let text = std::fs::read_to_string(&path)
@@ -50,8 +49,7 @@ pub fn auth_choice() -> Result<AuthChoice, String> {
 
 /// Duplicates `ytm-cli`'s `config::expand_tilde` on purpose: examples live in
 /// `ytm-core`, and importing from `ytm-cli` would invert the dependency
-/// direction. Not worth a shared crate for nine lines. `config_path` below is
-/// the same story.
+/// direction. Not worth a shared crate for nine lines; same for `config_path`.
 fn shellexpand_tilde(s: &str) -> String {
     match s.strip_prefix("~/") {
         Some(rest) => match std::env::var("HOME") {

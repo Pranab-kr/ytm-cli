@@ -37,11 +37,9 @@ const SHELF_PATH: [&str; 5] = [
     "contents",
 ];
 
-/// One `(videoId, setVideoId)` per playlist row, in response order.
-///
-/// The `videoId` is what makes this usable: upstream's typed parse silently
-/// drops rows, so the two lists have different lengths and only the id can pair
-/// them.
+/// One `(videoId, setVideoId)` per playlist row, in response order. The `videoId`
+/// is what makes this usable: upstream's typed parse silently drops rows, so the
+/// two lists have different lengths and only the id can pair them.
 pub fn entry_ids_from_raw(json: &str) -> Vec<(VideoId, Option<SetVideoId>)> {
     let Ok(v) = serde_json::from_str::<Value>(json) else {
         return Vec::new();
@@ -94,13 +92,8 @@ fn row_set_video_id(row: &Value) -> Option<SetVideoId> {
 }
 
 /// Attach each row's entry id to the parsed track with the same `videoId`.
-///
-/// Matching walks forward through the rows and never revisits one, which is what
-/// makes a duplicated video work: the same song twice in a playlist has two
-/// different `setVideoId`s, and that is the entire reason the field exists.
-/// Pairing by position instead would fail outright — upstream returned 83 tracks
-/// for an 85-row shelf — and pairing by id without a cursor would give both
-/// copies the first id and delete the wrong row.
+/// Matching walks forward and never revisits a row, so the same song twice gets
+/// its two distinct `setVideoId`s — without the cursor, both copies get the first.
 pub fn attach_entry_ids(tracks: Vec<Track>, rows: &[(VideoId, Option<SetVideoId>)]) -> Vec<Track> {
     let mut cursor = 0usize;
     tracks

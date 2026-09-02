@@ -31,22 +31,16 @@ const CONT_SECTIONS: &str = "/continuationContents/sectionListContinuation/conte
 const CONT_TOKEN: &str = "/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/continuations/0/nextContinuationData/continuation";
 const CONT_TOKEN_NEXT: &str = "/continuationContents/sectionListContinuation/continuations/0/nextContinuationData/continuation";
 
-/// Parse the feed into shelves, dropping anything unrecognisable.
-///
-/// An empty result means "no feed", which the UI shows as an empty pane — the
-/// same treatment as an empty library, and never an error, because a home feed
-/// is a convenience rather than something the user asked to see.
+/// Parse the feed into shelves, dropping anything unrecognisable. An empty result
+/// means "no feed", which the UI shows as an empty pane and never an error — the
+/// feed is a convenience, not something the user asked to see.
 pub fn shelves_from_raw(json: &str) -> Vec<HomeShelf> {
     let Ok(v) = serde_json::from_str::<Value>(json) else {
         return Vec::new();
     };
     // The first page and a continuation put identical shelves under different
-    // paths, so try both rather than keeping two near-identical parsers.
-    //
-    // Order matters and cost a debugging round: a continuation response carries
-    // *both* an empty first-page shell under `/contents` and the real shelves
-    // under `/continuationContents`. Taking the first path that merely exists
-    // yields nothing, so take the first that actually holds shelves.
+    // paths. Order matters: a continuation carries *both* an empty first-page
+    // shell under `/contents` and the real shelves, so take the first non-empty.
     [SECTIONS, CONT_SECTIONS]
         .iter()
         .filter_map(|path| v.pointer(path).and_then(Value::as_array))
@@ -55,14 +49,9 @@ pub fn shelves_from_raw(json: &str) -> Vec<HomeShelf> {
         .unwrap_or_default()
 }
 
-/// The token for the next page of shelves, if the feed offers one.
-///
-/// This matters more than it looks: the **first page is not the interesting
-/// one**. Measured live on 2026-08-31, page 1 returned "Listen again", "From
-/// your library", and "Listen together", while page 2 held "Quick picks",
-/// "Covers and remixes", and "Heard in Shorts" — the shelves the web player
-/// leads with. A client that reads only page 1 shows none of the actual
-/// recommendations.
+/// The token for the next page of shelves, if the feed offers one. The first page
+/// is not the interesting one: measured live 2026-08-31, "Quick picks", "Covers
+/// and remixes", and "Heard in Shorts" are all on page 2, not page 1.
 pub fn continuation_token(json: &str) -> Option<String> {
     let v = serde_json::from_str::<Value>(json).ok()?;
     v.pointer(CONT_TOKEN)
@@ -92,13 +81,9 @@ fn shelf(section: &Value) -> Option<HomeShelf> {
     Some(HomeShelf { title, items })
 }
 
-/// One card, in whichever of the two shapes the shelf used.
-///
-/// The feed uses two item renderers and they are not interchangeable:
-/// `musicTwoRowItemRenderer` for the artwork cards on page 1, and
-/// `musicResponsiveListItemRenderer` for the list rows that "Quick picks" and
-/// the other page-2 shelves are built from. Handling only the first parses page
-/// 1 and silently returns nothing for the shelves the user actually wants.
+/// One card, in whichever of the two shapes the shelf used — they are not
+/// interchangeable: `musicTwoRowItemRenderer` for page 1's artwork cards,
+/// `musicResponsiveListItemRenderer` for the page-2 list rows ("Quick picks").
 fn card(item: &Value) -> Option<HomeItem> {
     if let Some(r) = item.pointer("/musicResponsiveListItemRenderer") {
         return list_row(r);
@@ -221,14 +206,9 @@ fn target(nav: &Value) -> Option<HomeTarget> {
     }
 }
 
-/// The album cards from a parsed feed, as `Album`s (FR-B3).
-///
-/// The library albums pane is empty for most accounts — YouTube only lists
-/// albums you explicitly saved — so an empty pane is a dead end rather than
-/// information. These are the albums the feed recommends.
-///
-/// `year` is left `None`: the feed's second line is a byline ("Example Name •
-/// EP"), not a year, and inventing one from it would show the user a wrong date.
+/// The album cards from a parsed feed, as `Album`s (FR-B3) — the library pane
+/// lists only explicitly saved albums, so it is empty for most accounts. `year`
+/// stays `None`: the second line is a byline ("Example Name • EP"), not a year.
 pub fn albums_from_shelves(shelves: &[HomeShelf]) -> Vec<crate::model::Album> {
     let mut seen = std::collections::HashSet::new();
     shelves
@@ -294,9 +274,8 @@ mod tests {
     #[test]
     fn the_feed_mixes_playable_tracks_with_pages_to_open() {
         // This is the property the UI has to cope with: one carousel is not one
-        // kind of thing. If a future capture flattens to a single kind, the
-        // pane's per-row Enter behaviour is being tested against less than the
-        // real feed.
+        // kind of thing. A future capture that flattens to a single kind tests
+        // the pane's per-row Enter behaviour against less than the real feed.
         let items: Vec<HomeItem> = shelves_from_raw(FEED)
             .into_iter()
             .flat_map(|s| s.items)
@@ -456,10 +435,8 @@ mod tests {
     #[test]
     fn quick_picks_is_not_on_the_first_page() {
         // Measured live: page 1 is "Listen again" / "From your library" /
-        // "Listen together". Anything that reads only page 1 shows the user
-        // none of the recommendations they see on the web. If a future capture
-        // changes this, the two-page fetch may be simplifiable — but check
-        // before assuming.
+        // "Listen together". If a future capture changes this, the two-page fetch
+        // may be simplifiable — but check before assuming.
         let titles: Vec<String> = shelves_from_raw(FEED)
             .into_iter()
             .map(|s| s.title)

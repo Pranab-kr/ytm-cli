@@ -195,21 +195,17 @@ pub struct Artist {
 }
 
 /// One row of YouTube Music's home feed — "Listen again", "Albums for you".
-///
-/// The feed is a list of carousels, so the shelf title is part of the data
-/// rather than something the UI invents. Which shelves come back is decided by
-/// YouTube and varies per account and per request.
+/// Shelf titles are data, not UI labels: YouTube decides which carousels return,
+/// varying by account and request.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HomeShelf {
     pub title: String,
     pub items: Vec<HomeItem>,
 }
 
-/// One card in a home shelf.
-///
-/// Kept deliberately flat: the feed mixes tracks, playlists, albums, and
-/// artists in a single carousel, and the UI needs to render them in one list
-/// while still knowing what Enter should do with each.
+/// One card in a home shelf. Kept flat because a carousel mixes tracks,
+/// playlists, albums, and artists; the UI renders one list but must retain each
+/// card's Enter target.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HomeItem {
     pub title: String,

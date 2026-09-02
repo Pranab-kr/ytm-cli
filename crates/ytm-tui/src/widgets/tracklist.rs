@@ -17,11 +17,9 @@ const MARK_WIDTH: usize = 2;
 /// Title takes six tenths of what is left; the artist gets the rest.
 const TITLE_SHARE: usize = 6;
 
-/// The slice of rows to draw, keeping `selected` visible.
-///
-/// Returns a half-open range. `offset` is the previous scroll position, used as
-/// a starting guess so the list does not jump when the selection has not left
-/// the viewport.
+/// The slice of rows to draw, keeping `selected` visible. Returns a half-open
+/// range; `offset` is the previous scroll position, used as a starting guess so
+/// the list does not jump while the selection stays in the viewport.
 pub fn visible_window(selected: usize, offset: usize, height: usize, len: usize) -> (usize, usize) {
     if len == 0 || height == 0 {
         return (0, 0);
@@ -38,11 +36,8 @@ pub fn visible_window(selected: usize, offset: usize, height: usize, len: usize)
 }
 
 /// A dim `Title / Artist / Time` header, aligned to the same columns the rows
-/// use so it labels the grid rather than floating over it.
-///
-/// The widths are computed exactly as `draw` computes them, from the same
-/// constants — a second copy would drift and the labels would sit off their
-/// columns.
+/// use so it labels the grid rather than floating over it. The widths come from
+/// the same constants `draw` uses — a second copy drifts off its columns.
 pub fn draw_column_header(f: &mut Frame, area: Rect, t: &Theme) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -71,12 +66,9 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
         return;
     }
 
-    // `visible_tracks` is the single source of truth for which rows are on
-    // screen: it picks the right list for the pane (an open artist's tracks are
-    // not `tracks`) and applies the filter. Reading raw state here instead was
-    // two bugs at once — `/` filtered nothing visibly, and an open artist drew
-    // the library songs while `list_len` counted the artist's, so scrolling
-    // stopped dead at the shorter list's length.
+    // `visible_tracks` is the single source of truth for which rows are on screen:
+    // it picks the right list for the pane and applies the filter. Reading raw
+    // state drew library songs under an open artist and scrolling stopped early.
     let rows: Vec<&ytm_core::Track> = s.visible_tracks();
 
     if rows.is_empty() {

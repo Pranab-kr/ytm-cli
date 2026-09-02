@@ -57,11 +57,9 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
         .map(|(i, track)| {
             let idx = start + i;
             let is_sel = idx == s.selected;
-            // Unfiltered, the visible index *is* the queue index, and that is the
-            // only way to tell two copies of the same song apart — the queue can
-            // legitimately hold a video twice. Under a filter the two indices
-            // differ, so fall back to the id and accept that duplicates both
-            // highlight; showing the wrong row as playing would be worse.
+            // Unfiltered, the visible index *is* the queue index, and it is the
+            // only way to tell two copies of one song apart. Under a filter the
+            // indices differ, so match on id and accept both rows highlighting.
             let is_current = if s.is_filtering() {
                 s.queue_current
                     .and_then(|c| s.queue.get(c))
@@ -85,9 +83,8 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
             };
 
             // The gutter shows one glyph and the mark wins it, so a `V` range
-            // reads as a contiguous run of bullets even across the current row.
-            // Play position is not lost: the current entry keeps its bold accent
-            // title, and its `\u{25b6}` returns as soon as the mark clears.
+            // reads as a contiguous run of bullets. Play position survives in the
+            // bold accent title, and the `\u{25b6}` returns when the mark clears.
             let gutter = if marked {
                 "\u{2022} "
             } else if is_current {
@@ -185,10 +182,9 @@ mod tests {
 
     #[test]
     fn a_marked_queue_entry_shows_the_multiselect_bullet() {
-        // FR-C4/FR-Q3: `v`/`V` marks must be visible here, the same as in the
-        // track list, or the user cannot see what they selected before moving
-        // or removing it. The state side already marks queue rows; the widget
-        // was the only place the selection went unseen.
+        // FR-C4/FR-Q3: `v`/`V` marks must be visible here as in the track list,
+        // or the user cannot see what they selected before moving or removing it.
+        // The state side already marked queue rows; only the widget missed them.
         let mut s = two_entries();
         s.marked.insert(ytm_core::VideoId::from("v2"));
         assert!(

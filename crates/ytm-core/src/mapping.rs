@@ -8,10 +8,9 @@ use ytmapi_rs::parse::{
     SearchResultArtist, SearchResultCommunityPlaylist, SearchResultFeaturedPlaylist, TableListSong,
 };
 
-/// Playlist ids YouTube Music owns and refuses to let us edit.
-/// Accepts either id form. A library listing reports Liked Music as `VLLM`, so
-/// matching the bare form alone left every system playlist unflagged: no
-/// read-only marker, and the rename/delete guards never fired.
+/// Playlist ids YouTube Music owns and refuses to let us edit. Accepts either id
+/// form: a library listing reports Liked Music as `VLLM`, so matching the bare
+/// form alone left every system playlist unflagged and the guards never fired.
 pub fn is_system_playlist(id: &str) -> bool {
     let bare = id.strip_prefix("VL").unwrap_or(id);
     matches!(bare, "LM" | "SE") || bare.starts_with("RDAMPL")
@@ -30,16 +29,9 @@ pub fn parse_duration(s: &str) -> u64 {
     secs
 }
 
-/// The same thumbnail, asked for at `px` square.
-///
-/// YouTube's image CDN takes the pixel size in the URL (`=w120-h120-l90-rj`) and
-/// the sizes it volunteers in API responses are thumbnail-sized — 120px for a
-/// track. `ratatui-image`'s `Resize::Fit` never upscales, so a 120px image fills
-/// only half of a 24-column art panel no matter how wide the panel is. Asking the
-/// CDN for a larger original is the only thing that makes the art fill it.
-///
-/// URLs without the size parameters (`i.ytimg.com/vi/<id>/hqdefault.jpg`) come
-/// back unchanged rather than guessed at.
+/// The same thumbnail, asked for at `px` square — the CDN takes the size in the
+/// URL (`=w120-h120-l90-rj`). Responses volunteer only 120px and `Resize::Fit`
+/// never upscales, so art filled half the panel. Unsized URLs come back as-is.
 pub fn thumbnail_at_size(url: &str, px: u32) -> String {
     let Some(eq) = url.rfind("=w") else {
         return url.to_owned();
@@ -106,11 +98,9 @@ pub fn track_from_parts(p: impl Into<TrackParts>) -> Track {
     }
 }
 
-/// A playlist entry. Songs, videos, and uploads all become tracks; episodes
-/// (podcasts) are out of scope and map to `None`.
-///
-/// Note: `PlaylistSong` in 0.3.3 carries no `setVideoId`, so tracks read from a
-/// playlist are not removable until it does. See PROGRESS.md's open question.
+/// A playlist entry. Songs, videos, and uploads become tracks; podcast episodes
+/// map to `None`. `PlaylistSong` in 0.3.3 carries no `setVideoId`, so playlist
+/// tracks need the raw-row pass before they can be removed.
 pub fn track_from_playlist_item(item: &PlaylistItem) -> Option<Track> {
     let parts = match item {
         PlaylistItem::Song(s) => TrackParts {
@@ -149,11 +139,9 @@ pub fn track_from_playlist_item(item: &PlaylistItem) -> Option<Track> {
     Some(track_from_parts(parts))
 }
 
-/// An artist page's top-songs shelf (FR-B7).
-///
-/// `ArtistSong` carries no duration — the artist page shows play counts instead
-/// — so duration is 0 and the row renders without a time. Better than showing a
-/// fabricated one.
+/// An artist page's top-songs shelf (FR-B7). `ArtistSong` carries no duration —
+/// the page shows play counts instead — so duration is 0 and the row renders
+/// without a time rather than showing a fabricated one.
 pub fn track_from_artist_song(s: &ytmapi_rs::parse::ArtistSong) -> Track {
     track_from_parts(TrackParts {
         video_id: s.video_id.get_raw().to_owned(),
@@ -402,10 +390,9 @@ mod tests {
 
     #[test]
     fn fixture_parses_into_playlists() {
-        // A REAL scrubbed capture since 2026-08-31, so this can assert the wire
-        // shape rather than just "is JSON" — the old hand-written fixture could
-        // only do the latter, which is why it never caught the empty-library
-        // hazard that broke the albums pane (see library_raw.rs).
+        // A real scrubbed capture since 2026-08-31, so this asserts wire shape;
+        // the old hand-written fixture only asserted "is JSON" and missed the
+        // empty-library hazard that broke the albums pane (see library_raw.rs).
         let raw = include_str!("../tests/fixtures/library_playlists.json");
         let v: serde_json::Value = serde_json::from_str(raw).expect("fixture must be valid JSON");
 
@@ -445,9 +432,8 @@ mod tests {
 
     #[test]
     fn the_fixture_is_a_real_capture_not_a_hand_written_one() {
-        // Guards the thing PROGRESS.md tracked as open question 2 for two
-        // sessions: a SYNTHETIC fixture validates JSON parsing only, not the
-        // response shape. If someone replaces this with a hand-written stub,
+        // Guards PROGRESS.md open question 2: a SYNTHETIC fixture validates JSON
+        // parsing only, not response shape. If replaced with a hand-written stub,
         // this test says so.
         let raw = include_str!("../tests/fixtures/library_playlists.json");
         assert!(

@@ -19,11 +19,9 @@ use serde_json::Value;
 /// Where a library browse response keeps its section list.
 const SECTIONS_PATH: &str = "/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents";
 
-/// True when the response says the library section is empty.
-///
-/// False for a populated section, and false for anything unrecognised — a
-/// response that broke for some other reason must keep reaching the user as an
-/// error, not be dressed up as an empty library.
+/// True when the response says the library section is empty. False for a
+/// populated section and false for anything unrecognised — a response that broke
+/// for some other reason must still reach the user as an error.
 pub fn is_empty_library(json: &str) -> bool {
     let Ok(v) = serde_json::from_str::<Value>(json) else {
         return false;

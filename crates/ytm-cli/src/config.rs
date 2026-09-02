@@ -29,11 +29,9 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthKind {
-    /// Kept only so an old config naming it still loads, with a clear error.
-    ///
-    /// Google stopped honouring device-flow OAuth tokens on the InnerTube
-    /// endpoints this app uses, so the path could never work. The implementation
-    /// was removed rather than left as correct-looking code that always fails.
+    /// Kept only so an old config naming it still loads, with a clear error. Google
+    /// stopped honouring device-flow OAuth tokens on the InnerTube endpoints this
+    /// app uses, so the implementation was removed rather than left always failing.
     OAuth,
     Cookie,
 }
@@ -70,11 +68,9 @@ impl Default for PlaybackConfig {
     }
 }
 
-/// Which built-in theme to start with. `Auto` picks from the terminal's own
-/// background so a light terminal does not get dark-on-dark text.
-///
-/// Deserialized by hand: the TOML is a single string (`theme = "gruvbox"` or
-/// `theme = "auto"`), which no derived enum representation matches.
+/// Which built-in theme to start with. `Auto` picks from the terminal's background
+/// so a light terminal does not get dark-on-dark text. Deserialized by hand: the
+/// TOML is one string (`theme = "gruvbox"`), which no derived repr matches.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ThemeChoice {
     #[default]
@@ -111,10 +107,8 @@ pub struct UiConfig {
     pub mouse: bool,
 }
 
-/// The source the app opens on (`ui.start_pane`).
-///
-/// A small enum rather than a free string so a typo is a load error the user
-/// sees, not a silent fallback to some default they did not choose.
+/// The source the app opens on (`ui.start_pane`). An enum rather than a free string
+/// so a typo is a load error the user sees, not a silent fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StartPane {
@@ -283,13 +277,9 @@ pub fn resolve_theme(cfg: &Config) -> Result<(ytm_tui::theme::Theme, String), Co
     Ok((theme, name))
 }
 
-/// Guess light or dark from the terminal itself.
-///
-/// `COLORFGBG` is the only widely-supported hint that needs no query round trip
-/// (rxvt/xterm set it, and some others follow); its last field is the background
-/// colour index, where 7 and 15 are the light ones. Everything else falls back
-/// to dark, which is both the common case and the safer guess — light text on a
-/// light background is unreadable, whereas the reverse merely looks off.
+/// Guess light or dark from the terminal itself. `COLORFGBG` is the only widely
+/// supported hint needing no query round trip; its last field is the background
+/// index, 7 and 15 being light. Everything else falls back to dark, the safer guess.
 pub fn auto_theme_name() -> String {
     const DARK: &str = "tokyonight";
     const LIGHT: &str = "dawn";

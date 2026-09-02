@@ -31,28 +31,18 @@ const ART_GAP: u16 = 2;
 /// A shredded track list is worse than absent art (FR-U5).
 const MAIN_MIN_WIDTH: u16 = 48;
 
-/// Rows the list area can show inside a terminal of this size.
-///
-/// The reducer needs it for paging and `zz`, but `render` takes `&AppState` and
-/// cannot write it back, so the loop sets it from the frame size before each
-/// draw. Kept here beside the layout constants it derives from — a copy in the
-/// loop would drift the moment the chrome changed.
-/// What sits under a mouse click.
-///
-/// Hit-testing lives here because it has to derive from the same layout
-/// constants `render` uses — computed anywhere else it would drift the moment
-/// the chrome changed, and a click would select a different row than the one
-/// under the pointer.
+/// What sits under a mouse click. Hit-testing and `list_rows_for` derive from
+/// the same layout constants `render` does, or they drift and a click selects
+/// the wrong row; the loop sets the row count, since `render` cannot write back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClickTarget {
     /// The nth sidebar source.
     Source(usize),
     /// The nth row of the list, counting from the top of the visible window.
     Row(usize),
-    /// The progress row of the now-playing bar, with the column clicked. The
-    /// caller turns it into a position: only `nowplaying` knows where the bar
-    /// starts, and duplicating that here is how a click would seek to the wrong
-    /// second.
+    /// The progress row of the now-playing bar, with the column clicked. Only
+    /// `nowplaying` knows where the bar starts, so the caller turns the column
+    /// into a position — duplicating that here seeks to the wrong second.
     Progress(u16),
     /// Chrome: the heading, the rest of the now-playing bar, the rule.
     Nothing,
@@ -99,19 +89,13 @@ pub fn click_target(
     }
 }
 
-/// Screen row the list's first entry is drawn on.
-///
-/// The click handler needs it to turn a mouse position into a row index, and it
-/// has to be derived from the same constants the layout uses or a click lands on
-/// a different row than the one under the pointer.
-/// Both take the flags rather than the pane, because two panes now grow a query
-/// row: Search always, and Artists while `S` is open. Deriving it from the pane
-/// here is what let the layout and the click math disagree.
+/// Screen row the list's first entry is drawn on; the click handler subtracts it
+/// to get a row index. Takes the flags, not the pane: Search always grows a query
+/// row and Artists does while `S` is open, and pane-derived math already drifted.
 pub fn list_top_for(search_row: bool, filter_row: bool, header_row: bool) -> u16 {
     // Row 0 is the pane heading; a query row takes the next; a visible filter row
-    // takes one more; the column-header row takes one more still, and it sits
-    // directly above the list. Miss any of these and a click lands on a
-    // different row than the pointer.
+    // one more; the column-header row one more still, directly above the list.
+    // Miss any of these and a click lands on a different row than the pointer.
     1 + u16::from(search_row) + u16::from(filter_row) + u16::from(header_row)
 }
 
@@ -124,11 +108,9 @@ pub fn list_rows_for(area: Rect, search_row: bool, filter_row: bool, header_row:
         .saturating_sub(u16::from(header_row)) as usize
 }
 
-/// The body area and the now-playing bar below it.
-///
-/// Shared with the click handler: hit-testing the progress bar has to use the
-/// same split `render` draws from, or a click would seek to a position other
-/// than the one under the pointer.
+/// The body area and the now-playing bar below it. Shared with the click handler:
+/// hit-testing the progress bar must use the same split `render` draws from, or a
+/// click seeks to a position other than the one under the pointer.
 pub fn body_and_nowplaying(area: Rect) -> (Rect, Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -137,11 +119,9 @@ pub fn body_and_nowplaying(area: Rect) -> (Rect, Rect) {
     (rows[0], rows[1])
 }
 
-/// Split the main area into list and art panel, or leave it whole.
-///
-/// Pure math so the rule is testable without a terminal or an image protocol.
-/// The panel appears only when art is actually displayable, something is
-/// playing, and the list keeps enough columns to stay readable.
+/// Split the main area into list and art panel, or leave it whole. Pure math, so
+/// the rule is testable with no terminal or image protocol: the panel appears only
+/// when art is displayable, something is playing, and the list stays readable.
 pub fn split_for_art(area: Rect, art_enabled: bool, has_art: bool) -> (Rect, Option<Rect>) {
     if !art_enabled || !has_art || area.width < MAIN_MIN_WIDTH + ART_WIDTH + ART_GAP {
         return (area, None);
@@ -212,10 +192,9 @@ fn draw_rule(f: &mut Frame, area: Rect, t: &Theme) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
-/// The main pane: a heading row, then the list for whichever pane is active.
-///
-/// The match is exhaustive on `Pane` rather than ending in a `_` arm, so adding
-/// a pane later fails to compile instead of silently rendering nothing.
+/// The main pane: a heading row, then the list for whichever pane is active. The
+/// match is exhaustive on `Pane` rather than ending in a `_` arm, so adding a pane
+/// later fails to compile instead of silently rendering nothing.
 fn draw_main(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -302,13 +281,9 @@ fn draw_search(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     }
 }
 
-/// The heading row: the pane name, plus a visual-mode badge when one fits.
-///
-/// Visual mode is otherwise invisible — its marks look exactly like the ones
-/// `v` makes, so nothing would tell the user that moving the cursor is now
-/// extending a range. Returned as two pieces so the badge can be styled apart
-/// from the name, and dropped rather than truncated when the frame is narrow: a
-/// heading reading "Songs — VIS" is worse than no badge at all.
+/// The heading row: the pane name, plus a visual-mode badge when one fits. Visual
+/// mode is otherwise invisible — its marks look exactly like the ones `v` makes.
+/// Two pieces so the badge styles apart; dropped, not truncated, when narrow.
 fn heading_parts(s: &AppState, w: usize) -> (String, Option<String>) {
     let title = pane_title(s);
     if !s.in_visual_mode() {

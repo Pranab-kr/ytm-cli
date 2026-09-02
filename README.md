@@ -473,7 +473,7 @@ track list keeps its full width. Inside tmux it degrades to halfblocks.
 ```bash
 ./scripts/check.sh                      # the gate: fmt + clippy -D warnings + tests
 cargo test --workspace                  # tests only
-cargo test --workspace -- --ignored     # network/audio/keyring tests, by hand
+cargo test --workspace -- --ignored     # network/audio tests, by hand
 ```
 
 `./scripts/check.sh` must be clean before any commit. Tests never touch the

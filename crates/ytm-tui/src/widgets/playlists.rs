@@ -66,12 +66,9 @@ where
     f.render_widget(List::new(items), area);
 }
 
-/// The home feed (FR-B6): shelf headings interleaved with their cards.
-///
-/// Headings scroll with the rows rather than sticking, because a carousel's
-/// title is only meaningful next to its own cards. Each card carries a kind tag
-/// — one shelf mixes tracks, playlists, albums, and artists, and without the tag
-/// the user cannot tell which rows `Enter` will play and which will open.
+/// The home feed (FR-B6): shelf headings interleaved with their cards. Headings
+/// scroll rather than stick, since a carousel's title only means something next to
+/// its own cards. Each card carries a kind tag — one shelf mixes all four.
 pub fn draw_home(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     use crate::app::HomeRow;
 

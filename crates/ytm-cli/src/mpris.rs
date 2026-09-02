@@ -24,11 +24,9 @@ pub fn to_command(ev: MediaControlEvent) -> Option<PlayerCommand> {
     })
 }
 
-/// Owned metadata, so it is testable without a live bus.
-///
-/// `souvlaki::MediaMetadata` borrows every field, which cannot outlive a
-/// function that builds it from `AppState`. Owning it here is what lets the
-/// mapping be a pure function with tests.
+/// Owned metadata, so it is testable without a live bus. `souvlaki::MediaMetadata`
+/// borrows every field, which cannot outlive a function building it from `AppState`;
+/// owning it here is what makes the mapping a pure function.
 pub struct OwnedMetadata {
     pub title: Option<String>,
     pub artist: Option<String>,
@@ -92,10 +90,9 @@ pub fn update(controls: &mut MediaControls, s: &ytm_tui::app::AppState) {
     }
 }
 
-/// Returns `None` when the platform has no media-control bus — not an error.
-///
-/// The handler runs on souvlaki's own thread, so it may only send: it has no
-/// access to `AppState`, which the event loop owns.
+/// Returns `None` when the platform has no media-control bus — not an error. The
+/// handler runs on souvlaki's own thread, so it may only send: it has no access to
+/// `AppState`, which the event loop owns.
 pub fn attach(tx: tokio::sync::mpsc::UnboundedSender<PlayerCommand>) -> Option<MediaControls> {
     let config = PlatformConfig {
         dbus_name: "ytm_cli",

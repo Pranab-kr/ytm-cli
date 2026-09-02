@@ -115,17 +115,16 @@ impl Queue {
         self.items.get(prev)
     }
 
-    /// Remove by index, keeping the same track playing where possible.
-    /// Make `idx` the current entry, if it exists.
-    ///
-    /// Returns the track so the actor can play it without a second lookup that
-    /// could disagree about which row is current.
+    /// Make `idx` the current entry, if it exists. Returns the track so the actor
+    /// can play it without a second lookup that could disagree about which row is
+    /// current.
     pub fn jump_to(&mut self, idx: usize) -> Option<Track> {
         let t = self.items.get(idx)?.clone();
         self.current = Some(idx);
         Some(t)
     }
 
+    /// Remove by index, keeping the same track playing where possible.
     pub fn remove(&mut self, idx: usize) {
         if idx >= self.items.len() {
             return;

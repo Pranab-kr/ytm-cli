@@ -66,11 +66,9 @@ pub enum PlayerCommand {
     EnqueueBack(Vec<Track>),
     EnqueueNext(Vec<Track>),
     RemoveFromQueue(usize),
-    /// Play the entry already at this index (FR-Q1).
-    ///
-    /// Distinct from `PlayNow`, which *inserts*. Enter on a queue row used to go
-    /// through `PlayNow`, so replaying a finished track pushed a second copy in
-    /// beside the first — reported as a duplicate entry appearing.
+    /// Play the entry already at this index (FR-Q1). Distinct from `PlayNow`, which
+    /// *inserts*: Enter on a queue row went through `PlayNow`, so replaying a
+    /// finished track pushed a second copy in beside the first.
     JumpTo(usize),
     MoveInQueue {
         from: usize,

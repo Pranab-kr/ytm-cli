@@ -74,12 +74,9 @@ impl MutationLog {
     }
 }
 
-/// Entries the API still has to confirm; used for the removal SetVideoIds.
-///
-/// Tracks without one are skipped rather than faked. `ytm-core`'s
-/// `playlist_raw` supplies the ids for playlist reads, so `None` now means a
-/// track that genuinely has no removable entry — a search result, a library
-/// song, or a row whose id could not be extracted.
+/// Entries the API still has to confirm; used for the removal SetVideoIds. Tracks
+/// without one are skipped, not faked — `ytm-core`'s `playlist_raw` supplies them
+/// for playlist reads, so `None` means genuinely no removable entry.
 pub fn set_video_ids(removed: &[(usize, Track)]) -> Vec<SetVideoId> {
     removed
         .iter()

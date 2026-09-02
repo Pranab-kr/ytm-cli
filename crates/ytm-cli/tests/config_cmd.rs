@@ -1,12 +1,11 @@
 //! `ytm config` end to end, against the real binary.
 //!
-//! These go through the process rather than calling `run_config` directly
-//! because two of the three bugs they cover live in argument dispatch, not in
-//! the function: `--config` was read by every other subcommand but not this
-//! one, and `main` loaded config.toml before dispatching, so an invalid file
-//! blocked the one command that exists to repair it.
+//! Through the process rather than calling `run_config`, because two of the three
+//! bugs these cover live in argument dispatch: `--config` was honoured by every
+//! other subcommand but not this one, and `main` loaded config.toml before
+//! dispatching, so an invalid file blocked the command that exists to repair it.
 //!
-//! No network, no audio, no keyring — `config` touches only the filesystem.
+//! No network, no audio — `config` touches only the filesystem.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -99,12 +98,9 @@ fn an_invalid_config_does_not_block_the_config_command() {
 
 #[test]
 fn an_incomplete_config_gains_the_sections_it_lacks() {
-    // The documented promise is that the file carries every setting and every
-    // binding at its default, commented out. An existing file was opened as it
-    // was and never gained anything, so a config written by hand from an older
-    // README stayed permanently without a `[keys]` section — and the command
-    // reported "valid" while every binding sat at a default the user could not
-    // see or change.
+    // The documented promise is that the file carries every setting and binding at
+    // its default, commented out. An existing file never gained anything, so one
+    // written from an older README stayed permanently without a `[keys]` section.
     let dir = scratch("partial");
     let path = dir.join("config.toml");
     let theirs = "[auth]\nkind = \"cookie\"\ncookie_file = \"~/mine.txt\"\n";
@@ -146,11 +142,9 @@ fn an_incomplete_config_gains_the_sections_it_lacks() {
 
 #[test]
 fn settings_absent_from_a_section_that_exists_are_written_into_it() {
-    // The other half of the same promise. Appending whole sections is not
-    // enough: a `[ui]` that predates a setting keeps parsing fine and stays
-    // permanently without it, so the setting never appears in the file the
-    // command claims lists every one of them. Naming it on stdout is not the
-    // same as putting it where the user can uncomment it.
+    // The other half of the same promise. Appending whole sections is not enough: a
+    // `[ui]` predating a setting keeps parsing and stays permanently without it, so
+    // the setting never appears in the file the command claims lists them all.
     let dir = scratch("partialsection");
     let path = dir.join("config.toml");
     std::fs::write(&path, "[ui]\nvim_keys = true\n").unwrap();

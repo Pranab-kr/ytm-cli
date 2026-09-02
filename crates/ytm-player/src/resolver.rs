@@ -28,24 +28,15 @@ struct Entry {
 
 pub struct StreamResolver {
     cache: Mutex<HashMap<VideoId, Entry>>,
-    /// A Netscape cookie jar for yt-dlp, if cookie auth is configured.
-    ///
-    /// YouTube now answers anonymous stream requests with "Sign in to confirm
-    /// you're not a bot", so playback fails outright without cookies. We already
-    /// hold cookies for the API, but in a different format — see
-    /// `netscape_from_header`.
+    /// A Netscape cookie jar for yt-dlp, if cookie auth is configured. YouTube
+    /// answers anonymous stream requests with "Sign in to confirm you're not a
+    /// bot", and the API's cookies are a different format — see below.
     cookie_jar: Mutex<Option<std::path::PathBuf>>,
 }
 
-/// Convert a raw `Cookie:` header into the Netscape jar format yt-dlp wants.
-///
-/// The two formats are not interchangeable and this is the whole reason a
-/// conversion exists: `ytmapi-rs`'s `BrowserToken` takes the header string
-/// verbatim, while yt-dlp's `--cookies` reads a tab-separated jar. Rather than
-/// asking the user to export cookies twice, we derive one from the other.
-///
-/// Returns `None` when the input carries no cookies at all, so a malformed file
-/// leaves playback unauthenticated rather than handing yt-dlp an empty jar.
+/// Convert a raw `Cookie:` header into the Netscape jar format yt-dlp wants — the
+/// two are not interchangeable, so deriving one saves exporting cookies twice.
+/// `None` when the input carries no cookies, rather than an empty jar.
 pub fn netscape_from_header(header: &str) -> Option<String> {
     // Far-future expiry: these are session cookies as far as we can tell from a
     // header, which carries no expiry, and a past date would make yt-dlp discard
@@ -87,12 +78,9 @@ impl StreamResolver {
         }
     }
 
-    /// Point yt-dlp at cookies derived from the API's cookie file.
-    ///
-    /// The jar is written once to a temp file and reused: converting per resolve
-    /// would rewrite it on every track. Failure is deliberately silent — losing
-    /// cookies degrades to the unauthenticated path, which yt-dlp reports itself
-    /// with a message the user can act on.
+    /// Point yt-dlp at cookies derived from the API's cookie file. The jar is written
+    /// once and reused rather than converted per resolve. Failure is silent: it
+    /// degrades to the unauthenticated path, which yt-dlp reports itself.
     pub fn use_cookie_header_file(&self, path: &std::path::Path) {
         let Ok(header) = std::fs::read_to_string(path) else {
             return;
@@ -190,11 +178,9 @@ impl StreamResolver {
     }
 }
 
-/// What to say when YouTube demands a sign-in before it will stream.
-///
-/// Deliberately not "YouTube requires cookies to stream": guest playback works
-/// on plenty of connections, and the old wording told those users their setup was
-/// broken. It is this connection being challenged, and cookies are the way out.
+/// What to say when YouTube demands a sign-in before it will stream. Deliberately
+/// not "YouTube requires cookies to stream": guest playback works on plenty of
+/// connections, so it is *this* connection being challenged.
 fn bot_check_error() -> String {
     "YouTube asked this connection to sign in before streaming; set auth.cookie_file in config.toml and restart".to_owned()
 }
@@ -312,7 +298,7 @@ mod tests {
 
     #[test]
     fn a_resolver_without_cookies_still_works() {
-        // Cookie auth is optional: OAuth users have no cookie file, and the
+        // Cookie auth is optional: a guest has no cookie file at all, and the
         // resolver must not require one to exist.
         let r = StreamResolver::new();
         r.use_cookie_header_file(std::path::Path::new("/nonexistent/cookies.txt"));

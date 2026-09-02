@@ -27,12 +27,9 @@ pub const SOURCES: [(Pane, &str); 7] = [
     (Pane::Queue, "Queue"),
 ];
 
-/// One line of the sidebar as it is drawn: a source, or a blank row that
-/// separates one group from the next.
-///
-/// The renderer and the click handler both walk this, so a spacer can never be
-/// mistaken for the source that follows it — a click on the gap selects
-/// nothing rather than the pane one row down.
+/// One line of the sidebar as it is drawn: a source, or a blank row separating
+/// one group from the next. The renderer and the click handler both walk this, so
+/// a click on a spacer selects nothing rather than the pane one row down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarRow {
     /// The nth entry of `SOURCES`.
@@ -41,10 +38,9 @@ pub enum SidebarRow {
     Spacer,
 }
 
-/// The sidebar top to bottom: Home, then the library
-/// (Playlists/Fav/Albums/Artists), then Search and Queue, each group set apart
-/// by a blank row. The `Source` indices are into `SOURCES`/`PANE_ORDER`, so a
-/// click resolves straight to a pane and the number shown is the jump key.
+/// The sidebar top to bottom: Home, the library (Playlists/Fav/Albums/Artists),
+/// then Search and Queue, each group set apart by a blank row. `Source` indices
+/// are into `SOURCES`/`PANE_ORDER`, and the number shown is the jump key.
 pub const LAYOUT: [SidebarRow; 9] = [
     SidebarRow::Source(0), // Home
     SidebarRow::Spacer,
@@ -71,10 +67,9 @@ pub fn source_at_row(row: usize) -> Option<usize> {
 /// one digit, and a trailing space.
 const PREFIX_WIDTH: usize = 3;
 
-/// The label colour for one source row.
-///
-/// A guest cannot enter the account panes, so they read as dimmed rather than
-/// selectable. Everything else keeps the existing active/inactive contrast.
+/// The label colour for one source row. A guest cannot enter the account panes,
+/// so they read as dimmed rather than selectable; everything else keeps the
+/// existing active/inactive contrast.
 pub fn source_label_color(
     pane: Pane,
     active: bool,
@@ -106,10 +101,9 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
                 let (pane, label) = SOURCES[*i];
                 let selected = *i == s.sidebar_selected;
                 let active = pane == s.pane;
-                // The cursor (reversed background) and the active pane (bold +
-                // an accent bar) can land on the same row, so each needs its own
-                // signal: bg says "the cursor is here", the bar says "this is
-                // the pane you're in".
+                // The cursor and the active pane can land on the same row, so each
+                // needs its own signal: the reversed bg says "the cursor is here",
+                // the bold accent bar says "this is the pane you're in".
                 let on_cursor = selected && s.focus == Focus::Sidebar;
                 let bg = |st: Style| if on_cursor { st.bg(t.bg_sel) } else { st };
 

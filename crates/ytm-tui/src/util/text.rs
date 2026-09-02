@@ -65,11 +65,8 @@ pub fn tail_to_width(s: &str, width: usize) -> String {
 }
 
 /// Byte index of the start of the word before `cursor`, for Ctrl+Left / Ctrl+W.
-///
-/// Shell-style: skip any separators immediately behind the cursor, then skip
-/// back over the word itself. Returns `cursor` unchanged at the start of the
-/// line. Indices always land on char boundaries, so slicing with them is safe
-/// on multibyte input.
+/// Shell-style: skip separators behind the cursor, then the word itself. Always
+/// lands on a char boundary, so slicing with it is safe on multibyte input.
 pub fn prev_word_boundary(s: &str, cursor: usize) -> usize {
     let cursor = cursor.min(s.len());
     let head = &s[..cursor];
@@ -92,10 +89,9 @@ pub fn prev_word_boundary(s: &str, cursor: usize) -> usize {
     at
 }
 
-/// Byte index of the start of the next word after `cursor`, for Ctrl+Right.
-///
-/// Skips the current word then any separators, landing on the next word's first
-/// character — or the end of the line when there is none.
+/// Byte index of the start of the next word after `cursor`, for Ctrl+Right. Skips
+/// the current word then any separators, landing on the next word's first character
+/// — or the end of the line when there is none.
 pub fn next_word_boundary(s: &str, cursor: usize) -> usize {
     let cursor = cursor.min(s.len());
     let mut it = s[cursor..].char_indices().peekable();

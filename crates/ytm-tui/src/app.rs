@@ -817,11 +817,9 @@ impl AppState {
         }
     }
 
-    /// Does this text survive the filter? Case-insensitive substring.
-    ///
-    /// The previous version built two Strings per call — one of them the same
-    /// needle every time — and the render path calls this three or more times
-    /// per track, per frame, while the user is typing.
+    /// Does this text survive the filter? Case-insensitive substring. The render
+    /// path calls this three or more times per track, per frame, while the user
+    /// types, so it must not allocate the way the two-String version did.
     fn matches_filter(&self, text: &str) -> bool {
         if self.filter.is_empty() {
             return true;
@@ -1255,7 +1253,6 @@ impl AppState {
     }
 
     /// Visible video ids in display order, matching `selected_track`'s panes.
-    ///
     /// Deliberately not via `track_rows`: that clones each `Track`, and visual
     /// mode calls this on every cursor move.
     fn row_ids(&self) -> Vec<VideoId> {
@@ -1464,10 +1461,8 @@ impl AppState {
 }
 
 /// Case-insensitive substring test that does not allocate per comparison.
-///
 /// `char::to_lowercase` yields an iterator because one char can fold to several
-/// (ẛ, İ); comparing fold-to-fold rather than char-to-char is what keeps
-/// non-ASCII titles matching the way `to_lowercase().contains()` did.
+/// (ẛ, İ), so fold-to-fold comparison keeps non-ASCII titles matching.
 fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return true;

@@ -207,10 +207,9 @@ impl Theme {
         }
     }
 
-    /// Whether this theme is meant for a light terminal.
-    ///
-    /// Measured from `fg` luminance rather than stored: a light theme is one
-    /// whose text is dark, and that stays true for a hand-written theme file.
+    /// Whether this theme is meant for a light terminal. Measured from `fg` luminance
+    /// rather than stored: a light theme is one whose text is dark, and that stays
+    /// true for a hand-written theme file.
     pub fn is_light(&self) -> bool {
         match self.fg {
             // Rec. 601 luma, the usual cheap approximation.

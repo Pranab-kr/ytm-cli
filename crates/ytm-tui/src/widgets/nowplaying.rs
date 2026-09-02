@@ -14,11 +14,9 @@ use ratatui::{
 };
 use ytm_player::player::{PlaybackState, RepeatMode};
 
-/// Rows inside the bar, in order: blank margin, rule, title, progress.
-///
-/// `render` reserves `HEIGHT` for the bar and turns a click into a position from
-/// `PROGRESS_ROW`, so these are the single source of truth for both. A copy in
-/// either place would drift and a click would seek from the wrong row.
+/// Rows inside the bar, in order: blank margin, rule, title, progress. `render`
+/// reserves `HEIGHT` and turns a click into a position from `PROGRESS_ROW`, so
+/// these are the single source of truth — a copy drifts and a click seeks wrong.
 pub const RULE_ROW: u16 = 1;
 pub const PROGRESS_ROW: u16 = 3;
 pub const HEIGHT: u16 = 4;
@@ -28,11 +26,9 @@ const EIGHTHS: [char; 8] = [
     '\u{258F}', '\u{258E}', '\u{258D}', '\u{258C}', '\u{258B}', '\u{258A}', '\u{2589}', '\u{2588}',
 ];
 
-/// The fixed text around the bar: elapsed, duration, and the mode flags.
-///
-/// Split out so the click handler can measure the bar without re-deriving these
-/// widths. A copy there would drift the moment the flags changed, and a seek
-/// would land somewhere other than where the user clicked.
+/// The fixed text around the bar: elapsed, duration, and the mode flags. Split
+/// out so the click handler measures these widths rather than re-deriving them;
+/// a copy there drifts when the flags change and a seek misses the click.
 fn chrome_parts(s: &AppState) -> (String, String, String) {
     (
         format!("{}  ", s.position),
@@ -62,10 +58,9 @@ fn bar_width(w: usize, s: &AppState) -> usize {
     bar_span(w, s).1
 }
 
-/// Which second a click at column `col` of the progress row means.
-///
-/// `None` when the click misses the bar, or when nothing is playing and there is
-/// no duration to seek within — seeking to a fraction of zero is not a position.
+/// Which second a click at column `col` of the progress row means. `None` when
+/// the click misses the bar, or when nothing is playing and there is no duration
+/// to seek within — a fraction of zero is not a position.
 pub fn seek_target_secs(w: usize, col: usize, s: &AppState) -> Option<u64> {
     let dur = s.duration.as_secs();
     if dur == 0 {
@@ -122,11 +117,9 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
 
     let w = area.width as usize;
 
-    // The rule spans the full width: stopping at the sidebar would read as part
-    // of the list rather than as the boundary under it. The sidebar's vertical
-    // divider continues through the margin row and meets it in a `\u{2534}`
-    // junction — stopping the divider a row early left a visible gap, and two
-    // lines merely abutting read as two lines rather than one frame.
+    // Full width: a rule stopping at the sidebar reads as part of the list. The
+    // sidebar divider continues through the margin row and meets it in a
+    // `\u{2534}` junction — abutting lines read as two lines, not one frame.
     let div = crate::render::SIDEBAR_WIDTH as usize;
     if area.height > RULE_ROW {
         let mut rule: String = "\u{2500}".repeat(w);
@@ -209,13 +202,9 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     );
 }
 
-/// The mode flags as separately styled spans: shuffle, repeat, and volume.
-///
-/// The concatenated text matches `chrome_parts`'s third field exactly — the
-/// seek geometry measures that, so the widths must not drift — but each flag is
-/// coloured by its state instead of a uniform dim. An active mode takes the
-/// accent so the user can tell shuffle is *on* at a glance; a uniform dim made
-/// the on and off states differ only by a glyph nobody could read at a distance.
+/// The mode flags as separately styled spans: shuffle, repeat, and volume. The
+/// concatenated text must match `chrome_parts`'s third field to the column — the
+/// seek geometry measures that — but each flag takes the accent when it is on.
 fn flag_spans(s: &AppState, t: &Theme) -> Vec<Span<'static>> {
     let dim = Style::default().fg(t.fg_dim);
     let on = Style::default().fg(t.accent).add_modifier(Modifier::BOLD);
@@ -400,11 +389,9 @@ mod tests {
 
     #[test]
     fn progress_bar_uses_partial_blocks_for_sub_cell_precision() {
-        // Spec §6: eighth-blocks, not '='.
-        // The plan wrote this as a `'\u{258F}'..='\u{2588}'` range, which is
-        // inverted — 258F > 2588, so the range is empty and the assertion could
-        // never hold. Checking the seven *partial* glyphs directly is what it
-        // meant, and is stricter: a bar of solid full blocks does not pass.
+        // Spec §6: eighth-blocks, not '='. The plan's `'\u{258F}'..='\u{2588}'`
+        // range is inverted and therefore empty, so it could never fail; the seven
+        // partial glyphs are what it meant, and a bar of full blocks fails them.
         let b = progress_bar(0.55, 10);
         assert!(b.chars().any(|c| EIGHTHS[..7].contains(&c)), "got {b:?}");
     }

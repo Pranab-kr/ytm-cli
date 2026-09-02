@@ -39,10 +39,9 @@ pub fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
         .split(h[1])[1]
 }
 
-/// Stack the newest toasts upward from the bottom-right, one row each.
-///
-/// The newest are kept rather than the oldest: the last thing that happened is
-/// what the user is trying to understand.
+/// Stack the newest toasts upward from the bottom-right, one row each. The newest
+/// are kept rather than the oldest: the last thing that happened is what the user is
+/// trying to understand.
 pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     if area.width == 0 || area.height == 0 || s.toasts.is_empty() {
         return;
@@ -87,11 +86,9 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     }
 }
 
-/// The activity indicator, top-right of the pane it belongs to (FR-U4).
-///
-/// The frame index comes from `elapsed_ms` rather than a stored `ThrobberState`,
-/// so rendering stays a pure function of `AppState` and the animation is
-/// reproducible in a test.
+/// The activity indicator, top-right of the pane it belongs to (FR-U4). The frame
+/// index comes from `elapsed_ms` rather than a stored `ThrobberState`, so rendering
+/// stays a pure function of `AppState` and is reproducible in a test.
 pub fn draw_spinner(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     if !s.loading || area.width == 0 || area.height == 0 {
         return;

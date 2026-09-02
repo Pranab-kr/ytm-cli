@@ -43,11 +43,9 @@ struct BylineField {
     browse_id: Option<String>,
 }
 
-/// Parse a raw song-search response into playable tracks.
-///
-/// An empty result means "no usable songs", which the UI shows as an empty list —
-/// the same treatment as a search with no hits, and never an error: one odd row
-/// must not cost the user the songs around it.
+/// Parse a raw song-search response into playable tracks. An empty result means
+/// "no usable songs", which the UI shows as an empty list and never an error: one
+/// odd row must not cost the user the songs around it.
 pub fn tracks_from_raw(json: &str) -> Vec<Track> {
     let Ok(v) = serde_json::from_str::<Value>(json) else {
         return Vec::new();
@@ -106,11 +104,9 @@ fn track_from_row(item: &Value) -> Option<Track> {
         return None;
     }
 
-    // The field before the duration is the album — but only when it really is
-    // one. An album field carries a `browseId`; a UGC row's middle `43K views`
-    // field carries none and must be ignored, not treated as an album. The
-    // `>= 3` guard keeps the album slot clear of the artist when a row has only
-    // two fields ("Artist • 3:26", say).
+    // The field before the duration is the album only when it carries a
+    // `browseId`; a UGC row's `43K views` field carries none. The `>= 3` guard
+    // keeps the artist out of the album slot on a two-field "Artist • 3:26" row.
     let album = if fields.len() >= 3 {
         let candidate = &fields[fields.len() - 2];
         candidate.browse_id.as_ref().map(|_| candidate.text.clone())
@@ -176,9 +172,7 @@ mod tests {
 
     /// A scrubbed minimal capture preserving the UGC `artist • views • duration`
     /// byline shape (row `SYNVID00002`) next to ordinary album rows, plus one
-    /// broken row that must be skipped without erasing the rest. No real
-    /// identifiers: video/album/channel ids and art URLs are all `SYN*` or
-    /// `example.invalid`.
+    /// broken row that must be skipped without erasing the rest. No real ids.
     const UGC: &str = include_str!("../tests/fixtures/search_songs_ugc.json");
 
     fn by_video<'a>(tracks: &'a [Track], id: &str) -> Option<&'a Track> {
