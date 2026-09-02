@@ -100,7 +100,7 @@ impl KeyMap {
             // Ctrl+C first: it is the escape hatch and must not be shadowed by
             // any of the editing chords below.
             if key.code == KeyCode::Char('c') {
-                return Some(InputAction::Quit);
+                return Some(InputAction::ForceQuit);
             }
             // The readline chords only mean anything where there is text and a
             // caret. Outside a field they stay unbound rather than being given
@@ -403,10 +403,15 @@ mod tests {
 
     #[test]
     fn ctrl_c_always_quits_even_while_typing() {
+        // ForceQuit, not Quit: behaviour.confirm_on_quit must not be able to
+        // shadow the escape hatch.
         let m = KeyMap::default();
         let c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(m.resolve(c, Focus::SearchInput), Some(InputAction::Quit));
-        assert_eq!(m.resolve(c, Focus::Main), Some(InputAction::Quit));
+        assert_eq!(
+            m.resolve(c, Focus::SearchInput),
+            Some(InputAction::ForceQuit)
+        );
+        assert_eq!(m.resolve(c, Focus::Main), Some(InputAction::ForceQuit));
     }
 
     #[test]
@@ -585,13 +590,17 @@ mod tests {
 
     #[test]
     fn ctrl_c_still_quits_from_the_search_field() {
-        // The chords above must not shadow the escape hatch.
+        // The chords above must not shadow the escape hatch — and neither may
+        // behaviour.confirm_on_quit, which is why this is ForceQuit.
         let m = KeyMap::default();
         assert_eq!(
             m.resolve(ctrl('c'), Focus::SearchInput),
-            Some(InputAction::Quit)
+            Some(InputAction::ForceQuit)
         );
-        assert_eq!(m.resolve(ctrl('c'), Focus::Main), Some(InputAction::Quit));
+        assert_eq!(
+            m.resolve(ctrl('c'), Focus::Main),
+            Some(InputAction::ForceQuit)
+        );
     }
 
     #[test]

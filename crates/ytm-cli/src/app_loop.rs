@@ -408,6 +408,9 @@ pub fn confirm_action(state: &mut AppState) -> Option<(u64, MutationTask)> {
         return None;
     };
     match action {
+        // Handled in `dispatch_input`'s modal branch: a quit is not a mutation
+        // and has nothing to roll back, so it never reaches here.
+        ConfirmAction::Quit => None,
         ConfirmAction::DeletePlaylist(id) => {
             let index = state.playlists.iter().position(|p| p.id == id)?;
             let snapshot = state.playlists[index].clone();
@@ -616,6 +619,29 @@ pub fn dispatch_input(
             return Some(Task::Mutate { token, task });
         }
         if matches!(state.modal, Some(Modal::Confirm { .. })) {
+            // Quit settles no server edit, so it never reaches `confirm_action`,
+            // which returns a MutationTask. `q` confirms as well as `y`: it is
+            // the key the user just pressed, and making it mean "no" is a trap.
+            if matches!(
+                state.modal,
+                Some(Modal::Confirm {
+                    action: ConfirmAction::Quit,
+                    ..
+                })
+            ) {
+                match action {
+                    A::Char('y') | A::Char('Y') | A::Confirm | A::Quit => {
+                        state.modal = None;
+                        state.should_quit = true;
+                        return None;
+                    }
+                    A::Char('n') | A::Char('N') => {
+                        state.modal = None;
+                        return None;
+                    }
+                    _ => {}
+                }
+            }
             match action {
                 // `y`/`n` are not keymap bindings: they mean nothing outside a
                 // confirm, and binding them globally would shadow real keys.
@@ -649,6 +675,13 @@ pub fn dispatch_input(
 
     // Transport actions belong to the player; everything else to the state.
     match action {
+        // Diverted before the fall-through, which is what sets `should_quit`.
+        A::Quit if behaviour.confirm_on_quit => {
+            state.modal = Some(Modal::Confirm {
+                text: "Quit ytm-cli? (y/n)".to_owned(),
+                action: ConfirmAction::Quit,
+            });
+        }
         A::TogglePause => {
             send(player, PlayerCommand::TogglePause);
         }
@@ -1592,6 +1625,94 @@ mod tests {
     /// Default steps, so the many `dispatch_input` calls below need no struct.
     fn beh() -> crate::config::BehaviourConfig {
         crate::config::BehaviourConfig::default()
+    }
+
+    #[test]
+    fn quit_is_immediate_when_confirm_on_quit_is_off() {
+        // The long-standing default: q quits. Must not regress.
+        let (_src, player) = deps();
+        let mut s = AppState::default();
+        let b = crate::config::BehaviourConfig {
+            confirm_on_quit: false,
+            ..beh()
+        };
+        dispatch_input(InputAction::Quit, &mut s, &*player, &b);
+        assert!(s.should_quit, "q must still quit immediately by default");
+        assert!(s.modal.is_none(), "and must not open a modal");
+    }
+
+    #[test]
+    fn quit_opens_a_confirm_when_configured() {
+        let (_src, player) = deps();
+        let mut s = AppState::default();
+        let b = crate::config::BehaviourConfig {
+            confirm_on_quit: true,
+            ..beh()
+        };
+        dispatch_input(InputAction::Quit, &mut s, &*player, &b);
+        assert!(!s.should_quit, "the confirm must not have quit yet");
+        assert!(
+            matches!(
+                s.modal,
+                Some(Modal::Confirm {
+                    action: ConfirmAction::Quit,
+                    ..
+                })
+            ),
+            "expected a Quit confirm, got {:?}",
+            s.modal
+        );
+    }
+
+    #[test]
+    fn ctrl_c_bypasses_the_confirm_because_it_is_the_escape_hatch() {
+        // keymap.rs resolves Ctrl+C to ForceQuit precisely so a confirm cannot
+        // shadow it: "escapes everything" has to keep meaning that.
+        let (_src, player) = deps();
+        let b = crate::config::BehaviourConfig {
+            confirm_on_quit: true,
+            ..beh()
+        };
+        let mut s = AppState::default();
+        dispatch_input(InputAction::ForceQuit, &mut s, &*player, &b);
+        assert!(s.should_quit, "Ctrl+C must quit even with confirm_on_quit");
+        assert!(s.modal.is_none(), "and must not leave a modal behind");
+    }
+
+    #[test]
+    fn y_confirms_the_quit_and_n_cancels_it() {
+        let (_src, player) = deps();
+        let b = crate::config::BehaviourConfig {
+            confirm_on_quit: true,
+            ..beh()
+        };
+
+        let mut yes = AppState::default();
+        dispatch_input(InputAction::Quit, &mut yes, &*player, &b);
+        dispatch_input(InputAction::Char('y'), &mut yes, &*player, &b);
+        assert!(yes.should_quit, "y must quit");
+        assert!(yes.modal.is_none(), "and close the modal");
+
+        let mut no = AppState::default();
+        dispatch_input(InputAction::Quit, &mut no, &*player, &b);
+        dispatch_input(InputAction::Char('n'), &mut no, &*player, &b);
+        assert!(!no.should_quit, "n must not quit");
+        assert!(no.modal.is_none(), "and must close the modal");
+    }
+
+    #[test]
+    fn a_second_q_inside_the_confirm_also_quits() {
+        // q is the key the user just pressed; making it mean "no" would be a
+        // trap. Enter and y already confirm, so q should too.
+        let (_src, player) = deps();
+        let b = crate::config::BehaviourConfig {
+            confirm_on_quit: true,
+            ..beh()
+        };
+        let mut s = AppState::default();
+        dispatch_input(InputAction::Quit, &mut s, &*player, &b);
+        dispatch_input(InputAction::Quit, &mut s, &*player, &b);
+        assert!(s.should_quit, "qq must quit");
     }
 
     #[test]

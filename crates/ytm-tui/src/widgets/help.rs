@@ -33,6 +33,9 @@ fn action_label(a: &InputAction) -> Option<&'static str> {
     use InputAction as A;
     Some(match a {
         A::Quit => "quit",
+        // Not listed: Ctrl+C is not a `[keys]` binding, and the overlay's
+        // "Not remappable" section already names it.
+        A::ForceQuit => return None,
         A::Up => "up",
         A::Down => "down",
         A::Left => "back / sidebar",

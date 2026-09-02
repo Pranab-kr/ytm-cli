@@ -92,6 +92,9 @@ pub enum ConfirmAction {
         playlist: PlaylistId,
         entries: Vec<SetVideoId>,
     },
+    /// `behaviour.confirm_on_quit`. Unlike the others this settles no server
+    /// edit, so the loop handles it before `confirm_action` is reached.
+    Quit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -443,7 +446,7 @@ impl AppState {
             }
         }
         match a {
-            InputAction::Quit => self.should_quit = true,
+            InputAction::Quit | InputAction::ForceQuit => self.should_quit = true,
             // Every row movement redraws an active range, so the four are
             // grouped rather than each remembering to call the refresh.
             InputAction::Down | InputAction::Up | InputAction::Home | InputAction::End => {

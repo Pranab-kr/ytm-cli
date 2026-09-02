@@ -7,6 +7,9 @@ use ytm_player::player::PlayerEvent;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputAction {
     Quit,
+    /// Ctrl+C. Bypasses `behaviour.confirm_on_quit`: the keymap treats this
+    /// as the escape hatch that nothing may shadow, a confirm included.
+    ForceQuit,
     Up,
     Down,
     PageUp,
