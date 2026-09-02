@@ -164,6 +164,15 @@ fn guest_startup(cfg: &config::Config) -> bool {
             .is_none_or(|path| !path.is_file())
 }
 
+/// `playback.shuffle` has to reach the queue, not just the indicator: the actor
+/// owns the play order, and `AppState::shuffle` is only what the arrow draws.
+/// Off is the actor's own default, so only `true` is worth a command.
+fn apply_startup_shuffle(player: &impl ytm_player::player::Player, shuffle: bool) {
+    if shuffle && let Err(e) = player.send(ytm_player::player::PlayerCommand::SetShuffle(true)) {
+        tracing::warn!(error = %e, "could not enable shuffle at startup");
+    }
+}
+
 /// Theme from config: an explicit file wins, otherwise just the accent override.
 /// The theme to start with, plus the preset name so `t` knows where the cycle
 /// is. A `theme_file` is the most specific answer and wins over `ui.theme`.
@@ -671,6 +680,7 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
         cfg.auth.cookie_file.clone()
     };
     let (player, player_events) = ytm_player::actor::spawn_player(volume, cookie_file)?;
+    apply_startup_shuffle(&player, cfg.playback.shuffle);
 
     // A guest cannot enter the account panes, so `ui.start_pane` would strand
     // them on an empty one. Search is where they can actually do something.
@@ -792,6 +802,30 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn shuffle_at_startup_is_sent_to_the_player_not_just_shown() {
+        // playback.shuffle set the UI arrow but never reached the queue, so the
+        // indicator said shuffle while playback stayed in order.
+        use ytm_player::player::PlayerCommand;
+        let (player, _rx) = ytm_player::mock::MockPlayer::new();
+        apply_startup_shuffle(&player, true);
+        assert!(
+            matches!(
+                player.commands().as_slice(),
+                [PlayerCommand::SetShuffle(true)]
+            ),
+            "shuffle must reach the queue, got {:?}",
+            player.commands()
+        );
+
+        let (off, _rx2) = ytm_player::mock::MockPlayer::new();
+        apply_startup_shuffle(&off, false);
+        assert!(
+            off.commands().is_empty(),
+            "shuffle off is the player's own default; sending it is noise"
+        );
+    }
 
     #[test]
     fn absent_cookie_starts_the_tui_in_guest_search() {
