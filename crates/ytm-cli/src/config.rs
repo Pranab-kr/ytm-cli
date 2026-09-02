@@ -1,5 +1,6 @@
-//! Config loaded from TOML. Secrets are NOT stored here beyond the OAuth
-//! client id/secret, which Google treats as non-confidential for device flow.
+//! Config loaded from TOML. No secrets live here — cookies are a path to a file
+//! the user controls, and the OAuth client id/secret were removed with the
+//! device flow.
 
 use std::path::{Path, PathBuf};
 
@@ -41,8 +42,6 @@ pub enum AuthKind {
 #[serde(default)]
 pub struct AuthConfig {
     pub kind: AuthKind,
-    pub client_id: Option<String>,
-    pub client_secret: Option<String>,
     pub cookie_file: Option<PathBuf>,
 }
 
@@ -50,8 +49,6 @@ impl Default for AuthConfig {
     fn default() -> Self {
         Self {
             kind: AuthKind::Cookie,
-            client_id: None,
-            client_secret: None,
             cookie_file: None,
         }
     }
@@ -426,10 +423,24 @@ mod tests {
     }
 
     #[test]
-    fn oauth_credentials_are_optional_at_parse_time() {
-        // Missing creds is a login-time error with a helpful message, not a parse error.
-        let c = Config::from_toml_str("[auth]\nkind = \"oauth\"").unwrap();
-        assert!(c.auth.client_id.is_none());
+    fn a_config_still_naming_the_removed_oauth_keys_loads() {
+        // Those fields are gone, but a user's file may still list them. serde
+        // ignores unknown keys, so this must load rather than fail at parse.
+        let c = Config::from_toml_str(
+            r#"
+            [auth]
+            kind = "cookie"
+            client_id = "leftover.apps.googleusercontent.com"
+            client_secret = "leftover-secret"
+            cookie_file = "/tmp/c.txt"
+            "#,
+        )
+        .expect("an old config with dead keys must still load");
+        assert_eq!(c.auth.kind, AuthKind::Cookie);
+        assert_eq!(
+            c.auth.cookie_file.as_deref(),
+            Some(std::path::Path::new("/tmp/c.txt"))
+        );
     }
 
     #[test]

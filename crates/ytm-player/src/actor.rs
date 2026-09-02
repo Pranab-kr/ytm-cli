@@ -26,22 +26,12 @@ impl RetryState {
     }
 }
 
-pub fn is_stale_url_error(msg: &str) -> bool {
-    let l = msg.to_lowercase();
-    l.contains("403") || l.contains("forbidden")
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndReason {
     Eof,
     Error,
     Stop,
     Quit,
-}
-
-/// Only EOF means "play the next track".
-pub fn is_natural_end(r: EndReason) -> bool {
-    matches!(r, EndReason::Eof)
 }
 
 /// `EndFileReason` is a `c_uint` alias in libmpv2 6.0.0, not a Rust enum, so
@@ -470,23 +460,6 @@ mod tests {
         r.should_retry();
         r.reset();
         assert!(r.should_retry(), "each track gets its own retry budget");
-    }
-
-    #[test]
-    fn stale_url_errors_are_recognized() {
-        assert!(is_stale_url_error(
-            "Failed to open https://... HTTP 403 Forbidden"
-        ));
-        assert!(is_stale_url_error("http error 403"));
-        assert!(!is_stale_url_error("no audio device found"));
-    }
-
-    #[test]
-    fn end_of_file_with_error_reason_is_not_a_natural_end() {
-        // Advancing the queue on an error would silently skip tracks.
-        assert!(is_natural_end(EndReason::Eof));
-        assert!(!is_natural_end(EndReason::Error));
-        assert!(!is_natural_end(EndReason::Stop));
     }
 
     #[test]

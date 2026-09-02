@@ -48,7 +48,10 @@ pub fn auth_choice() -> Result<AuthChoice, String> {
     Ok(AuthChoice::Cookie(file))
 }
 
-/// Minimal `~` expansion; no need for a dependency just for this.
+/// Duplicates `ytm-cli`'s `config::expand_tilde` on purpose: examples live in
+/// `ytm-core`, and importing from `ytm-cli` would invert the dependency
+/// direction. Not worth a shared crate for nine lines. `config_path` below is
+/// the same story.
 fn shellexpand_tilde(s: &str) -> String {
     match s.strip_prefix("~/") {
         Some(rest) => match std::env::var("HOME") {

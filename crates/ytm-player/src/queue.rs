@@ -33,9 +33,6 @@ impl Queue {
     pub fn repeat(&self) -> RepeatMode {
         self.repeat
     }
-    pub fn shuffled(&self) -> bool {
-        self.shuffle
-    }
 
     pub fn set_repeat(&mut self, m: RepeatMode) {
         self.repeat = m;

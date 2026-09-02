@@ -4,9 +4,8 @@
 use crate::model::*;
 use ytmapi_rs::common::{Explicit, Thumbnail, YoutubeID};
 use ytmapi_rs::parse::{
-    GetPlaylistDetails, LibraryArtist, LibraryArtistSubscription, LibraryPlaylist, PlaylistItem,
-    SearchResultAlbum, SearchResultArtist, SearchResultCommunityPlaylist,
-    SearchResultFeaturedPlaylist, SearchResultSong, TableListSong,
+    GetPlaylistDetails, LibraryArtist, LibraryPlaylist, PlaylistItem, SearchResultAlbum,
+    SearchResultArtist, SearchResultCommunityPlaylist, SearchResultFeaturedPlaylist, TableListSong,
 };
 
 /// Playlist ids YouTube Music owns and refuses to let us edit.
@@ -150,19 +149,6 @@ pub fn track_from_playlist_item(item: &PlaylistItem) -> Option<Track> {
     Some(track_from_parts(parts))
 }
 
-pub fn track_from_search_song(s: &SearchResultSong) -> Track {
-    track_from_parts(TrackParts {
-        video_id: s.video_id.get_raw().to_owned(),
-        set_video_id: None,
-        title: s.title.clone(),
-        artists: vec![s.artist.clone()],
-        album: s.album.as_ref().map(|a| a.name.clone()),
-        duration_secs: parse_duration(&s.duration),
-        thumbnail_url: best_thumbnail(&s.thumbnails),
-        is_explicit: is_explicit(&s.explicit),
-    })
-}
-
 /// An artist page's top-songs shelf (FR-B7).
 ///
 /// `ArtistSong` carries no duration — the artist page shows play counts instead
@@ -278,15 +264,6 @@ pub fn artist_from_library(a: &LibraryArtist) -> Artist {
         // The library listing gives a byline ("16 songs"), not a subscriber count.
         subscribers: None,
         thumbnail_url: None,
-    }
-}
-
-pub fn artist_from_subscription(a: &LibraryArtistSubscription) -> Artist {
-    Artist {
-        id: ArtistId(a.channel_id.get_raw().to_owned()),
-        name: a.name.clone(),
-        subscribers: Some(a.subscribers.clone()),
-        thumbnail_url: best_thumbnail(&a.thumbnails),
     }
 }
 

@@ -40,27 +40,6 @@ impl MockSource {
         self.inner.lock().unwrap().playlists = p;
         self
     }
-    pub fn with_tracks(self, t: Vec<Track>) -> Self {
-        self.inner.lock().unwrap().tracks = t;
-        self
-    }
-    pub fn with_albums(self, a: Vec<Album>) -> Self {
-        self.inner.lock().unwrap().albums = a;
-        self
-    }
-    pub fn with_artists(self, a: Vec<Artist>) -> Self {
-        self.inner.lock().unwrap().artists = a;
-        self
-    }
-    pub fn with_shelves(self, s: Vec<HomeShelf>) -> Self {
-        self.inner.lock().unwrap().shelves = s;
-        self
-    }
-    /// What `artist_tracks` returns for any artist.
-    pub fn with_artist_tracks(self, t: Vec<Track>) -> Self {
-        self.inner.lock().unwrap().artist_tracks = t;
-        self
-    }
 
     /// The next call — whichever it is — returns this error, once.
     pub fn fail_next(&self, e: SourceError) {
