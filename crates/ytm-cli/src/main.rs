@@ -769,6 +769,7 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
         keymap,
         theme,
         cfg.ui.tick_ms,
+        cfg.behaviour.clone(),
         // The empty-library hint is about an expired cookie, so it only applies
         // when there was a cookie to expire.
         cfg.auth.kind == config::AuthKind::Cookie && !guest,

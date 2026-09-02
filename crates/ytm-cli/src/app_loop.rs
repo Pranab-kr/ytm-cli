@@ -16,12 +16,13 @@ use ytm_tui::{
     theme::Theme,
 };
 
-/// What a config reload produced. Both are rebuilt together: a `[keys]` change
-/// and a `[ui] theme` change land in the same file.
+/// What a config reload produced. Rebuilt together: a `[keys]` change, a
+/// `[ui] theme` change, and a `[behaviour]` change all land in the same file.
 pub struct ReloadedConfig {
     pub keymap: KeyMap,
     pub theme: Theme,
     pub theme_name: String,
+    pub behaviour: crate::config::BehaviourConfig,
 }
 
 /// Suspend the TUI, open `$EDITOR` on the config, and reload on exit (`,`).
@@ -108,6 +109,7 @@ pub fn reload_config(text: &str) -> color_eyre::Result<ReloadedConfig> {
         keymap,
         theme,
         theme_name,
+        behaviour: cfg.behaviour,
     })
 }
 
@@ -122,11 +124,6 @@ pub fn editor_command() -> Option<String> {
     }
     None
 }
-
-/// Seek step in seconds (FR-P4).
-const SEEK_STEP: i64 = 5;
-/// Volume step per key press.
-const VOLUME_STEP: i64 = 5;
 
 /// Start a fetch, or say why it cannot run yet.
 ///
@@ -602,6 +599,7 @@ pub fn dispatch_input(
     action: InputAction,
     state: &mut AppState,
     player: &impl Player,
+    behaviour: &crate::config::BehaviourConfig,
 ) -> Option<Task> {
     use InputAction as A;
 
@@ -661,16 +659,22 @@ pub fn dispatch_input(
             send(player, PlayerCommand::Previous);
         }
         A::SeekForward => {
-            send(player, PlayerCommand::SeekRelative(SEEK_STEP));
+            send(
+                player,
+                PlayerCommand::SeekRelative(behaviour.seek_step_secs),
+            );
         }
         A::SeekBack => {
-            send(player, PlayerCommand::SeekRelative(-SEEK_STEP));
+            send(
+                player,
+                PlayerCommand::SeekRelative(-behaviour.seek_step_secs),
+            );
         }
         A::VolumeUp | A::VolumeDown => {
             let delta = if action == A::VolumeUp {
-                VOLUME_STEP
+                behaviour.volume_step
             } else {
-                -VOLUME_STEP
+                -behaviour.volume_step
             };
             // Set it locally too: the bar should move on the next frame rather
             // than waiting for the actor's VolumeChanged to come back.
@@ -1049,6 +1053,7 @@ pub async fn run(
     mut keymap: KeyMap,
     mut theme: Theme,
     tick_ms: u64,
+    mut behaviour: crate::config::BehaviourConfig,
     cookie_auth: bool,
     cache: Option<ytm_core::cache::Cache>,
     mut art: ytm_tui::widgets::art::ArtCache,
@@ -1143,7 +1148,7 @@ pub async fn run(
                                                 && now.saturating_sub(at) <= DOUBLE_CLICK_MS
                                         });
                                     if same && state.selected == before {
-                                        if let Some(t) = dispatch_input(InputAction::Confirm, &mut state, &player) {
+                                        if let Some(t) = dispatch_input(InputAction::Confirm, &mut state, &player, &behaviour) {
                                             try_spawn(t, &source, &app_tx, &mut state);
                                         }
                                         last_click = None;
@@ -1199,6 +1204,7 @@ pub async fn run(
                                             keymap = reloaded.keymap;
                                             theme = reloaded.theme;
                                             theme_name = reloaded.theme_name;
+                                            behaviour = reloaded.behaviour;
                                             state.push_toast(
                                                 ToastKind::Success,
                                                 "config reloaded",
@@ -1217,7 +1223,7 @@ pub async fn run(
                                     terminal.clear()?;
                                 }
                                 _ => {
-                                    if let Some(task) = dispatch_input(a, &mut state, &player) {
+                                    if let Some(task) = dispatch_input(a, &mut state, &player, &behaviour) {
                                         try_spawn(task, &source, &app_tx, &mut state);
                                     }
                                 }
@@ -1583,6 +1589,87 @@ mod tests {
         (Arc::new(MockSource::new()), Arc::new(p))
     }
 
+    /// Default steps, so the many `dispatch_input` calls below need no struct.
+    fn beh() -> crate::config::BehaviourConfig {
+        crate::config::BehaviourConfig::default()
+    }
+
+    #[test]
+    fn seek_uses_the_configured_step_rather_than_a_hardcoded_five() {
+        let (_src, player) = deps();
+        let mut s = AppState::default();
+        let b = crate::config::BehaviourConfig {
+            seek_step_secs: 30,
+            ..beh()
+        };
+        dispatch_input(InputAction::SeekForward, &mut s, &*player, &b);
+        dispatch_input(InputAction::SeekBack, &mut s, &*player, &b);
+        assert!(
+            matches!(
+                player.commands().as_slice(),
+                [
+                    PlayerCommand::SeekRelative(30),
+                    PlayerCommand::SeekRelative(-30)
+                ]
+            ),
+            "behaviour.seek_step_secs must reach the player, got {:?}",
+            player.commands()
+        );
+    }
+
+    #[test]
+    fn volume_uses_the_configured_step_rather_than_a_hardcoded_five() {
+        let (_src, player) = deps();
+        let mut s = AppState {
+            volume: 50,
+            ..Default::default()
+        };
+        let b = crate::config::BehaviourConfig {
+            volume_step: 10,
+            ..beh()
+        };
+        dispatch_input(InputAction::VolumeUp, &mut s, &*player, &b);
+        assert_eq!(s.volume, 60, "the bar must move by the configured step");
+        dispatch_input(InputAction::VolumeDown, &mut s, &*player, &b);
+        dispatch_input(InputAction::VolumeDown, &mut s, &*player, &b);
+        assert_eq!(s.volume, 40);
+        assert!(
+            matches!(player.commands().last(), Some(PlayerCommand::SetVolume(40))),
+            "the player must be told the same level, got {:?}",
+            player.commands()
+        );
+    }
+
+    #[test]
+    fn a_configured_step_still_clamps_at_the_ends() {
+        // A large step must not wrap or panic: clamp_volume owns the bounds.
+        let (_src, player) = deps();
+        let b = crate::config::BehaviourConfig {
+            volume_step: 90,
+            ..beh()
+        };
+        let mut s = AppState {
+            volume: 50,
+            ..Default::default()
+        };
+        dispatch_input(InputAction::VolumeUp, &mut s, &*player, &b);
+        assert_eq!(s.volume, 100);
+        dispatch_input(InputAction::VolumeDown, &mut s, &*player, &b);
+        assert_eq!(s.volume, 10);
+        dispatch_input(InputAction::VolumeDown, &mut s, &*player, &b);
+        assert_eq!(s.volume, 0, "must clamp, not wrap");
+    }
+
+    #[test]
+    fn a_reload_carries_the_new_behaviour_values() {
+        // Editing behaviour with `,` must apply without a restart, the same way
+        // keys and the theme already do.
+        let r = reload_config("[behaviour]\nseek_step_secs = 15\nvolume_step = 3")
+            .expect("valid config");
+        assert_eq!(r.behaviour.seek_step_secs, 15);
+        assert_eq!(r.behaviour.volume_step, 3);
+    }
+
     #[test]
     fn unauthenticated_source_ready_redirects_locked_pane_to_search() {
         let mut state = AppState {
@@ -1643,7 +1730,7 @@ mod tests {
                 pane: Pane::Playlists,
                 ..Default::default()
             };
-            assert!(dispatch_input(action.clone(), &mut state, &*player).is_none());
+            assert!(dispatch_input(action.clone(), &mut state, &*player, &beh()).is_none());
             assert!(state.modal.is_none(), "{action:?} must not open a modal");
             assert_eq!(state.toasts.len(), 1, "{action:?} must explain itself");
         }
@@ -1658,7 +1745,12 @@ mod tests {
             queue: vec![ytm_core::Track::stub("v1", "Song")],
             ..Default::default()
         };
-        dispatch_input(InputAction::RemoveFromPlaylist, &mut state, &*player);
+        dispatch_input(
+            InputAction::RemoveFromPlaylist,
+            &mut state,
+            &*player,
+            &beh(),
+        );
         assert!(matches!(
             player.commands().as_slice(),
             [PlayerCommand::RemoveFromQueue(0)]
@@ -1669,7 +1761,7 @@ mod tests {
     fn toggle_pause_reaches_the_player_not_the_state() {
         let (_src, player) = deps();
         let mut s = AppState::default();
-        dispatch_input(InputAction::TogglePause, &mut s, &*player);
+        dispatch_input(InputAction::TogglePause, &mut s, &*player, &beh());
         assert!(matches!(player.commands()[0], PlayerCommand::TogglePause));
     }
 
@@ -1680,7 +1772,7 @@ mod tests {
             volume: 97,
             ..Default::default()
         };
-        dispatch_input(InputAction::VolumeUp, &mut s, &*player);
+        dispatch_input(InputAction::VolumeUp, &mut s, &*player, &beh());
         match player.commands()[0] {
             PlayerCommand::SetVolume(v) => assert_eq!(v, 100),
             ref o => panic!("expected SetVolume, got {o:?}"),
@@ -1694,7 +1786,7 @@ mod tests {
             volume: 2,
             ..Default::default()
         };
-        dispatch_input(InputAction::VolumeDown, &mut s, &*player);
+        dispatch_input(InputAction::VolumeDown, &mut s, &*player, &beh());
         match player.commands()[0] {
             PlayerCommand::SetVolume(v) => assert_eq!(v, 0),
             ref o => panic!("expected SetVolume, got {o:?}"),
@@ -1705,7 +1797,7 @@ mod tests {
     fn cycle_repeat_advances_the_mode() {
         let (_src, player) = deps();
         let mut s = AppState::default();
-        dispatch_input(InputAction::CycleRepeat, &mut s, &*player);
+        dispatch_input(InputAction::CycleRepeat, &mut s, &*player, &beh());
         match player.commands()[0] {
             PlayerCommand::SetRepeat(m) => {
                 assert_eq!(m, ytm_player::player::RepeatMode::One)
@@ -1723,7 +1815,7 @@ mod tests {
             selected: 0,
             ..Default::default()
         };
-        dispatch_input(InputAction::Confirm, &mut s, &*player);
+        dispatch_input(InputAction::Confirm, &mut s, &*player, &beh());
         match &player.commands()[0] {
             PlayerCommand::PlayNow(t) => assert_eq!(t.video_id.as_str(), "v7"),
             o => panic!("expected PlayNow, got {o:?}"),
@@ -1737,7 +1829,7 @@ mod tests {
             pane: Pane::Songs,
             ..Default::default()
         };
-        dispatch_input(InputAction::Confirm, &mut s, &*player);
+        dispatch_input(InputAction::Confirm, &mut s, &*player, &beh());
         assert!(
             player.commands().is_empty(),
             "must not play a track that does not exist"
@@ -1752,7 +1844,7 @@ mod tests {
             tracks: vec![ytm_core::Track::stub("v1", "A")],
             ..Default::default()
         };
-        dispatch_input(InputAction::AddToQueue, &mut s, &*player);
+        dispatch_input(InputAction::AddToQueue, &mut s, &*player, &beh());
         assert!(matches!(
             player.commands()[0],
             PlayerCommand::EnqueueBack(_)
@@ -1797,7 +1889,7 @@ mod tests {
         let mut fired = Vec::new();
         for (i, c) in "boa".chars().enumerate() {
             let now = 1000 + i as u64 * 50;
-            dispatch_input(InputAction::Char(c), &mut s, &*player);
+            dispatch_input(InputAction::Char(c), &mut s, &*player, &beh());
             note_search_input(&mut d, &s, now);
             // A tick between keystrokes is too soon to fire.
             if let Some(t) = search_tick(&mut d, &mut s, now + 10) {
@@ -1820,7 +1912,7 @@ mod tests {
             focus: Focus::SearchInput,
             ..Default::default()
         };
-        dispatch_input(InputAction::Char('x'), &mut s, &*player);
+        dispatch_input(InputAction::Char('x'), &mut s, &*player, &beh());
         note_search_input(&mut d, &s, 1000);
         assert!(search_tick(&mut d, &mut s, 1400).is_some());
         for now in [1500, 1600, 5000] {
@@ -1837,7 +1929,7 @@ mod tests {
             focus: Focus::Main,
             ..Default::default()
         };
-        dispatch_input(InputAction::Down, &mut s, &*player);
+        dispatch_input(InputAction::Down, &mut s, &*player, &beh());
         note_search_input(&mut d, &s, 1000);
         assert_eq!(search_tick(&mut d, &mut s, 2000), None);
     }
@@ -1860,7 +1952,7 @@ mod tests {
     fn x_in_the_queue_removes_the_selected_entry() {
         let (_src, player) = deps();
         let mut s = queue_of_three();
-        dispatch_input(InputAction::RemoveFromPlaylist, &mut s, &*player);
+        dispatch_input(InputAction::RemoveFromPlaylist, &mut s, &*player, &beh());
         match player.commands()[0] {
             PlayerCommand::RemoveFromQueue(i) => assert_eq!(i, 1),
             ref o => panic!("expected RemoveFromQueue, got {o:?}"),
@@ -1891,7 +1983,7 @@ mod tests {
         // JumpTo takes a queue index.
         let (_src, player) = deps();
         let mut s = filtered_queue_of_four();
-        dispatch_input(InputAction::Confirm, &mut s, &*player);
+        dispatch_input(InputAction::Confirm, &mut s, &*player, &beh());
         match player.commands()[0] {
             PlayerCommand::JumpTo(i) => assert_eq!(i, 1, "visible row 0 is queue 1"),
             ref o => panic!("expected JumpTo, got {o:?}"),
@@ -1906,7 +1998,7 @@ mod tests {
             selected: 1,
             ..filtered_queue_of_four()
         };
-        dispatch_input(InputAction::Confirm, &mut s, &*player);
+        dispatch_input(InputAction::Confirm, &mut s, &*player, &beh());
         match player.commands()[0] {
             PlayerCommand::JumpTo(i) => assert_eq!(i, 3, "visible row 1 is queue 3"),
             ref o => panic!("expected JumpTo, got {o:?}"),
@@ -1922,7 +2014,7 @@ mod tests {
             selected: 2,
             ..filtered_queue_of_four()
         };
-        dispatch_input(InputAction::Confirm, &mut s, &*player);
+        dispatch_input(InputAction::Confirm, &mut s, &*player, &beh());
         assert!(player.commands().is_empty());
     }
 
@@ -1932,7 +2024,7 @@ mod tests {
         // through, so it deleted whatever sat at that spot in the full queue.
         let (_src, player) = deps();
         let mut s = filtered_queue_of_four();
-        dispatch_input(InputAction::RemoveFromPlaylist, &mut s, &*player);
+        dispatch_input(InputAction::RemoveFromPlaylist, &mut s, &*player, &beh());
         match player.commands()[0] {
             PlayerCommand::RemoveFromQueue(i) => assert_eq!(i, 1),
             ref o => panic!("expected RemoveFromQueue, got {o:?}"),
@@ -1945,7 +2037,7 @@ mod tests {
         // against the real queue — so this only ever bit the single-row case.
         let (_src, player) = deps();
         let mut s = filtered_queue_of_four();
-        dispatch_input(InputAction::MoveEntryDown, &mut s, &*player);
+        dispatch_input(InputAction::MoveEntryDown, &mut s, &*player, &beh());
         assert_eq!(moves(&player), vec![(1, 2)], "queue 1 moves to 2");
     }
 
@@ -1955,7 +2047,7 @@ mod tests {
         // `state.queue` here would show a row count the player disagrees with.
         let (_src, player) = deps();
         let mut s = queue_of_three();
-        dispatch_input(InputAction::RemoveFromPlaylist, &mut s, &*player);
+        dispatch_input(InputAction::RemoveFromPlaylist, &mut s, &*player, &beh());
         assert_eq!(s.queue.len(), 3, "the view must wait for QueueChanged");
     }
 
@@ -1968,7 +2060,7 @@ mod tests {
             tracks: vec![ytm_core::Track::stub("v1", "A")],
             ..Default::default()
         };
-        dispatch_input(InputAction::RemoveFromPlaylist, &mut s, &*player);
+        dispatch_input(InputAction::RemoveFromPlaylist, &mut s, &*player, &beh());
         assert!(player.commands().is_empty());
     }
 
@@ -1976,7 +2068,7 @@ mod tests {
     fn moving_an_entry_down_swaps_it_with_the_next_one() {
         let (_src, player) = deps();
         let mut s = queue_of_three();
-        dispatch_input(InputAction::MoveEntryDown, &mut s, &*player);
+        dispatch_input(InputAction::MoveEntryDown, &mut s, &*player, &beh());
         match player.commands()[0] {
             PlayerCommand::MoveInQueue { from, to } => assert_eq!((from, to), (1, 2)),
             ref o => panic!("expected MoveInQueue, got {o:?}"),
@@ -1988,7 +2080,7 @@ mod tests {
     fn moving_an_entry_up_swaps_it_with_the_previous_one() {
         let (_src, player) = deps();
         let mut s = queue_of_three();
-        dispatch_input(InputAction::MoveEntryUp, &mut s, &*player);
+        dispatch_input(InputAction::MoveEntryUp, &mut s, &*player, &beh());
         match player.commands()[0] {
             PlayerCommand::MoveInQueue { from, to } => assert_eq!((from, to), (1, 0)),
             ref o => panic!("expected MoveInQueue, got {o:?}"),
@@ -2003,12 +2095,12 @@ mod tests {
             selected: 0,
             ..queue_of_three()
         };
-        dispatch_input(InputAction::MoveEntryUp, &mut top, &*player);
+        dispatch_input(InputAction::MoveEntryUp, &mut top, &*player, &beh());
         let mut bottom = AppState {
             selected: 2,
             ..queue_of_three()
         };
-        dispatch_input(InputAction::MoveEntryDown, &mut bottom, &*player);
+        dispatch_input(InputAction::MoveEntryDown, &mut bottom, &*player, &beh());
         assert!(
             player.commands().is_empty(),
             "an out-of-range move would panic the actor"
@@ -2055,7 +2147,7 @@ mod tests {
         // block apart.
         let (_src, player) = deps();
         let mut s = queue_of_four_with_middle_marked();
-        dispatch_input(InputAction::MoveEntryDown, &mut s, &*player);
+        dispatch_input(InputAction::MoveEntryDown, &mut s, &*player, &beh());
         assert_eq!(moves(&player), vec![(2, 3), (1, 2)]);
         assert_eq!(s.selected, 2, "the cursor follows the block");
     }
@@ -2064,7 +2156,7 @@ mod tests {
     fn a_marked_block_moves_up_together() {
         let (_src, player) = deps();
         let mut s = queue_of_four_with_middle_marked();
-        dispatch_input(InputAction::MoveEntryUp, &mut s, &*player);
+        dispatch_input(InputAction::MoveEntryUp, &mut s, &*player, &beh());
         // Lowest index first going up, for the same reason reversed.
         assert_eq!(moves(&player), vec![(1, 0), (2, 1)]);
         assert_eq!(s.selected, 0);
@@ -2077,11 +2169,11 @@ mod tests {
         let (_src, player) = deps();
         let mut top = queue_of_four_with_middle_marked();
         top.marked.insert(ytm_core::VideoId::from("v1"));
-        dispatch_input(InputAction::MoveEntryUp, &mut top, &*player);
+        dispatch_input(InputAction::MoveEntryUp, &mut top, &*player, &beh());
 
         let mut bottom = queue_of_four_with_middle_marked();
         bottom.marked.insert(ytm_core::VideoId::from("v4"));
-        dispatch_input(InputAction::MoveEntryDown, &mut bottom, &*player);
+        dispatch_input(InputAction::MoveEntryDown, &mut bottom, &*player, &beh());
 
         assert!(
             moves(&player).is_empty(),
@@ -2098,7 +2190,7 @@ mod tests {
         let (_src, player) = deps();
         let mut q = ytm_player::queue::Queue::default();
         q.push_back(state.queue.clone());
-        dispatch_input(action, state, &*player);
+        dispatch_input(action, state, &*player, &beh());
         for (from, to) in moves(&player) {
             q.move_item(from, to);
         }
@@ -2136,7 +2228,7 @@ mod tests {
         s.marked.insert(ytm_core::VideoId::from("v4"));
         // v2 and v4 marked, v4 is last, so the block is against the bottom.
         let (_src, player) = deps();
-        dispatch_input(InputAction::MoveEntryDown, &mut s, &*player);
+        dispatch_input(InputAction::MoveEntryDown, &mut s, &*player, &beh());
         assert!(
             moves(&player).is_empty(),
             "one marked entry at the end pins the whole selection"
@@ -2150,7 +2242,7 @@ mod tests {
         // moving the single cursor row instead.
         let (_src, player) = deps();
         let mut s = queue_of_four_with_middle_marked();
-        dispatch_input(InputAction::MoveEntryDown, &mut s, &*player);
+        dispatch_input(InputAction::MoveEntryDown, &mut s, &*player, &beh());
         assert!(s.marked.contains(&ytm_core::VideoId::from("v2")));
         assert!(s.marked.contains(&ytm_core::VideoId::from("v3")));
     }
@@ -2166,7 +2258,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        dispatch_input(InputAction::MoveEntryDown, &mut s, &*player);
+        dispatch_input(InputAction::MoveEntryDown, &mut s, &*player, &beh());
         assert!(
             player.commands().is_empty(),
             "there is no server-side track order to change (out of scope)"
@@ -2177,7 +2269,7 @@ mod tests {
     fn the_clear_binding_empties_the_queue() {
         let (_src, player) = deps();
         let mut s = queue_of_three();
-        dispatch_input(InputAction::ClearQueue, &mut s, &*player);
+        dispatch_input(InputAction::ClearQueue, &mut s, &*player, &beh());
         assert!(matches!(player.commands()[0], PlayerCommand::ClearQueue));
     }
 
@@ -2185,7 +2277,7 @@ mod tests {
     fn clearing_resets_the_selection_so_it_cannot_dangle() {
         let (_src, player) = deps();
         let mut s = queue_of_three();
-        dispatch_input(InputAction::ClearQueue, &mut s, &*player);
+        dispatch_input(InputAction::ClearQueue, &mut s, &*player, &beh());
         assert_eq!(s.selected, 0);
     }
 
@@ -2351,10 +2443,10 @@ mod tests {
             selected: 0,
             ..Default::default()
         };
-        dispatch_input(InputAction::CreatePlaylist, &mut s, &*player);
+        dispatch_input(InputAction::CreatePlaylist, &mut s, &*player, &beh());
         assert!(matches!(s.modal, Some(ytm_tui::app::Modal::Prompt { .. })));
         s.modal = None;
-        dispatch_input(InputAction::RenamePlaylist, &mut s, &*player);
+        dispatch_input(InputAction::RenamePlaylist, &mut s, &*player, &beh());
         assert!(matches!(s.modal, Some(ytm_tui::app::Modal::Prompt { .. })));
         assert!(player.commands().is_empty(), "neither touches the player");
     }
@@ -2465,7 +2557,7 @@ mod tests {
             ..Default::default()
         };
         open_delete_confirm(&mut yes);
-        let task = dispatch_input(InputAction::Char('y'), &mut yes, &*player);
+        let task = dispatch_input(InputAction::Char('y'), &mut yes, &*player, &beh());
         assert!(
             matches!(
                 task,
@@ -2483,7 +2575,7 @@ mod tests {
             ..Default::default()
         };
         open_delete_confirm(&mut no);
-        assert!(dispatch_input(InputAction::Char('n'), &mut no, &*player).is_none());
+        assert!(dispatch_input(InputAction::Char('n'), &mut no, &*player, &beh()).is_none());
         assert!(no.modal.is_none(), "n closes the box");
         assert_eq!(no.playlists.len(), 1, "and deletes nothing");
     }
@@ -2496,7 +2588,7 @@ mod tests {
             playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
             ..Default::default()
         };
-        dispatch_input(InputAction::DeletePlaylist, &mut s, &*player);
+        dispatch_input(InputAction::DeletePlaylist, &mut s, &*player, &beh());
         assert!(matches!(s.modal, Some(Modal::Confirm { .. })));
     }
 
@@ -2685,7 +2777,7 @@ mod tests {
         s.marked.insert(ytm_core::VideoId::from("v1"));
         s.marked.insert(ytm_core::VideoId::from("v2"));
         open_add_to_playlist(&mut s);
-        let task = dispatch_input(InputAction::Confirm, &mut s, &*player);
+        let task = dispatch_input(InputAction::Confirm, &mut s, &*player, &beh());
         match task {
             Some(Task::Mutate {
                 task: MutationTask::AddTracks { id, videos },
@@ -2779,7 +2871,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        dispatch_input(InputAction::Down, &mut s, &*player);
+        dispatch_input(InputAction::Down, &mut s, &*player, &beh());
         assert!(player.commands().is_empty());
         assert_eq!(s.selected, 1, "state handles navigation");
     }
@@ -2932,7 +3024,7 @@ mod tests {
             focus: Focus::Main,
             ..Default::default()
         };
-        let task = dispatch_input(InputAction::Right, &mut s, &*player);
+        let task = dispatch_input(InputAction::Right, &mut s, &*player, &beh());
         assert_eq!(task, Some(Task::OpenPlaylist("p1".into())));
     }
 
@@ -2954,7 +3046,7 @@ mod tests {
             focus: Focus::Main,
             ..Default::default()
         };
-        let task = dispatch_input(InputAction::Right, &mut s, &*player);
+        let task = dispatch_input(InputAction::Right, &mut s, &*player, &beh());
         assert_eq!(
             task,
             Some(Task::OpenArtist {
@@ -2975,7 +3067,10 @@ mod tests {
             focus: Focus::Main,
             ..Default::default()
         };
-        assert_eq!(dispatch_input(InputAction::Right, &mut s, &*player), None);
+        assert_eq!(
+            dispatch_input(InputAction::Right, &mut s, &*player, &beh()),
+            None
+        );
     }
 
     #[test]
@@ -2990,7 +3085,7 @@ mod tests {
             focus: Focus::Main,
             ..Default::default()
         };
-        assert!(dispatch_input(InputAction::Right, &mut s, &*player).is_none());
+        assert!(dispatch_input(InputAction::Right, &mut s, &*player, &beh()).is_none());
     }
 
     #[test]
@@ -3004,7 +3099,7 @@ mod tests {
             focus: Focus::Main,
             ..Default::default()
         };
-        let task = dispatch_input(InputAction::Right, &mut s, &*player);
+        let task = dispatch_input(InputAction::Right, &mut s, &*player, &beh());
         assert!(task.is_none());
         assert!(
             player.commands().is_empty(),
@@ -3018,7 +3113,7 @@ mod tests {
         // Home is source 1, so the sources after it all shifted by one.
         let (_src, player) = deps();
         let mut s = AppState::default();
-        let task = dispatch_input(InputAction::GoTo(4), &mut s, &*player);
+        let task = dispatch_input(InputAction::GoTo(4), &mut s, &*player, &beh());
         assert_eq!(task, Some(Task::LoadAlbums));
         assert_eq!(s.pane, Pane::Albums);
     }
@@ -3028,7 +3123,7 @@ mod tests {
         // The queue is local state owned by the actor; there is nothing to load.
         let (_src, player) = deps();
         let mut s = AppState::default();
-        assert!(dispatch_input(InputAction::GoTo(7), &mut s, &*player).is_none());
+        assert!(dispatch_input(InputAction::GoTo(7), &mut s, &*player, &beh()).is_none());
         assert_eq!(s.pane, Pane::Queue);
     }
 
@@ -3075,14 +3170,14 @@ mod tests {
                     s.input_focus(),
                 )
                 .unwrap_or_else(|| panic!("{c:?} is unbound"));
-            dispatch_input(a, s, &*player)
+            dispatch_input(a, s, &*player, &beh())
         };
         press(&mut s, 'V');
         press(&mut s, 'j');
         press(&mut s, 'j');
         assert_eq!(s.marked.len(), 3, "V then j j must mark three rows");
         press(&mut s, 'A');
-        match dispatch_input(InputAction::Confirm, &mut s, &*player) {
+        match dispatch_input(InputAction::Confirm, &mut s, &*player, &beh()) {
             Some(Task::Mutate {
                 task: MutationTask::AddTracks { videos, .. },
                 ..
@@ -3117,7 +3212,7 @@ mod tests {
                     s.input_focus(),
                 )
                 .unwrap();
-            dispatch_input(a, s, &*player)
+            dispatch_input(a, s, &*player, &beh())
         };
         press(&mut s, 'v'); // hand-mark v0
         press(&mut s, 'j');
@@ -3125,7 +3220,7 @@ mod tests {
         press(&mut s, 'V'); // range from v2
         press(&mut s, 'j'); // ..v3
         press(&mut s, 'A');
-        match dispatch_input(InputAction::Confirm, &mut s, &*player) {
+        match dispatch_input(InputAction::Confirm, &mut s, &*player, &beh()) {
             Some(Task::Mutate {
                 task: MutationTask::AddTracks { videos, .. },
                 ..
@@ -3172,7 +3267,7 @@ mod tests {
         // now shows albums.
         s.apply(AppEvent::Input(InputAction::GoTo(4)));
         assert_eq!(s.pane, Pane::Albums);
-        dispatch_input(InputAction::Confirm, &mut s, &*player);
+        dispatch_input(InputAction::Confirm, &mut s, &*player, &beh());
         let log = player.commands();
         assert!(
             log.is_empty(),
@@ -3190,7 +3285,7 @@ mod tests {
             ..Default::default()
         };
         s.apply(AppEvent::Input(InputAction::GoTo(4)));
-        dispatch_input(InputAction::AddToQueue, &mut s, &*player);
+        dispatch_input(InputAction::AddToQueue, &mut s, &*player, &beh());
         let log = player.commands();
         assert!(log.is_empty(), "`a` on an album row queued a song: {log:?}");
     }
@@ -3205,7 +3300,7 @@ mod tests {
             tracks: vec![ytm_core::Track::stub("v1", "Roygbiv")],
             ..Default::default()
         };
-        dispatch_input(InputAction::AddToQueue, &mut s, &*player);
+        dispatch_input(InputAction::AddToQueue, &mut s, &*player, &beh());
         assert_eq!(s.toasts.len(), 1, "adding must be acknowledged");
         assert_eq!(s.toasts[0].kind, ToastKind::Success);
         assert!(
@@ -3224,7 +3319,7 @@ mod tests {
             tracks: vec![ytm_core::Track::stub("v1", "Roygbiv")],
             ..Default::default()
         };
-        dispatch_input(InputAction::PlayNext, &mut s, &*player);
+        dispatch_input(InputAction::PlayNext, &mut s, &*player, &beh());
         assert_eq!(s.toasts.len(), 1);
         assert!(
             s.toasts[0].text.to_lowercase().contains("next"),
@@ -3247,7 +3342,7 @@ mod tests {
         for t in s.tracks.clone() {
             s.marked.insert(t.video_id.clone());
         }
-        dispatch_input(InputAction::AddToQueue, &mut s, &*player);
+        dispatch_input(InputAction::AddToQueue, &mut s, &*player, &beh());
         assert!(s.toasts[0].text.contains('3'), "got: {}", s.toasts[0].text);
         match player.commands().first() {
             Some(PlayerCommand::EnqueueBack(ts)) => {
@@ -3264,7 +3359,7 @@ mod tests {
             pane: Pane::Songs,
             ..Default::default()
         };
-        dispatch_input(InputAction::AddToQueue, &mut s, &*player);
+        dispatch_input(InputAction::AddToQueue, &mut s, &*player, &beh());
         assert!(s.toasts.is_empty(), "nothing was added, so say nothing");
         assert!(player.commands().is_empty());
     }
