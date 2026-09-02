@@ -1096,7 +1096,7 @@ pub async fn run(
     mut media_keys: mpsc::UnboundedReceiver<PlayerCommand>,
     config_path: std::path::PathBuf,
     mut theme_name: String,
-) -> color_eyre::Result<()> {
+) -> color_eyre::Result<u8> {
     use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind, MouseEventKind};
     use futures::StreamExt;
 
@@ -1378,7 +1378,8 @@ pub async fn run(
 
         if state.should_quit {
             send(&player, PlayerCommand::Shutdown);
-            return Ok(());
+            // The level the user left at, for `state.toml`.
+            return Ok(state.volume);
         }
     }
 }

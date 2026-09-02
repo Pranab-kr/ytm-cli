@@ -2,6 +2,7 @@ mod app_loop;
 mod config;
 mod logging;
 mod mpris;
+mod state_file;
 
 use color_eyre::eyre::{Context, eyre};
 use crossterm::{
@@ -624,7 +625,13 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
         }
     };
 
-    let volume = cfg.playback.volume.min(100) as u8;
+    // `state.toml` wins over `playback.volume`: the config value is the starting
+    // point for a fresh install, and after that the last session's level is what
+    // "remembered across runs" means.
+    let state_path = state_file::default_path();
+    let volume = state_file::load(&state_path)
+        .volume
+        .unwrap_or_else(|| cfg.playback.volume.min(100) as u8);
     let (theme, theme_name) = config::resolve_theme(&cfg)?;
 
     // Decided before the first frame: the start pane, the cache preload, and
@@ -757,7 +764,20 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
     // Drop the guard before returning, so an error report prints to a restored
     // terminal rather than into the alternate screen.
     drop(guard);
-    result
+
+    // Best-effort: a cache dir we cannot write is not worth failing a clean exit
+    // over, and the next run just starts from `playback.volume`.
+    if let Ok(volume) = &result
+        && let Err(e) = state_file::save(
+            &state_path,
+            &state_file::RuntimeState {
+                volume: Some(*volume),
+            },
+        )
+    {
+        tracing::warn!(error = %e, "could not save the runtime state");
+    }
+    result.map(|_| ())
 }
 
 #[cfg(test)]

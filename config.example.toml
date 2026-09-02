@@ -36,7 +36,7 @@ kind = "cookie"
 cookie_file = "~/.config/ytm-cli/cookies.txt"
 
 [playback]
-volume = 70        # 0-100, remembered across runs
+volume = 70        # 0-100, the starting level; +/- changes are remembered
 shuffle = false    # start shuffled
 
 [ui]

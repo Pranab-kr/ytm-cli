@@ -226,7 +226,7 @@ you save and exit — no restart.
 | `ui.mouse` | Wheel scrolling and click support |
 | `ui.album_art` | Art in graphics-capable terminals |
 | `ui.tick_ms` | Redraw interval — lower is smoother and busier |
-| `playback.volume` | Remembered across runs |
+| `playback.volume` | Starting level. `+`/`-` changes are remembered in `state.toml` in the cache dir |
 | `behaviour.seek_step_secs` | How far `f`/`b` jump |
 | `behaviour.volume_step` | How much `+`/`-` move |
 | `behaviour.confirm_on_quit` | Ask before quitting |
