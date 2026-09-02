@@ -694,9 +694,23 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
         );
     }
 
-    // The reads are all done; the connection moves onto its own thread so the
-    // event loop never waits on a commit. `rusqlite::Connection` is `Send` but
-    // not `Sync`, so a writer thread is the shape that works here.
+    // The writer owns its connection: `rusqlite::Connection` is `Send` but not
+    // `Sync`, so the loop cannot share one. Opening the playlist preload's
+    // reader separately is what WAL mode is for — concurrent readers are fine,
+    // and a failure here only costs the preload, not the writes.
+    let cache_reader = if cache.is_some() && !guest {
+        match ytm_core::cache::Cache::open(&cache_path) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!(error = %e, "no cache reader; playlists will load blank");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    // The startup reads are done; the connection moves onto its own thread so
+    // the event loop never waits on a commit.
     let cache_writer = cache.map(app_loop::spawn_cache_writer);
 
     install_panic_hook();
@@ -757,6 +771,7 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
         // The empty-library hint is about an expired cookie, so it only applies
         // when there was a cookie to expire.
         cfg.auth.kind == config::AuthKind::Cookie && !guest,
+        cache_reader,
         cache_writer,
         art,
         media,

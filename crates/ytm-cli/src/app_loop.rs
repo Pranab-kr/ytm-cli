@@ -161,12 +161,23 @@ fn source_ready(state: &mut AppState, authenticated: bool) {
     state.push_toast(ToastKind::Info, GUEST_NOTICE, state.elapsed_ms);
 }
 
+/// Start background work, showing whatever the cache already holds first.
+///
+/// Opening a playlist is the one task with rows on disk to show meanwhile: they
+/// were written on every previous open and never read back, so the pane sat
+/// blank until the network answered.
 fn try_spawn(
     task: Task,
     source: &Option<Arc<dyn MusicSource>>,
     tx: &mpsc::UnboundedSender<AppEvent>,
     state: &mut AppState,
+    cache: Option<&ytm_core::cache::Cache>,
 ) {
+    if let Task::OpenPlaylist(id) = &task
+        && let Some(cache) = cache
+    {
+        preload_playlist_tracks(cache, state, id);
+    }
     match source {
         Some(src) => spawn_task(task, src.clone(), tx.clone()),
         None => state.push_toast(ToastKind::Info, "still connecting…", state.elapsed_ms),
@@ -1088,6 +1099,7 @@ pub async fn run(
     tick_ms: u64,
     mut behaviour: crate::config::BehaviourConfig,
     cookie_auth: bool,
+    cache_reader: Option<ytm_core::cache::Cache>,
     cache_writer: Option<std::sync::mpsc::Sender<CacheWork>>,
     mut art: ytm_tui::widgets::art::ArtCache,
     mut media: Option<souvlaki::MediaControls>,
@@ -1162,7 +1174,7 @@ pub async fn run(
                                 );
                                 if let Some(task) = task {
                                     if let Some(t) = start(&mut state, task) {
-                                        try_spawn(t, &source, &app_tx, &mut state);
+                                        try_spawn(t, &source, &app_tx, &mut state, cache_reader.as_ref());
                                     }
                                     // A sidebar click is not part of a double-click
                                     // on a row.
@@ -1182,7 +1194,7 @@ pub async fn run(
                                         });
                                     if same && state.selected == before {
                                         if let Some(t) = dispatch_input(InputAction::Confirm, &mut state, &player, &behaviour) {
-                                            try_spawn(t, &source, &app_tx, &mut state);
+                                            try_spawn(t, &source, &app_tx, &mut state, cache_reader.as_ref());
                                         }
                                         last_click = None;
                                     } else {
@@ -1257,7 +1269,7 @@ pub async fn run(
                                 }
                                 _ => {
                                     if let Some(task) = dispatch_input(a, &mut state, &player, &behaviour) {
-                                        try_spawn(task, &source, &app_tx, &mut state);
+                                        try_spawn(task, &source, &app_tx, &mut state, cache_reader.as_ref());
                                     }
                                 }
                             }
@@ -1361,7 +1373,7 @@ pub async fn run(
                 state.elapsed_ms = now_ms;
                 state.apply(AppEvent::Tick);
                 if let Some(task) = search_tick(&mut debounce, &mut state, now_ms) {
-                    try_spawn(task, &source, &app_tx, &mut state);
+                    try_spawn(task, &source, &app_tx, &mut state, cache_reader.as_ref());
                 }
                 if art.is_enabled()
                     && let Some(url) = art_tick(&mut art, &state)
@@ -1527,6 +1539,34 @@ pub fn preload_from_cache(cache: &ytm_core::cache::Cache, state: &mut AppState) 
         Ok(v) if !v.is_empty() => state.tracks = v,
         Ok(_) => {}
         Err(e) => tracing::warn!(error = %e, "could not read cached songs"),
+    }
+}
+
+/// Show a playlist's cached tracks while the fetch is in flight.
+///
+/// A miss leaves the pane alone rather than clearing it: blanking the screen on
+/// the way to a fetch is worse than briefly showing the playlist list.
+///
+/// A hit does what `AppEvent::PlaylistTracksLoaded` does, minus clearing
+/// `loading` — the spinner is the honest signal that the fetch is still out.
+/// Filling `tracks` alone would change nothing on screen: the Playlists pane
+/// draws the playlist list until `open_playlist` is set.
+pub fn preload_playlist_tracks(
+    cache: &ytm_core::cache::Cache,
+    state: &mut AppState,
+    id: &ytm_core::PlaylistId,
+) {
+    match cache.load_playlist_tracks(id) {
+        Ok(v) if !v.is_empty() => {
+            state.open_playlist = Some(id.clone());
+            state.tracks = v;
+            // The cursor was on a playlist row and would otherwise index a
+            // shorter track list, or scroll to a window with no cursor in it.
+            state.selected = 0;
+            state.scroll_offset = 0;
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "could not read cached playlist tracks"),
     }
 }
 
@@ -3143,6 +3183,81 @@ mod tests {
             },
         );
         assert!(cache.load_library_songs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn opening_a_cached_playlist_shows_its_tracks_before_the_fetch_returns() {
+        // save_playlist_tracks has always written these rows; nothing read them
+        // back, so a cold start showed an empty list until the network answered.
+        let cache = ytm_core::cache::Cache::open_in_memory().unwrap();
+        let id = ytm_core::PlaylistId::from("p1");
+        cache
+            .save_playlist_tracks(&id, &[ytm_core::Track::stub("v1", "cached title")])
+            .unwrap();
+
+        let mut state = AppState {
+            pane: Pane::Playlists,
+            playlists: vec![ytm_core::Playlist::stub("p1", "One")],
+            // The cursor is on the playlist row, which may be past the end of
+            // the shorter track list it is about to show.
+            selected: 0,
+            ..Default::default()
+        };
+        preload_playlist_tracks(&cache, &mut state, &id);
+        assert_eq!(state.tracks.len(), 1, "cached rows must be shown at once");
+        assert_eq!(state.tracks[0].title, "cached title");
+        // Filling `tracks` is not enough: the Playlists pane draws the playlist
+        // list until `open_playlist` is set, so the rows would be invisible.
+        assert_eq!(
+            state.selected_track().map(|t| t.title),
+            Some("cached title".to_owned()),
+            "the pane must actually be showing the cached rows"
+        );
+    }
+
+    #[test]
+    fn an_uncached_playlist_leaves_the_list_untouched() {
+        // Must not blank out whatever is on screen just because this id is new.
+        let cache = ytm_core::cache::Cache::open_in_memory().unwrap();
+        let mut state = AppState {
+            tracks: vec![ytm_core::Track::stub("old", "still here")],
+            ..Default::default()
+        };
+        preload_playlist_tracks(
+            &cache,
+            &mut state,
+            &ytm_core::PlaylistId::from("never-seen"),
+        );
+        assert_eq!(
+            state.tracks.len(),
+            1,
+            "a cache miss must leave the list alone, not clear it"
+        );
+        assert_eq!(state.tracks[0].title, "still here");
+        assert!(
+            state.open_playlist.is_none(),
+            "a miss must not descend into a playlist with nothing to show"
+        );
+    }
+
+    #[test]
+    fn the_spawn_path_itself_shows_the_cached_rows() {
+        // The reducer-level test above proves the function; this proves the loop
+        // reaches it. Every previous bug of this shape was a correct function
+        // nothing called.
+        let cache = ytm_core::cache::Cache::open_in_memory().unwrap();
+        let id = ytm_core::PlaylistId::from("p1");
+        cache
+            .save_playlist_tracks(&id, &[ytm_core::Track::stub("v1", "cached title")])
+            .unwrap();
+        let mut state = AppState::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        // No source yet: the toast path, which is also when a cold pane is most
+        // likely to be looked at.
+        try_spawn(Task::OpenPlaylist(id), &None, &tx, &mut state, Some(&cache));
+        assert_eq!(state.tracks.len(), 1, "try_spawn must run the preload");
+        assert_eq!(state.tracks[0].title, "cached title");
     }
 
     #[test]
