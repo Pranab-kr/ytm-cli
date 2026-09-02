@@ -8,7 +8,7 @@
 
 use ratatui::{Frame, layout::Rect};
 use ratatui_image::{StatefulImage, picker::Picker, protocol::StatefulProtocol};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// True when running inside tmux, where probing stdio breaks key input.
 fn in_tmux() -> bool {
@@ -27,10 +27,35 @@ pub struct ArtCache {
     /// `None` when the terminal cannot display images. Also the picker that
     /// builds protocol objects, so "enabled" and "can decode" cannot disagree.
     picker: Option<Picker>,
-    /// Decoded protocol objects, keyed by URL.
+    /// Decoded protocol objects, keyed by URL. Bounded — see `MAX_IMAGES`.
     images: HashMap<String, StatefulProtocol>,
+    /// Insertion order, so the cap can evict. Only the now-playing URL is ever
+    /// drawn and it is always the newest, so recency and insertion order agree.
+    order: VecDeque<String>,
     in_flight: HashSet<String>,
     failed: HashSet<String>,
+}
+
+impl ArtCache {
+    /// Each entry retains a full decoded image at `ART_PX` (600x600x3 ≈ 1 MiB),
+    /// so an unbounded map cost ~1 MiB per track played. 16 is ~16 MiB and far
+    /// more history than the one visible panel can use.
+    pub const MAX_IMAGES: usize = 16;
+
+    pub fn len(&self) -> usize {
+        self.images.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.images.is_empty()
+    }
+
+    /// Enabled without probing the terminal. Halfblocks need no protocol
+    /// support, which is what makes an enabled cache testable headless.
+    #[cfg(test)]
+    pub fn for_test() -> Self {
+        Self::with_picker(Some(Picker::halfblocks()))
+    }
 }
 
 impl ArtCache {
@@ -79,6 +104,7 @@ impl ArtCache {
         Self {
             picker,
             images: HashMap::new(),
+            order: VecDeque::new(),
             in_flight: HashSet::new(),
             failed: HashSet::new(),
         }
@@ -111,14 +137,24 @@ impl ArtCache {
 
     /// Build the protocol object for a decoded image. A disabled cache drops it:
     /// there is nothing that could render it, and keeping it would leak memory
-    /// for every track played.
+    /// for every track played. An enabled one evicts the oldest past the cap,
+    /// for the same reason.
     pub fn insert(&mut self, url: &str, image: image::DynamicImage) {
         self.in_flight.remove(url);
         let Some(picker) = self.picker.as_ref() else {
             return;
         };
-        self.images
-            .insert(url.to_owned(), picker.new_resize_protocol(image));
+        let proto = picker.new_resize_protocol(image);
+        if self.images.insert(url.to_owned(), proto).is_none() {
+            // Only track order for a genuinely new key, or a re-request would
+            // queue the same URL twice and evict a live image early.
+            self.order.push_back(url.to_owned());
+        }
+        while self.order.len() > Self::MAX_IMAGES {
+            if let Some(oldest) = self.order.pop_front() {
+                self.images.remove(&oldest);
+            }
+        }
     }
 }
 
@@ -140,6 +176,62 @@ pub fn draw(f: &mut Frame, area: Rect, url: Option<&str>, art: &mut ArtCache) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tiny real image; `insert` needs a DynamicImage and the halfblocks
+    /// picker needs no terminal support, so this works headless.
+    fn tiny(n: u8) -> image::DynamicImage {
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(2, 2, image::Rgb([n, n, n])))
+    }
+
+    #[test]
+    fn the_cache_is_bounded_so_a_long_session_cannot_exhaust_memory() {
+        // Each entry retains a full decoded 600x600 image (~1 MiB). Unbounded,
+        // an evening of 100 tracks held ~100 MiB and 500 held ~500 MiB.
+        let mut c = ArtCache::for_test();
+        for i in 0..(ArtCache::MAX_IMAGES + 20) {
+            c.insert(&format!("u{i}"), tiny(i as u8));
+        }
+        assert_eq!(
+            c.len(),
+            ArtCache::MAX_IMAGES,
+            "the cache must stop growing at the cap"
+        );
+    }
+
+    #[test]
+    fn eviction_drops_the_oldest_and_keeps_the_newest() {
+        // The now-playing URL is always the most recent insert, so the entry
+        // that is actually drawn must never be the one evicted.
+        let mut c = ArtCache::for_test();
+        for i in 0..(ArtCache::MAX_IMAGES + 1) {
+            c.insert(&format!("u{i}"), tiny(i as u8));
+        }
+        assert!(c.get("u0").is_none(), "the oldest must have been evicted");
+        assert!(
+            c.get(&format!("u{}", ArtCache::MAX_IMAGES)).is_some(),
+            "the newest must still be there"
+        );
+    }
+
+    #[test]
+    fn reinserting_a_url_does_not_grow_the_order_queue() {
+        // art_tick can re-request a URL after a failure, and a duplicate entry
+        // in the order queue would evict a live image early.
+        let mut c = ArtCache::for_test();
+        for _ in 0..(ArtCache::MAX_IMAGES + 5) {
+            c.insert("same", tiny(1));
+        }
+        assert_eq!(c.len(), 1, "one URL is one entry however often it arrives");
+    }
+
+    #[test]
+    fn a_disabled_cache_still_stores_nothing() {
+        // The existing guarantee: with no picker there is nothing that could
+        // render an image, so keeping it would leak for every track played.
+        let mut c = ArtCache::disabled();
+        c.insert("u1", tiny(1));
+        assert_eq!(c.len(), 0);
+    }
 
     #[test]
     fn art_is_skipped_when_the_terminal_cannot_display_images() {
