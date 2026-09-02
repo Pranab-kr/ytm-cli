@@ -77,8 +77,7 @@ pub fn draw(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
     // two bugs at once — `/` filtered nothing visibly, and an open artist drew
     // the library songs while `list_len` counted the artist's, so scrolling
     // stopped dead at the shorter list's length.
-    let rows: Vec<ytm_core::Track> = s.visible_tracks();
-    let rows: &[ytm_core::Track] = &rows;
+    let rows: Vec<&ytm_core::Track> = s.visible_tracks();
 
     if rows.is_empty() {
         f.render_widget(

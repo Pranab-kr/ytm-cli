@@ -817,16 +817,16 @@ impl AppState {
             || t.album.as_deref().is_some_and(|a| self.matches_filter(a))
     }
 
-    /// Visible tracks, owned because a filtered view is not a source slice.
-    pub fn visible_tracks(&self) -> Vec<Track> {
+    /// Visible tracks, borrowed: the render path calls this every frame and uses
+    /// only the ~20 rows in the viewport.
+    pub fn visible_tracks(&self) -> Vec<&Track> {
         let source = self.unfiltered_tracks();
         if self.filter.is_empty() {
-            return source.to_vec();
+            return source.iter().collect();
         }
         source
             .iter()
             .filter(|t| self.track_matches_filter(t))
-            .cloned()
             .collect()
     }
 
@@ -871,34 +871,35 @@ impl AppState {
         self.matches_filter(&a.title) || a.artists.iter().any(|x| self.matches_filter(x))
     }
 
-    pub fn visible_playlists(&self) -> Vec<Playlist> {
+    pub fn visible_playlists(&self) -> Vec<&Playlist> {
         self.playlists
             .iter()
             .filter(|p| self.matches_filter(&p.title))
-            .cloned()
             .collect()
     }
 
-    pub fn visible_albums(&self) -> Vec<Album> {
+    pub fn visible_albums(&self) -> Vec<&Album> {
         self.albums
             .iter()
             .filter(|a| self.album_matches(a))
-            .cloned()
             .collect()
     }
 
-    pub fn visible_artists(&self) -> Vec<Artist> {
+    pub fn visible_artists(&self) -> Vec<&Artist> {
         self.artists
             .iter()
             .filter(|a| self.matches_filter(&a.name))
-            .cloned()
             .collect()
     }
 
     /// The artist under the cursor, when the Artists pane is showing the list.
     pub fn selected_artist(&self) -> Option<Artist> {
         (self.pane == Pane::Artists && self.open_artist.is_none())
-            .then(|| self.visible_artists().get(self.selected).cloned())
+            .then(|| {
+                self.visible_artists()
+                    .get(self.selected)
+                    .map(|a| (*a).clone())
+            })
             .flatten()
     }
 
@@ -1223,11 +1224,39 @@ impl AppState {
     }
 
     /// Visible video ids in display order, matching `selected_track`'s panes.
+    ///
+    /// Deliberately not via `track_rows`: that clones each `Track`, and visual
+    /// mode calls this on every cursor move.
     fn row_ids(&self) -> Vec<VideoId> {
-        self.track_rows()
-            .iter()
-            .map(|t| t.video_id.clone())
-            .collect()
+        match self.pane {
+            Pane::Home => self
+                .home_rows
+                .iter()
+                .filter_map(|r| match r {
+                    HomeRow::Item(i) => match &i.target {
+                        HomeTarget::Track(v) => Some(v.clone()),
+                        _ => None,
+                    },
+                    HomeRow::Heading(_) => None,
+                })
+                .collect(),
+            Pane::Search | Pane::Queue | Pane::Songs => self
+                .visible_tracks()
+                .iter()
+                .map(|t| t.video_id.clone())
+                .collect(),
+            Pane::Playlists if self.open_playlist.is_some() => self
+                .visible_tracks()
+                .iter()
+                .map(|t| t.video_id.clone())
+                .collect(),
+            Pane::Artists if self.open_artist.is_some() => self
+                .visible_tracks()
+                .iter()
+                .map(|t| t.video_id.clone())
+                .collect(),
+            Pane::Playlists | Pane::Albums | Pane::Artists => Vec::new(),
+        }
     }
 
     /// Visible track rows, shared by selection and bulk actions.
@@ -1259,9 +1288,15 @@ impl AppState {
                     HomeRow::Heading(_) => None,
                 })
                 .collect(),
-            Pane::Search | Pane::Queue | Pane::Songs => self.visible_tracks(),
-            Pane::Playlists if self.open_playlist.is_some() => self.visible_tracks(),
-            Pane::Artists if self.open_artist.is_some() => self.visible_tracks(),
+            Pane::Search | Pane::Queue | Pane::Songs => {
+                self.visible_tracks().into_iter().cloned().collect()
+            }
+            Pane::Playlists if self.open_playlist.is_some() => {
+                self.visible_tracks().into_iter().cloned().collect()
+            }
+            Pane::Artists if self.open_artist.is_some() => {
+                self.visible_tracks().into_iter().cloned().collect()
+            }
             Pane::Playlists | Pane::Albums | Pane::Artists => Vec::new(),
         }
     }
@@ -1334,20 +1369,29 @@ impl AppState {
                 HomeTarget::Track(_) => self.home_track_at(self.selected),
                 _ => None,
             },
-            Pane::Search | Pane::Queue | Pane::Songs => {
-                self.visible_tracks().get(self.selected).cloned()
-            }
+            Pane::Search | Pane::Queue | Pane::Songs => self
+                .visible_tracks()
+                .get(self.selected)
+                .map(|t| (*t).clone()),
             // Only an open playlist shows tracks; the list of playlists does not.
             Pane::Playlists => self
                 .open_playlist
                 .is_some()
-                .then(|| self.visible_tracks().get(self.selected).cloned())
+                .then(|| {
+                    self.visible_tracks()
+                        .get(self.selected)
+                        .map(|t| (*t).clone())
+                })
                 .flatten(),
             // Likewise an open artist.
             Pane::Artists => self
                 .open_artist
                 .is_some()
-                .then(|| self.visible_tracks().get(self.selected).cloned())
+                .then(|| {
+                    self.visible_tracks()
+                        .get(self.selected)
+                        .map(|t| (*t).clone())
+                })
                 .flatten(),
             Pane::Albums => None,
         }
@@ -1379,7 +1423,11 @@ impl AppState {
 
     pub fn selected_playlist(&self) -> Option<Playlist> {
         (self.pane == Pane::Playlists && self.open_playlist.is_none())
-            .then(|| self.visible_playlists().get(self.selected).cloned())
+            .then(|| {
+                self.visible_playlists()
+                    .get(self.selected)
+                    .map(|p| (*p).clone())
+            })
             .flatten()
     }
 }
@@ -3002,6 +3050,52 @@ mod tests {
         s.set_pane(Pane::Search);
         assert!(s.search_query.is_empty(), "the query must not follow");
         assert!(!s.artist_search_active);
+    }
+
+    #[test]
+    fn visible_tracks_borrows_rather_than_cloning_the_list() {
+        // The render path calls this every frame and then uses ~20 rows. Cloning
+        // the whole list cost ~7 allocations per track per frame.
+        let s = songs(5);
+
+        let rows = s.visible_tracks();
+        assert_eq!(rows.len(), 5);
+        // The borrow must point into `s.tracks`, not at a copy.
+        assert!(
+            std::ptr::eq(rows[0], &s.tracks[0]),
+            "visible_tracks must borrow from the source list"
+        );
+    }
+
+    #[test]
+    fn a_filtered_view_still_borrows_and_still_filters() {
+        let mut s = AppState {
+            pane: Pane::Songs,
+            tracks: ["alpha", "beta", "gamma"]
+                .iter()
+                .enumerate()
+                .map(|(i, name)| Track {
+                    artists: Vec::new(),
+                    ..Track::stub(&format!("v{i}"), name)
+                })
+                .collect(),
+            filter: "A".to_owned(),
+            ..Default::default()
+        };
+
+        let rows = s.visible_tracks();
+        // Case-insensitive substring: alpha, beta, and gamma all contain "a".
+        assert_eq!(rows.len(), 3);
+        assert!(std::ptr::eq(rows[0], &s.tracks[0]));
+
+        s.filter = "gam".to_owned();
+        let rows = s.visible_tracks();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "gamma");
+        assert!(
+            std::ptr::eq(rows[0], &s.tracks[2]),
+            "a filtered row must still be a borrow into the source"
+        );
     }
 
     #[test]
