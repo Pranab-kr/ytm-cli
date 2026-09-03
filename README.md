@@ -18,7 +18,7 @@ See [Without signing in](#without-signing-in).
 - **Playlists** — yours, with track counts. `Enter` or `l` opens one.
 - **Fav** — your liked and saved songs.
 - **Albums** — the ones you saved, or recommendations when you saved none (most
-  accounts).
+  accounts). `Enter` or `l` opens one.
 - **Artists** — the artists you follow, and `S` searches YouTube Music for any
   other. `Enter` on an artist plays their top tracks.
 - **Search** — songs, albums, artists and playlists, debounced so typing sends

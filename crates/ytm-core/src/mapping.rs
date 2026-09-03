@@ -4,7 +4,7 @@
 use crate::model::*;
 use ytmapi_rs::common::{Explicit, Thumbnail, YoutubeID};
 use ytmapi_rs::parse::{
-    GetPlaylistDetails, LibraryArtist, LibraryPlaylist, PlaylistItem, SearchResultAlbum,
+    GetAlbum, GetPlaylistDetails, LibraryArtist, LibraryPlaylist, PlaylistItem, SearchResultAlbum,
     SearchResultArtist, SearchResultCommunityPlaylist, SearchResultFeaturedPlaylist, TableListSong,
 };
 
@@ -153,6 +153,29 @@ pub fn track_from_artist_song(s: &ytmapi_rs::parse::ArtistSong) -> Track {
         thumbnail_url: None,
         is_explicit: is_explicit(&s.explicit),
     })
+}
+
+/// An album page's track list. `AlbumSong` carries no per-track artists or art —
+/// those live on the album header — so every row inherits them. `set_video_id`
+/// stays `None`: albums are not editable, so nothing downstream may offer remove.
+pub fn tracks_from_album(a: &GetAlbum) -> Vec<Track> {
+    let artists: Vec<String> = a.artists.iter().map(|x| x.name.clone()).collect();
+    let thumbnail_url = best_thumbnail(&a.thumbnails);
+    a.tracks
+        .iter()
+        .map(|s| {
+            track_from_parts(TrackParts {
+                video_id: s.video_id.get_raw().to_owned(),
+                set_video_id: None,
+                title: s.title.clone(),
+                artists: artists.clone(),
+                album: Some(a.title.clone()),
+                duration_secs: parse_duration(&s.duration),
+                thumbnail_url: thumbnail_url.clone(),
+                is_explicit: is_explicit(&s.explicit),
+            })
+        })
+        .collect()
 }
 
 pub fn playlist_from_library(p: &LibraryPlaylist) -> Playlist {
@@ -453,5 +476,64 @@ mod tests {
         assert_eq!(parse_duration(""), 0);
         assert_eq!(parse_duration("unknown"), 0);
         assert_eq!(parse_duration("12"), 12);
+    }
+
+    #[test]
+    fn album_songs_map_with_album_title_artists_art_and_duration() {
+        // `GetAlbum` is `#[non_exhaustive]`, so it cannot be built with a struct
+        // literal — but it deserializes, which is also closer to the real path.
+        let album: GetAlbum = serde_json::from_value(serde_json::json!({
+            "title": "Blue Eyes",
+            "category": "Album",
+            "thumbnails": [{"url": "https://x/a.jpg", "width": 120, "height": 120}],
+            "artist_thumbnails": [],
+            "artists": [{"name": "Yo Yo Honey Singh", "id": null}],
+            "year": "2023",
+            "duration": "30:00",
+            "tracks": [
+                {
+                    "video_id": "vid1",
+                    "track_no": 1,
+                    "duration": "3:34",
+                    "plays": "284M",
+                    "title": "Blue Eyes",
+                    "like_status": "INDIFFERENT",
+                    "explicit": "NotExplicit"
+                },
+                {
+                    "video_id": "vid2",
+                    "track_no": 2,
+                    "duration": "not a time",
+                    "plays": "1M",
+                    "title": "B Side",
+                    "like_status": "INDIFFERENT",
+                    "explicit": "IsExplicit"
+                }
+            ],
+            "library_status": "LIBRARY_ADD"
+        }))
+        .expect("the album json must deserialize");
+        let tracks = tracks_from_album(&album);
+        assert_eq!(tracks.len(), 2, "both songs must survive mapping");
+        assert_eq!(tracks[0].video_id, VideoId::from("vid1"));
+        assert_eq!(tracks[0].title, "Blue Eyes");
+        assert_eq!(tracks[0].duration.to_string(), "3:34");
+        assert_eq!(tracks[0].album.as_deref(), Some("Blue Eyes"));
+        assert_eq!(tracks[0].artists, vec!["Yo Yo Honey Singh".to_owned()]);
+        assert_eq!(
+            tracks[0].thumbnail_url.as_deref(),
+            Some("https://x/a.jpg"),
+            "album songs carry no art of their own; the header's is what renders"
+        );
+        assert!(
+            !tracks[0].is_removable(),
+            "albums have no setVideoId to remove by"
+        );
+        assert_eq!(
+            tracks[1].duration.as_secs(),
+            0,
+            "a bad duration is 0, not a panic"
+        );
+        assert!(tracks[1].is_explicit, "the explicit flag must survive");
     }
 }

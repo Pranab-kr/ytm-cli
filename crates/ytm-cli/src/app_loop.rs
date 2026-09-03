@@ -187,6 +187,11 @@ pub enum Task {
         id: ytm_core::ArtistId,
         name: String,
     },
+    /// An album's songs. Carries the title for the heading, like `OpenArtist`.
+    OpenAlbum {
+        id: ytm_core::AlbumId,
+        name: String,
+    },
     Search(String),
     /// Artists matching a query (FR-B7). The Artists pane's own search, kept
     /// separate from `Search` so its results replace the artist list rather than
@@ -574,6 +579,29 @@ pub fn open_remove_confirm(state: &mut AppState) {
     });
 }
 
+/// What a Home card opens. Tracks play in place; a playlist, artist, or album
+/// descends into its own pane first — loading rows while Home still draws the
+/// feed lands them invisibly, which is what made these rows look dead.
+fn open_home_item(state: &mut AppState, item: &ytm_core::HomeItem) -> Option<Task> {
+    match item.target.clone() {
+        ytm_core::HomeTarget::Playlist(id) => {
+            state.goto_source(2);
+            start(state, Task::OpenPlaylist(id))
+        }
+        ytm_core::HomeTarget::Artist(id) => {
+            let name = item.title.clone();
+            state.goto_source(5);
+            start(state, Task::OpenArtist { id, name })
+        }
+        ytm_core::HomeTarget::Album(id) => {
+            let name = item.title.clone();
+            state.goto_source(4);
+            start(state, Task::OpenAlbum { id, name })
+        }
+        ytm_core::HomeTarget::Track(_) => None,
+    }
+}
+
 /// Translate one input action into player commands, state changes, and
 /// background work. Pure with respect to I/O — that is what makes it testable.
 pub fn dispatch_input(
@@ -733,25 +761,25 @@ pub fn dispatch_input(
                     },
                 );
             }
+            // An album row opens its songs, the same as a playlist row. Before
+            // this the Albums pane was a dead end in the same way.
+            if let Some(a) = state.selected_album() {
+                return start(
+                    state,
+                    Task::OpenAlbum {
+                        id: a.id.clone(),
+                        name: a.title.clone(),
+                    },
+                );
+            }
             // A home card does whatever its kind implies: a track plays, and a
-            // playlist or artist opens. One carousel holds all of them, so the
-            // row decides, not the pane.
+            // playlist, artist, or album opens in its own pane. One carousel
+            // holds all of them, so the row decides, not the pane.
             if state.pane == Pane::Home
-                && let Some(item) = state.selected_home_item()
+                && let Some(item) = state.selected_home_item().cloned()
+                && let Some(task) = open_home_item(state, &item)
             {
-                match item.target.clone() {
-                    ytm_core::HomeTarget::Playlist(id) => {
-                        return start(state, Task::OpenPlaylist(id));
-                    }
-                    ytm_core::HomeTarget::Artist(id) => {
-                        let name = item.title.clone();
-                        return start(state, Task::OpenArtist { id, name });
-                    }
-                    // An album has no pane of its own (out of scope), so it is
-                    // left alone rather than opening something unrelated.
-                    ytm_core::HomeTarget::Album(_) => return None,
-                    ytm_core::HomeTarget::Track(_) => {}
-                }
+                return Some(task);
             }
             if let Some(t) = state.selected_track() {
                 send(player, PlayerCommand::PlayNow(t));
@@ -896,6 +924,23 @@ pub fn dispatch_input(
                         name: a.name.clone(),
                     },
                 );
+            }
+            // An album row descends into its songs, like the other two lists.
+            if let Some(a) = state.selected_album() {
+                return start(
+                    state,
+                    Task::OpenAlbum {
+                        id: a.id.clone(),
+                        name: a.title.clone(),
+                    },
+                );
+            }
+            // A home card opens the same thing `Enter` would: the row decides.
+            if state.pane == Pane::Home
+                && let Some(item) = state.selected_home_item().cloned()
+                && let Some(task) = open_home_item(state, &item)
+            {
+                return Some(task);
             }
             state.apply(AppEvent::Input(A::Right));
         }
@@ -1350,6 +1395,10 @@ fn spawn_task(task: Task, source: Arc<dyn MusicSource>, tx: mpsc::UnboundedSende
                 Ok(tracks) => AppEvent::ArtistTracksLoaded { id, name, tracks },
                 Err(e) => AppEvent::Error(e.to_string()),
             },
+            Task::OpenAlbum { id, name } => match source.album_tracks(id.clone()).await {
+                Ok(tracks) => AppEvent::AlbumTracksLoaded { id, name, tracks },
+                Err(e) => AppEvent::Error(e.to_string()),
+            },
             Task::LoadPlaylists => match source.library_playlists().await {
                 Ok(v) => AppEvent::PlaylistsLoaded(v),
                 Err(e) => AppEvent::Error(e.to_string()),
@@ -1410,6 +1459,7 @@ fn event_name(ev: &AppEvent) -> &'static str {
         // entry is the one you most want to identify in a log.
         AppEvent::HomeLoaded(_) => "home",
         AppEvent::ArtistTracksLoaded { .. } => "artist_tracks",
+        AppEvent::AlbumTracksLoaded { .. } => "album_tracks",
         AppEvent::ArtistSearchResults { .. } => "artist_search",
         _ => "other",
     }
@@ -1427,6 +1477,7 @@ fn event_rows(ev: &AppEvent) -> usize {
         // multi-page walk actually reached page 2.
         AppEvent::HomeLoaded(v) => v.len(),
         AppEvent::ArtistTracksLoaded { tracks, .. } => tracks.len(),
+        AppEvent::AlbumTracksLoaded { tracks, .. } => tracks.len(),
         AppEvent::ArtistSearchResults { artists, .. } => artists.len(),
         _ => 0,
     }
@@ -3318,6 +3369,162 @@ mod tests {
             playlists: vec![ytm_core::Playlist::stub("p1", "Focus")],
             open_playlist: Some("p1".into()),
             tracks: vec![ytm_core::Track::stub("v1", "T")],
+            focus: Focus::Main,
+            ..Default::default()
+        };
+        assert!(dispatch_input(InputAction::Right, &mut s, &*player, &beh()).is_none());
+    }
+
+    fn home_state(row: ytm_tui::app::HomeRow) -> AppState {
+        AppState {
+            pane: Pane::Home,
+            home_rows: vec![row],
+            focus: Focus::Main,
+            ..Default::default()
+        }
+    }
+
+    fn home_item(title: &str, target: ytm_core::HomeTarget) -> ytm_tui::app::HomeRow {
+        ytm_tui::app::HomeRow::Item(ytm_core::HomeItem {
+            title: title.into(),
+            subtitle: String::new(),
+            target,
+            thumbnail_url: None,
+        })
+    }
+
+    #[test]
+    fn enter_on_a_home_playlist_opens_it_in_the_playlists_pane() {
+        // The fetch used to land while the pane still showed the feed, so the
+        // rows arrived invisibly and Enter looked dead.
+        let (_src, player) = deps();
+        let mut s = home_state(home_item(
+            "Recap",
+            ytm_core::HomeTarget::Playlist("PL1".into()),
+        ));
+        let task = dispatch_input(InputAction::Confirm, &mut s, &*player, &beh());
+        assert_eq!(task, Some(Task::OpenPlaylist("PL1".into())));
+        assert_eq!(
+            s.pane,
+            Pane::Playlists,
+            "the playlist's tracks render in the Playlists pane, not Home"
+        );
+    }
+
+    #[test]
+    fn enter_on_a_home_artist_opens_them_in_the_artists_pane() {
+        // Same invisible-landing bug as playlists: the tracks arrived but Home
+        // kept drawing the feed over them.
+        let (_src, player) = deps();
+        let mut s = home_state(home_item(
+            "Someone",
+            ytm_core::HomeTarget::Artist("UC1".into()),
+        ));
+        let task = dispatch_input(InputAction::Confirm, &mut s, &*player, &beh());
+        assert_eq!(
+            task,
+            Some(Task::OpenArtist {
+                id: "UC1".into(),
+                name: "Someone".into(),
+            })
+        );
+        assert_eq!(s.pane, Pane::Artists);
+    }
+
+    #[test]
+    fn enter_on_a_home_album_opens_it_in_the_albums_pane() {
+        // Album rows used to return None outright: "Albums for you" was a list
+        // nothing could open.
+        let (_src, player) = deps();
+        let mut s = home_state(home_item(
+            "Blue Eyes",
+            ytm_core::HomeTarget::Album("MPREb_1".into()),
+        ));
+        let task = dispatch_input(InputAction::Confirm, &mut s, &*player, &beh());
+        assert_eq!(
+            task,
+            Some(Task::OpenAlbum {
+                id: "MPREb_1".into(),
+                name: "Blue Eyes".into(),
+            })
+        );
+        assert_eq!(s.pane, Pane::Albums);
+    }
+
+    #[test]
+    fn enter_on_a_home_track_still_plays_it() {
+        // The pane switch above must not steal plain tracks: they play in place.
+        let (_src, player) = deps();
+        let mut s = home_state(home_item("Blow", ytm_core::HomeTarget::Track("v1".into())));
+        let task = dispatch_input(InputAction::Confirm, &mut s, &*player, &beh());
+        assert!(task.is_none(), "a track plays via the player, not a task");
+        assert_eq!(s.pane, Pane::Home);
+        assert_eq!(
+            player.commands().len(),
+            1,
+            "one PlayNow must reach the player"
+        );
+    }
+
+    #[test]
+    fn enter_on_an_album_row_opens_its_songs() {
+        // The Albums pane was a dead end: names on screen, Enter doing nothing.
+        let (_src, player) = deps();
+        let mut s = AppState {
+            pane: Pane::Albums,
+            albums: vec![ytm_core::Album {
+                id: "MPREb_1".into(),
+                title: "Blue Eyes".into(),
+                artists: vec!["Honey".into()],
+                year: None,
+                thumbnail_url: None,
+            }],
+            focus: Focus::Main,
+            ..Default::default()
+        };
+        assert_eq!(
+            dispatch_input(InputAction::Confirm, &mut s, &*player, &beh()),
+            Some(Task::OpenAlbum {
+                id: "MPREb_1".into(),
+                name: "Blue Eyes".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn right_on_an_album_row_opens_it_like_enter() {
+        // `l` is the forward half of the h/l pair everywhere else; albums must
+        // not be the one list where it does nothing.
+        let (_src, player) = deps();
+        let mut s = AppState {
+            pane: Pane::Albums,
+            albums: vec![ytm_core::Album {
+                id: "MPREb_1".into(),
+                title: "Blue Eyes".into(),
+                artists: vec!["Honey".into()],
+                year: None,
+                thumbnail_url: None,
+            }],
+            focus: Focus::Main,
+            ..Default::default()
+        };
+        assert_eq!(
+            dispatch_input(InputAction::Right, &mut s, &*player, &beh()),
+            Some(Task::OpenAlbum {
+                id: "MPREb_1".into(),
+                name: "Blue Eyes".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn right_inside_an_open_album_does_not_reopen_it() {
+        // The songs are already on screen, so `l` must not refetch.
+        let (_src, player) = deps();
+        let mut s = AppState {
+            pane: Pane::Albums,
+            open_album: Some(("MPREb_1".into(), "Blue Eyes".into())),
+            album_tracks: vec![ytm_core::Track::stub("v1", "T")],
             focus: Focus::Main,
             ..Default::default()
         };

@@ -61,6 +61,10 @@ pub trait MusicSource: Send + Sync {
     /// (FR-B7). Upstream's `GetArtistQuery` returns these as `top_releases`.
     fn artist_tracks(&self, id: ArtistId) -> BoxFut<'_, Vec<Track>>;
 
+    /// An album's songs, so album rows open onto tracks like playlists do.
+    /// Upstream's `GetAlbumQuery` returns these with header-level artists/art.
+    fn album_tracks(&self, id: AlbumId) -> BoxFut<'_, Vec<Track>>;
+
     fn playlist_tracks(&self, id: PlaylistId) -> BoxFut<'_, Vec<Track>>;
     fn playlist_details(&self, id: PlaylistId) -> BoxFut<'_, Playlist>;
 

@@ -350,6 +350,17 @@ macro_rules! impl_music_source {
                 })
             }
 
+            fn album_tracks(&self, id: AlbumId) -> BoxFut<'_, Vec<Track>> {
+                Box::pin(async move {
+                    let raw = self
+                        .api
+                        .get_album(ytmapi_rs::common::AlbumID::from_raw(id.as_str()))
+                        .await
+                        .map_err(classify)?;
+                    Ok(mapping::tracks_from_album(&raw))
+                })
+            }
+
             fn playlist_tracks(&self, id: PlaylistId) -> BoxFut<'_, Vec<Track>> {
                 Box::pin(async move {
                     // One request, parsed twice — no extra round trip: upstream's
@@ -610,6 +621,18 @@ impl MusicSource for YtMusicSource<NoAuthToken> {
                 .map(mapping::track_from_artist_song)
                 .collect();
             Ok(preview)
+        })
+    }
+
+    fn album_tracks(&self, id: AlbumId) -> BoxFut<'_, Vec<Track>> {
+        Box::pin(async move {
+            // Album pages are public browses, like playlists and artists.
+            let raw = self
+                .api
+                .get_album(ytmapi_rs::common::AlbumID::from_raw(id.as_str()))
+                .await
+                .map_err(classify)?;
+            Ok(mapping::tracks_from_album(&raw))
         })
     }
 

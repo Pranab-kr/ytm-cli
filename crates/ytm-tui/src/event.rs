@@ -1,6 +1,6 @@
 //! Everything that can change the app. The event loop's only vocabulary.
 
-use ytm_core::{Album, Artist, Playlist, PlaylistId, Track};
+use ytm_core::{Album, AlbumId, Artist, Playlist, PlaylistId, Track};
 use ytm_player::player::PlayerEvent;
 
 /// A key press already resolved through the keymap into an intent.
@@ -104,6 +104,12 @@ pub enum AppEvent {
     /// An artist's top tracks, with the name for the heading (FR-B7).
     ArtistTracksLoaded {
         id: ytm_core::ArtistId,
+        name: String,
+        tracks: Vec<Track>,
+    },
+    /// An album's songs, with the title for the heading.
+    AlbumTracksLoaded {
+        id: AlbumId,
         name: String,
         tracks: Vec<Track>,
     },

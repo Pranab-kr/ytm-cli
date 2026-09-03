@@ -157,6 +157,11 @@ pub struct AppState {
     /// of bug that made `selected_track` report rows that were not on screen.
     pub artist_tracks: Vec<Track>,
 
+    /// Open album id and heading, with its tracks kept apart for the same
+    /// reason as the artist's: an open album must not clobber anything else.
+    pub open_album: Option<(AlbumId, String)>,
+    pub album_tracks: Vec<Track>,
+
     /// Live substring filter over the rows on screen (`/`), independent of the
     /// Search pane's server-side query. Empty means no filter.
     pub filter: String,
@@ -243,6 +248,13 @@ impl AppState {
             AppEvent::ArtistTracksLoaded { id, name, tracks } => {
                 self.open_artist = Some((id, name));
                 self.artist_tracks = tracks;
+                self.selected = 0;
+                self.scroll_offset = 0;
+                self.loading = false;
+            }
+            AppEvent::AlbumTracksLoaded { id, name, tracks } => {
+                self.open_album = Some((id, name));
+                self.album_tracks = tracks;
                 self.selected = 0;
                 self.scroll_offset = 0;
                 self.loading = false;
@@ -551,6 +563,7 @@ impl AppState {
                 // tracks stayed on screen, so there was no way back to the list.
                 if self.close_open_playlist()
                     || self.close_open_artist()
+                    || self.close_open_album()
                     || self.close_artist_search()
                 {
                     // Stay in the list: the user is navigating it, not leaving it.
@@ -612,6 +625,7 @@ impl AppState {
             Pane::Playlists if self.open_playlist.is_some() => self.visible_track_count(),
             Pane::Playlists => self.visible_playlist_count(),
             Pane::Songs => self.visible_track_count(),
+            Pane::Albums if self.open_album.is_some() => self.visible_track_count(),
             Pane::Albums => self.visible_album_count(),
             // An open artist shows their tracks; otherwise the list of artists.
             Pane::Artists if self.open_artist.is_some() => self.visible_track_count(),
@@ -644,6 +658,7 @@ impl AppState {
             Pane::Playlists if self.open_playlist.is_some() => "This playlist is empty",
             Pane::Playlists => "No playlists — press N to create one",
             Pane::Songs => "No liked songs yet",
+            Pane::Albums if self.open_album.is_some() => "No songs in this album",
             Pane::Albums => "No saved albums",
             Pane::Artists if self.open_artist.is_some() => "No tracks for this artist",
             Pane::Artists if self.artist_search_active => "No artists found",
@@ -776,8 +791,9 @@ impl AppState {
         let track_shaped = match self.pane {
             Pane::Songs | Pane::Queue | Pane::Search => true,
             Pane::Playlists => self.open_playlist.is_some(),
+            Pane::Albums => self.open_album.is_some(),
             Pane::Artists => self.open_artist.is_some(),
-            Pane::Home | Pane::Albums => false,
+            Pane::Home => false,
         };
         // `list_len() > 0` walked and counted the whole filtered list; `any` stops
         // at the first surviving row. Called twice per frame.
@@ -790,6 +806,7 @@ impl AppState {
             Pane::Home => !self.home_rows.is_empty(),
             Pane::Search => !self.search_results.is_empty(),
             Pane::Playlists if self.open_playlist.is_some() => self.any_track_visible(),
+            Pane::Albums if self.open_album.is_some() => self.any_track_visible(),
             Pane::Artists if self.open_artist.is_some() => self.any_track_visible(),
             Pane::Songs | Pane::Queue => self.any_track_visible(),
             Pane::Playlists => self.playlists.iter().any(|p| self.matches_filter(&p.title)),
@@ -863,6 +880,7 @@ impl AppState {
     fn unfiltered_tracks(&self) -> &[Track] {
         match self.pane {
             Pane::Artists if self.open_artist.is_some() => &self.artist_tracks,
+            Pane::Albums if self.open_album.is_some() => &self.album_tracks,
             Pane::Search => &self.search_results,
             Pane::Queue => &self.queue,
             _ => &self.tracks,
@@ -956,6 +974,33 @@ impl AppState {
         true
     }
 
+    /// The album under the cursor, when the Albums pane is showing the list.
+    pub fn selected_album(&self) -> Option<Album> {
+        (self.pane == Pane::Albums && self.open_album.is_none())
+            .then(|| {
+                self.visible_albums()
+                    .get(self.selected)
+                    .map(|a| (*a).clone())
+            })
+            .flatten()
+    }
+
+    /// Leave an open album, clearing its rows and stale selection.
+    /// Returns false when there was no level to leave.
+    pub fn close_open_album(&mut self) -> bool {
+        if self.pane != Pane::Albums || self.open_album.is_none() {
+            return false;
+        }
+        self.open_album = None;
+        self.album_tracks.clear();
+        self.selected = 0;
+        self.scroll_offset = 0;
+        self.marked.clear();
+        self.visual_anchor = None;
+        self.marks_before_visual.clear();
+        true
+    }
+
     pub fn close_open_artist(&mut self) -> bool {
         if self.pane != Pane::Artists || self.open_artist.is_none() {
             return false;
@@ -1025,6 +1070,7 @@ impl AppState {
     pub fn focus_current(&mut self) {
         let track_pane = matches!(self.pane, Pane::Songs | Pane::Search | Pane::Queue)
             || self.pane == Pane::Playlists && self.open_playlist.is_some()
+            || self.pane == Pane::Albums && self.open_album.is_some()
             || self.pane == Pane::Artists && self.open_artist.is_some();
         if !track_pane {
             return;
@@ -1278,6 +1324,11 @@ impl AppState {
                 .iter()
                 .map(|t| t.video_id.clone())
                 .collect(),
+            Pane::Albums if self.open_album.is_some() => self
+                .visible_tracks()
+                .iter()
+                .map(|t| t.video_id.clone())
+                .collect(),
             Pane::Artists if self.open_artist.is_some() => self
                 .visible_tracks()
                 .iter()
@@ -1320,6 +1371,9 @@ impl AppState {
                 self.visible_tracks().into_iter().cloned().collect()
             }
             Pane::Playlists if self.open_playlist.is_some() => {
+                self.visible_tracks().into_iter().cloned().collect()
+            }
+            Pane::Albums if self.open_album.is_some() => {
                 self.visible_tracks().into_iter().cloned().collect()
             }
             Pane::Artists if self.open_artist.is_some() => {
@@ -1421,7 +1475,16 @@ impl AppState {
                         .map(|t| (*t).clone())
                 })
                 .flatten(),
-            Pane::Albums => None,
+            // Likewise an open album; the album list itself holds no tracks.
+            Pane::Albums => self
+                .open_album
+                .is_some()
+                .then(|| {
+                    self.visible_tracks()
+                        .get(self.selected)
+                        .map(|t| (*t).clone())
+                })
+                .flatten(),
         }
     }
 
@@ -1478,7 +1541,7 @@ fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ytm_core::{Playlist, Track};
+    use ytm_core::{Album, AlbumId, Playlist, Track};
 
     #[test]
     fn guest_cannot_open_an_account_pane() {
@@ -2997,6 +3060,48 @@ mod tests {
         s.apply_input(InputAction::ScrollUp);
         assert_eq!(s.scroll_offset, 0);
         assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn an_open_album_shows_its_tracks_and_h_leaves_again() {
+        let mut s = AppState {
+            pane: Pane::Albums,
+            focus: Focus::Main,
+            albums: vec![Album {
+                id: AlbumId::from("MPREb_1"),
+                title: "Blue Eyes".into(),
+                artists: vec!["Honey".into()],
+                year: None,
+                thumbnail_url: None,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(s.list_len(), 1, "the album list");
+        assert_eq!(
+            s.selected_album().map(|a| a.title.clone()),
+            Some("Blue Eyes".to_owned()),
+            "the cursor sits on an album row"
+        );
+        s.apply(AppEvent::AlbumTracksLoaded {
+            id: AlbumId::from("MPREb_1"),
+            name: "Blue Eyes".into(),
+            tracks: vec![Track::stub("v1", "A song")],
+        });
+        assert_eq!(s.list_len(), 1);
+        assert_eq!(
+            s.selected_track().map(|t| t.title),
+            Some("A song".to_owned()),
+            "an open album's rows are tracks"
+        );
+        s.apply_input(InputAction::Left);
+        assert!(
+            s.open_album.is_none(),
+            "`h` must leave the open album like any other nested list"
+        );
+        assert!(
+            s.selected_track().is_none(),
+            "closing must clear the tracks, not leave them behind"
+        );
     }
 
     #[test]

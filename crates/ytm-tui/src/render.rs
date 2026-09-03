@@ -260,6 +260,8 @@ fn draw_main(f: &mut Frame, area: Rect, s: &AppState, t: &Theme) {
         Pane::Songs => tracklist::draw(f, list_row, s, t),
         Pane::Queue => queue::draw(f, list_row, s, t),
         Pane::Search => draw_search(f, list_row, s, t),
+        // An open album shows its songs, like an open playlist does.
+        Pane::Albums if s.open_album.is_some() => tracklist::draw(f, list_row, s, t),
         Pane::Albums => playlists::draw_albums(f, list_row, s, t),
         // An open artist shows their tracks, like an open playlist does.
         Pane::Artists if s.open_artist.is_some() => tracklist::draw(f, list_row, s, t),
@@ -312,7 +314,11 @@ fn pane_title(s: &AppState) -> String {
         // Renamed at the owner's request: the pane is the liked/saved songs, and
         // "Songs" read as if it were every song.
         Pane::Songs => "Fav".to_owned(),
-        Pane::Albums => "Albums".to_owned(),
+        // An open album is headed by its title, like an open playlist.
+        Pane::Albums => match &s.open_album {
+            Some((_, name)) => name.clone(),
+            None => "Albums".to_owned(),
+        },
         // An open artist is headed by their name, like an open playlist.
         Pane::Artists => match &s.open_artist {
             Some((_, name)) => name.clone(),

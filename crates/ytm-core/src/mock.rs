@@ -11,6 +11,7 @@ struct Inner {
     artists: Vec<Artist>,
     shelves: Vec<HomeShelf>,
     artist_tracks: Vec<Track>,
+    album_tracks: Vec<Track>,
     calls: Vec<String>,
     fail_next: Option<SourceError>,
     next_id: u32,
@@ -38,6 +39,11 @@ impl MockSource {
 
     pub fn with_playlists(self, p: Vec<Playlist>) -> Self {
         self.inner.lock().unwrap().playlists = p;
+        self
+    }
+
+    pub fn with_album_tracks(self, t: Vec<Track>) -> Self {
+        self.inner.lock().unwrap().album_tracks = t;
         self
     }
 
@@ -94,6 +100,13 @@ impl MusicSource for MockSource {
         Box::pin(async move {
             self.record(format!("artist_tracks({id})"))?;
             Ok(self.inner.lock().unwrap().artist_tracks.clone())
+        })
+    }
+
+    fn album_tracks(&self, id: AlbumId) -> BoxFut<'_, Vec<Track>> {
+        Box::pin(async move {
+            self.record(format!("album_tracks({id})"))?;
+            Ok(self.inner.lock().unwrap().album_tracks.clone())
         })
     }
 
@@ -240,6 +253,15 @@ mod tests {
         let got = m.library_playlists().await.unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].title, "Focus");
+    }
+
+    #[tokio::test]
+    async fn returns_seeded_album_tracks() {
+        let m = MockSource::new().with_album_tracks(vec![Track::stub("v9", "Album Song")]);
+        let got = m.album_tracks(AlbumId::from("MPREb_1")).await.unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].title, "Album Song");
+        assert_eq!(m.calls(), vec!["album_tracks(MPREb_1)"]);
     }
 
     #[tokio::test]
