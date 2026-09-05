@@ -36,7 +36,11 @@ impl YtMusicSource<BrowserToken> {
 /// Upstream errors are opaque strings; classify them into our variants so the
 /// UI can show a sentence (NFR-9). Refine the substrings against real failures.
 fn classify(e: ytmapi_rs::Error) -> SourceError {
-    let s = e.to_string();
+    let kind = e.into_kind();
+    if matches!(kind, ytmapi_rs::error::ErrorKind::ApiStatusFailed) {
+        return SourceError::AlreadyInPlaylist;
+    }
+    let s = kind.to_string();
     let l = s.to_lowercase();
     if l.contains("401") || l.contains("unauthor") {
         SourceError::NotAuthenticated
@@ -46,6 +50,8 @@ fn classify(e: ytmapi_rs::Error) -> SourceError {
         SourceError::NotFound(s)
     } else if l.contains("parse") || l.contains("navigation") {
         SourceError::Parse(s)
+    } else if l.contains("status_failed") {
+        SourceError::AlreadyInPlaylist
     } else {
         SourceError::Network(s)
     }
@@ -829,6 +835,23 @@ mod tests {
         assert!(matches!(rate_limited, Some(SourceError::RateLimited)));
 
         assert!(classify_raw_api_error("{\"contents\":{}}").is_none());
+    }
+
+    #[test]
+    fn duplicate_add_playlist_status_failed_becomes_already_in_playlist() {
+        let json = r#"{"status": "STATUS_FAILED"}"#;
+        let query = ytmapi_rs::query::playlist::AddPlaylistItemsQuery::new_from_videos(
+            ytmapi_rs::common::PlaylistID::from_raw("PLtest"),
+            vec![ytmapi_rs::common::VideoID::from_raw("test_video")],
+            ytmapi_rs::query::playlist::DuplicateHandlingMode::default(),
+        );
+        let err = parse_json::<_, Vec<ytmapi_rs::parse::AddPlaylistItem>>(&query, json.to_string())
+            .unwrap_err();
+        assert!(
+            matches!(err, SourceError::AlreadyInPlaylist),
+            "expected AlreadyInPlaylist, got {err:?}"
+        );
+        assert_eq!(err.to_string(), "already in playlist");
     }
 
     #[test]

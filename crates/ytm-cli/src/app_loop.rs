@@ -3008,6 +3008,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn adding_duplicate_track_fails_with_already_in_playlist_message() {
+        let src = Arc::new(MockSource::new());
+        src.fail_next(ytm_core::SourceError::AlreadyInPlaylist);
+        let event = run_mutation(
+            1,
+            MutationTask::AddTracks {
+                id: "p1".into(),
+                videos: vec![ytm_core::VideoId::from("v1")],
+            },
+            src,
+        )
+        .await;
+        match event {
+            AppEvent::MutationFailed { token, message } => {
+                assert_eq!(token, 1);
+                assert_eq!(message, "already in playlist");
+            }
+            other => panic!("expected MutationFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn removing_tracks_sends_every_set_video_id() {
         let src = Arc::new(MockSource::new());
         let _ = run_mutation(

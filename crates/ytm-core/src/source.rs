@@ -27,6 +27,9 @@ pub enum SourceError {
     #[error("the playlist \"{0}\" cannot be edited")]
     NotEditable(String),
 
+    #[error("already in playlist")]
+    AlreadyInPlaylist,
+
     #[error("{0} was not found")]
     NotFound(String),
 
@@ -123,6 +126,9 @@ mod tests {
             e.to_string(),
             "the playlist \"Your Likes\" cannot be edited"
         );
+
+        let e = SourceError::AlreadyInPlaylist;
+        assert_eq!(e.to_string(), "already in playlist");
     }
 
     #[test]
