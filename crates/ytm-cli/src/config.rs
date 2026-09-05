@@ -97,6 +97,8 @@ pub struct UiConfig {
     pub accent: Option<String>,
     pub album_art: bool,
     pub theme_file: Option<PathBuf>,
+    /// Automatically reload `theme_file` if it changes on disk.
+    pub auto_reload_theme: bool,
     /// `"auto"`, or the name of a built-in theme.
     pub theme: ThemeChoice,
     /// Which source the app opens on. Defaults to Playlists — your own
@@ -147,6 +149,7 @@ impl Default for UiConfig {
             accent: None,
             album_art: true,
             theme_file: None,
+            auto_reload_theme: false,
             theme: ThemeChoice::Auto,
             start_pane: StartPane::default(),
             mouse: true,
@@ -524,5 +527,14 @@ theme = "gruvbox""#,
             ytm_tui::theme::Theme::preset(&name).is_some(),
             "auto picked {name:?}, which is not a built-in theme"
         );
+    }
+
+    #[test]
+    fn auto_reload_theme_config_defaults_to_false_and_parses() {
+        let c = Config::from_toml_str("").unwrap();
+        assert!(!c.ui.auto_reload_theme);
+
+        let c = Config::from_toml_str("[ui]\nauto_reload_theme = true").unwrap();
+        assert!(c.ui.auto_reload_theme);
     }
 }

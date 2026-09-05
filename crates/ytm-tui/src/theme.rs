@@ -207,6 +207,22 @@ impl Theme {
         }
     }
 
+    /// The next theme in the cycle, optionally including "custom" in the rotation.
+    pub fn next_preset_with_custom(current: &str, has_custom: bool) -> &'static str {
+        if !has_custom {
+            return Self::next_preset(current);
+        }
+        let names = Self::preset_names();
+        if current == "custom" {
+            return names[0];
+        }
+        match names.iter().position(|n| *n == current) {
+            Some(i) if i + 1 < names.len() => names[i + 1],
+            Some(_) => "custom",
+            None => "custom",
+        }
+    }
+
     /// Whether this theme is meant for a light terminal. Measured from `fg` luminance
     /// rather than stored: a light theme is one whose text is dark, and that stays
     /// true for a hand-written theme file.
@@ -386,5 +402,19 @@ accent = "#ff0000""##,
             .to_string();
         assert!(e.contains("preset"), "got: {e}");
         assert!(e.contains("nope"), "name the bad value, got: {e}");
+    }
+
+    #[test]
+    fn cycling_with_custom_includes_custom_in_the_loop() {
+        let mut cur = "custom";
+        cur = Theme::next_preset_with_custom(cur, true);
+        assert_eq!(cur, "tokyonight");
+        cur = Theme::next_preset_with_custom(cur, true);
+        assert_eq!(cur, "gruvbox");
+        cur = Theme::next_preset_with_custom("paper", true);
+        assert_eq!(cur, "custom");
+
+        // Without custom, paper wraps back to tokyonight.
+        assert_eq!(Theme::next_preset_with_custom("paper", false), "tokyonight");
     }
 }

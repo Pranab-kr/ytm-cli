@@ -23,6 +23,9 @@ pub struct ReloadedConfig {
     pub theme: Theme,
     pub theme_name: String,
     pub behaviour: crate::config::BehaviourConfig,
+    pub custom_theme: Option<Theme>,
+    pub theme_file: Option<std::path::PathBuf>,
+    pub auto_reload_theme: bool,
 }
 
 /// Suspend the TUI, open `$EDITOR` on the config, reload on exit (`,`). A parse
@@ -85,10 +88,11 @@ pub fn edit_config_in_editor(
         return Err(color_eyre::eyre::eyre!("{bin} exited with {status}"));
     }
     let after = std::fs::read_to_string(path)?;
-    if after == before {
+    let reloaded = reload_config(&after)?;
+    if after == before && reloaded.theme_file.is_none() {
         return Ok(None);
     }
-    reload_config(&after).map(Some)
+    Ok(Some(reloaded))
 }
 
 /// Rebuild the keymap and theme from config text. Separate from the editor so
@@ -98,12 +102,42 @@ pub fn reload_config(text: &str) -> color_eyre::Result<ReloadedConfig> {
     let keys_toml = toml::to_string(&cfg.keys)?;
     let keymap = KeyMap::from_toml_str_with(&keys_toml, cfg.ui.vim_keys)?;
     let (theme, theme_name) = crate::config::resolve_theme(&cfg)?;
+    let custom_theme = if theme_name == "custom" {
+        Some(theme)
+    } else {
+        None
+    };
+    let theme_file = cfg
+        .ui
+        .theme_file
+        .as_deref()
+        .map(crate::config::expand_tilde);
     Ok(ReloadedConfig {
         keymap,
         theme,
         theme_name,
         behaviour: cfg.behaviour,
+        custom_theme,
+        theme_file,
+        auto_reload_theme: cfg.ui.auto_reload_theme,
     })
+}
+
+/// Check if a theme file on disk has been modified and can be parsed as a valid theme.
+/// Returns `Some(new_theme)` if the file modified time changed and the file parsed cleanly.
+/// If unchanged or if parsing fails (e.g. while being written), returns `None`.
+pub fn check_theme_file_update(
+    path: &std::path::Path,
+    last_mtime: &mut Option<std::time::SystemTime>,
+) -> Option<Theme> {
+    let mtime = std::fs::metadata(path).ok()?.modified().ok()?;
+    if last_mtime.as_ref() == Some(&mtime) {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let theme = Theme::from_toml_str(&text).ok()?;
+    *last_mtime = Some(mtime);
+    Some(theme)
 }
 
 /// `$VISUAL` first, then `$EDITOR` — the conventional order.
@@ -1092,6 +1126,9 @@ pub async fn run(
     mut media_keys: mpsc::UnboundedReceiver<PlayerCommand>,
     config_path: std::path::PathBuf,
     mut theme_name: String,
+    mut custom_theme: Option<Theme>,
+    mut theme_file: Option<std::path::PathBuf>,
+    mut auto_reload_theme: bool,
 ) -> color_eyre::Result<u8> {
     use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind, MouseEventKind};
     use futures::StreamExt;
@@ -1102,6 +1139,12 @@ pub async fn run(
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(tick_ms.max(1)));
     let started = std::time::Instant::now();
     let mut debounce = SearchDebounce::default();
+    let mut last_theme_mtime = theme_file
+        .as_ref()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok());
+    let mut last_theme_check_ms: u64 = 0;
+    const THEME_CHECK_INTERVAL_MS: u64 = 1000;
     // `zz` spans two key presses, so the prefix has to live across iterations.
     let mut pending = ytm_tui::keymap::Pending::default();
     // Last left click, for double-click detection: (row index, millis). Crossterm
@@ -1212,9 +1255,17 @@ pub async fn run(
                             // reach: the live theme, and the terminal itself.
                             match a {
                                 InputAction::CycleTheme if state.modal.is_none() => {
-                                    theme_name = ytm_tui::theme::Theme::next_preset(&theme_name).to_owned();
-                                    theme = ytm_tui::theme::Theme::preset(&theme_name)
-                                        .unwrap_or_default();
+                                    theme_name = ytm_tui::theme::Theme::next_preset_with_custom(
+                                        &theme_name,
+                                        custom_theme.is_some(),
+                                    )
+                                    .to_owned();
+                                    theme = if theme_name == "custom" {
+                                        custom_theme.unwrap_or_default()
+                                    } else {
+                                        ytm_tui::theme::Theme::preset(&theme_name)
+                                            .unwrap_or_default()
+                                    };
                                     state.push_toast(
                                         ToastKind::Info,
                                         &format!("theme: {theme_name}"),
@@ -1228,6 +1279,13 @@ pub async fn run(
                                             theme = reloaded.theme;
                                             theme_name = reloaded.theme_name;
                                             behaviour = reloaded.behaviour;
+                                            custom_theme = reloaded.custom_theme;
+                                            theme_file = reloaded.theme_file;
+                                            auto_reload_theme = reloaded.auto_reload_theme;
+                                            last_theme_mtime = theme_file
+                                                .as_ref()
+                                                .and_then(|p| std::fs::metadata(p).ok())
+                                                .and_then(|m| m.modified().ok());
                                             state.push_toast(
                                                 ToastKind::Success,
                                                 "config reloaded",
@@ -1350,6 +1408,23 @@ pub async fn run(
                 let now_ms = started.elapsed().as_millis() as u64;
                 state.elapsed_ms = now_ms;
                 state.apply(AppEvent::Tick);
+                if auto_reload_theme
+                    && let Some(path) = &theme_file
+                    && now_ms.saturating_sub(last_theme_check_ms) >= THEME_CHECK_INTERVAL_MS
+                {
+                    last_theme_check_ms = now_ms;
+                    if let Some(new_theme) = check_theme_file_update(path, &mut last_theme_mtime) {
+                        custom_theme = Some(new_theme);
+                        if theme_name == "custom" {
+                            theme = new_theme;
+                            state.push_toast(
+                                ToastKind::Info,
+                                "theme: custom (reloaded)",
+                                state.elapsed_ms,
+                            );
+                        }
+                    }
+                }
                 if let Some(task) = search_tick(&mut debounce, &mut state, now_ms) {
                     try_spawn(task, &source, &app_tx, &mut state, cache_reader.as_ref());
                 }
@@ -3843,6 +3918,7 @@ mod tests {
         assert_eq!(c.behaviour.volume_step, d.behaviour.volume_step);
         assert_eq!(c.ui.tick_ms, d.ui.tick_ms);
         assert_eq!(c.ui.theme, d.ui.theme);
+        assert_eq!(c.ui.auto_reload_theme, d.ui.auto_reload_theme);
     }
 
     #[test]
@@ -3898,5 +3974,51 @@ mod tests {
         assert!(reload_config("[ui]\ntheme = \"no-such-theme\"").is_err());
         assert!(reload_config("this is not toml").is_err());
         assert!(reload_config("[behaviour]\nvolume_step = 0").is_err());
+    }
+
+    #[test]
+    fn reloading_config_includes_custom_theme_and_auto_reload_flag() {
+        let dir = std::env::temp_dir().join(format!("ytm-test-theme-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let theme_path = dir.join("theme.toml");
+        std::fs::write(&theme_path, "accent = \"#112233\"").unwrap();
+
+        let toml = format!(
+            "[ui]\ntheme_file = {:?}\nauto_reload_theme = true",
+            theme_path.to_str().unwrap()
+        );
+        let r = reload_config(&toml).expect("valid config with theme_file must reload");
+        assert_eq!(r.theme_name, "custom");
+        assert!(r.custom_theme.is_some());
+        assert_eq!(r.theme_file, Some(theme_path.clone()));
+        assert!(r.auto_reload_theme);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_file_update_detects_changes_and_ignores_unchanged_or_invalid() {
+        let dir = std::env::temp_dir().join(format!("ytm-theme-check-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("theme.toml");
+        std::fs::write(&path, "accent = \"#112233\"").unwrap();
+
+        let mut last_mtime = None;
+        let t1 = check_theme_file_update(&path, &mut last_mtime);
+        assert!(t1.is_some());
+        assert_eq!(
+            t1.unwrap().accent,
+            ratatui::style::Color::Rgb(0x11, 0x22, 0x33)
+        );
+
+        // Second check without modification returns None.
+        let t2 = check_theme_file_update(&path, &mut last_mtime);
+        assert!(t2.is_none());
+
+        // Partial / invalid write returns None without panicking.
+        std::fs::write(&path, "invalid toml {]").unwrap();
+        let t3 = check_theme_file_update(&path, &mut last_mtime);
+        assert!(t3.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

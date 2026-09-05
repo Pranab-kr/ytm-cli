@@ -699,6 +699,17 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
 
     // NOT awaited here — see `app_loop::run`'s `source_fut` parameter.
     let source_fut = build_source_or_guest(&cfg);
+    let theme_file = cfg.ui.theme_file.as_deref().map(config::expand_tilde);
+    let custom_theme = if theme_name == "custom" {
+        Some(theme)
+    } else if let Some(path) = &theme_file {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| ytm_tui::theme::Theme::from_toml_str(&t).ok())
+    } else {
+        None
+    };
+    let auto_reload_theme = cfg.ui.auto_reload_theme;
     let result = app_loop::run(
         &mut guard.terminal,
         state,
@@ -719,6 +730,9 @@ async fn run_tui(cfg: config::Config) -> color_eyre::Result<()> {
         media_keys,
         cfg.config_path.clone(),
         theme_name,
+        custom_theme,
+        theme_file,
+        auto_reload_theme,
     )
     .await;
 

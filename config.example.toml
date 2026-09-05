@@ -61,6 +61,8 @@ theme = "auto"
 # A full custom theme file wins over `theme` above. Keys: accent, fg, fg_dim,
 # fg_bright, bg_sel, error, success, and `preset` to start from a built-in.
 # theme_file = "~/.config/ytm-cli/theme.toml"
+# Automatically reload `theme_file` when it changes on disk.
+# auto_reload_theme = false
 
 [behaviour]
 seek_step_secs = 5    # how far f/b jump
