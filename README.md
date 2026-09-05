@@ -483,6 +483,7 @@ Override one role, or write a whole theme file:
 theme = "gruvbox"
 accent = "#fabd2f"
 # theme_file = "~/.config/ytm-cli/theme.toml"
+# auto_reload_theme = false  # automatically reload theme_file when it changes on disk
 ```
 
 A theme file takes `accent`, `fg`, `fg_dim`, `fg_bright`, `bg_sel`, `error`,
